@@ -1,0 +1,4 @@
+# Line endings: let git handle them (LF in repo, native on checkout).
+# This silences "LF will be replaced by CRLF" warnings by making the
+# behavior explicit instead of relying on core.autocrlf defaults.
+* text=auto
