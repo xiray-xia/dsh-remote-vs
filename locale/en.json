@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote VS",
+    "description": "VSCode-style remote development: SSH hosts (key/password), helper deploy pipeline with version check, remote files + editor + terminal in the sidebar."
+  }
+}

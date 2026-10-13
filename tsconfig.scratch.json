@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "outDir": ".spike/build",
+    "rootDir": ".",
+    "rewriteRelativeImportExtensions": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src", ".spike/p2-router.ts"]
+}
