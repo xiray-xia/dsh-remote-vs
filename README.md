@@ -1,15 +1,16 @@
 # dsh-remote-vs · DSH 远程开发（VSCode 式）
 
-Host 进程内的 SSH 主机管理 + helper 推送流水线 + 远端文件/终端/Git，
-UI 以独立 tab 注册进 `dsh-better-sidebar`（不改动其本地文件树）。
+Host 进程内的 SSH 主机管理 + helper 推送流水线 + 远端文件/终端/Git。
+主机配在 DSH 设置里（“远程主机”项）；装了 `dsh-better-sidebar` 时另有
+独立“远程”tab（工作区/文件/终端/Git），没装也不影响设置页与原生入口。
 P2 起原生工具在远端工作区里透明跑远端（见下）。
 
 ```text
-┌─ 本机 DSH Host ─────────────────────────────┐
-│  本插件 Host 半          │  Client 半（浏览器） │
-│  主机/密钥/推送/路由      │  远程 tab 五子视图    │
-│  /api/dsh-remote/*       │  原生入口接管        │
-└──────┬───────────────────┴───────────────────┘
+┌─ 本机 DSH Host ─────────────────────────────────┐
+│  本插件 Host 半      │  Client 半（浏览器）     │
+│  主机/密钥/推送/路由 │  设置两节 + 原生入口接管 │
+│  /api/dsh-remote/*   │  远程 tab（可选侧边栏）  │
+└──────────────────────┴──────────────────────────┘
        │ ssh2（文件/进程/终端）+ helper RPC（远端 fs）
        ▼
 ┌─ 远端 Linux ─────────────────────────────────┐
@@ -62,19 +63,26 @@ dsh_remote_vs/
 │   │   ├── router-spill.ts # 透明 spill 路由（session 世界键/远端目录）
 │   │   └── bridge.ts       # 私有 realm 本地三件套发布（localFs/…）
 │   └── client/             # ── 浏览器半（React，打包进 lib/client.js）──
-│       ├── index.tsx       # tab 注册 + 原生 directoryFlow 双槽接管
+│       ├── index.tsx       # tab 注册（可选侧边栏）+ 设置两节 + directoryFlow 双槽接管
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / FilesView
 │       ├── CodeEditor / TerminalView / XTerm / GitView / Dialog
+│       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表，自取数）
 │       ├── DirectoryFlow.tsx        # 原生入口 occupant（本地双模/远端向导）
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
 │       └── i18n.ts / theme.ts / ui.tsx # 双语词典/主题信号/共享样式
+├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/
 │   ├── P2-PLAN.md          # P2 架构/分期/验收矩阵（含逐项状态）
 │   └── MAINTENANCE.md      # DSH 升级影响面 + helper 升级流程（升级先读它）
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（gitignored，link 安装后重启即生效）
 ```
+
+`vendor/dsh-remote-helpers/`（入库）是 helper 种子：插件启动时自动铺到
+`$DSH_HOME/dsh-remote-helpers/`（缺啥补啥，永不覆盖），新机器装完即能推送。
+新版本 helper 编好后把 4 件套（tarball + sha256 + helper.json + 补丁说明）
+换进 vendor 并提交即可，见 `docs/MAINTENANCE.md` §4。
 
 `.spike/`（gitignored）是真机验证脚本：`p2-router.ts` 主回归（真远端 + 真
 Cordis + 真路由类）+ `grep-probe.mjs` 等探针，构建见 `tsconfig.scratch.json`。
