@@ -1,4 +1,4 @@
-# Line endings: let git handle them (LF in repo, native on checkout).
-# This silences "LF will be replaced by CRLF" warnings by making the
-# behavior explicit instead of relying on core.autocrlf defaults.
-* text=auto
+# Line endings: LF everywhere (repo and checkout). All files here are
+# consumed by LF-safe tools (node/tsc/pnpm/editors), so no CRLF conversion
+# ever happens and git stays silent.
+* text=auto eol=lf
