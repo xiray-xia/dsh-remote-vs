@@ -2,8 +2,9 @@
  * dsh-remote-vs — host half. Mounts the remote store ($DSH_HOME/dsh-remote.json),
  * the ssh2 connection pool, the /api/dsh-remote route family plus the terminal
  * WebSocket upgrade, the agent tools (remote_hosts, remote_exec, remote_ls,
- * remote_read, remote_write), an optional system-prompt announcement, and the
- * P2 transparent-routing world manager (remoteWorlds service + kill-switch).
+ * remote_read, remote_write), an optional system-prompt announcement, a
+ * per-session remote workspace-mapping context, and the P2
+ * transparent-routing world manager (remoteWorlds service + kill-switch).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -17,7 +18,7 @@ import { RemoteStore } from './store.ts'
 import { RemotePool } from './pool.ts'
 import { seedHelperCache } from './deploy.ts'
 import { makeRoutes } from './routes.ts'
-import { RemoteWorlds, type RoutingMode } from './p2/worlds.ts'
+import { RemoteWorlds, type RoutingMode, type WorldRoute } from './p2/worlds.ts'
 import {
   remoteExecTool,
   remoteHostsTool,
@@ -101,6 +102,39 @@ const TOOL_NAMES = ['remote_hosts', 'remote_exec', 'remote_ls', 'remote_read', '
 
 const GUIDANCE = '本机已安装 dsh-remote-vs 插件（DSH 远程开发）：侧边栏「远程」tab 管理 SSH 主机与远端工作区。能力：主机配置存 $DSH_HOME/dsh-remote.json（证书/密码，与 dsh-ssh.json 独立）；remote_hosts 列出主机、remote_exec 执行远程命令、remote_ls/remote_read/remote_write 经 SFTP 读写远端文件；推送流水线做版本比对后推送 helper 可执行文件；Remote 预设提供远端 bash 工具集。限制：主机必须先在 GUI 里配好，agent 不可建主机；密码明文存于 0600 私有文件；远端输出原样返回，可能含敏感信息；只支持直连主机（跳板机/代理命令未排期）。'
 
+/**
+ * Per-session remote mapping block (dynamic runtime context provider).
+ * Remote sessions under enforce get their alias→host→root mapping next to
+ * the cwd block; everything else (local route, off/shadow mode, tombstoned
+ * binding, missing host entry details) answers '' — empty text contributes
+ * nothing, so local sessions stay noise-free.
+ *
+ * Evaluated at every assembly: sync memory reads only (mode flag, route
+ * table scan, store maps — no I/O, no RPC), and it must never throw (an
+ * assembly provider throwing fails the model step — callers wrap in
+ * try/catch and treat any error as '').
+ */
+function workspaceMappingText(worlds: RemoteWorlds, store: RemoteStore, cwd: string): string {
+  if (worlds.mode !== 'enforce') return ''
+  let route: WorldRoute
+  try {
+    route = worlds.routeDir(cwd)
+  } catch {
+    return ''
+  }
+  if (route.kind !== 'remote') return ''
+  const entry = store.get(route.alias)
+  const host = entry !== undefined
+    ? `${route.alias} (${entry.user}@${entry.host}:${entry.port})`
+    : `${route.alias} (host entry missing)`
+  return [
+    `Remote workspace (transparent execution ON): session cwd ${route.aliasPath} is an empty local alias; tools resolve here:`,
+    `- host: ${host}`,
+    `- remote root: ${route.remotePath}`,
+    'Relative paths and POSIX absolutes run on the remote host; the alias dir holds no real files.',
+  ].join('\n')
+}
+
 export function apply(ctx: Context, config?: ResolvedConfig): void {
   const store = new RemoteStore()
   const pool = new RemotePool(store)
@@ -136,6 +170,35 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   } catch {
     // Best-effort only.
   }
+  // Per-session remote mapping (dynamic runtime context, global provider —
+  // the working-directory:current pattern): sits right under the cwd block
+  // (100), required like it (the pair must survive runtime-context opt-out
+  // together), literal text. The provider filters by agent at assembly;
+  // local sessions see nothing. Deliberately NOT gated by announceToAgent
+  // (that flag is plugin advertisement; the mapping is operational).
+  ctx.effect(() => ctx.systemPrompt.context({
+    name: 'remote-vs:workspace-mapping',
+    order: 105,
+    required: true,
+    interpolate: false,
+    text: (context) => {
+      try {
+        const session = context.agent?.session
+        if (session === undefined) return ''
+        const workingDirectory = ctx.get('workingDirectory')
+        if (workingDirectory === undefined) return ''
+        let cwd: string
+        try {
+          cwd = workingDirectory.get(session)
+        } catch {
+          return ''
+        }
+        return workspaceMappingText(worlds, store, cwd)
+      } catch {
+        return ''
+      }
+    },
+  }), 'dsh-remote-vs: workspace mapping')
 
   const resolve = (): { announceToAgent: boolean; enabled: boolean } => ({
     announceToAgent: readField(config?.announceToAgent, false),

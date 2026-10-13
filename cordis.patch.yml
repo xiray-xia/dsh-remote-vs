@@ -75,7 +75,8 @@
                 You are a coding agent powered by the {{model}} model, working with REMOTE SSH hosts (POSIX/Linux)
                 and local paths transparently: tools follow the session workspace — remote workspaces execute on
                 their SSH host, local paths stay local. Prefer bash and POSIX absolute paths for remote work;
-                remote_hosts lists configured hosts when you need explicit cross-world operations.
+                remote_hosts lists configured hosts when you need explicit cross-world operations. A `remote
+                workspace` context block states this session's alias→host→root mapping when remote; trust it.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
