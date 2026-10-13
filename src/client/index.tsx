@@ -36,7 +36,7 @@ function RemoteIcon({ size }: { size?: number }): React.ReactNode {
   )
 }
 
-function RemoteRoot(): React.ReactNode {
+function RemoteRoot(props: { ctx: Context }): React.ReactNode {
   const [t] = useState(() => makeT(detectLang()))
   const [tab, setTab] = useState<SubTab>(() => {
     try {
@@ -127,7 +127,9 @@ function RemoteRoot(): React.ReactNode {
       <div style={{ flex: 1, minHeight: 0, display: tab === 'files' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
         <FilesView
           t={t}
+          ctx={props.ctx}
           workspaces={workspaces}
+          aliasPaths={routing.aliasPaths}
           openWorkspaceId={filesWorkspaceId}
           onWorkspaceOpened={() => setFilesWorkspaceId(undefined)}
           visible={tab === 'files'}
@@ -176,7 +178,7 @@ export function apply(ctx: Context): void {
           icon: (size: number) => <RemoteIcon size={size} />,
           order: 30,
           single: true,
-          component: () => <RemoteRoot />,
+          component: () => <RemoteRoot ctx={ctx} />,
         })
       } catch {
         return false
