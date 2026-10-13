@@ -101,6 +101,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-settings':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)
+      '@deepseek-ai/dsh-client-ui-sidebar-right':
+        specifier: 0.2.1-alpha.2
+        version: 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)
@@ -166,7 +169,7 @@ importers:
         version: 8.18.2
       dsh-better-sidebar:
         specifier: ^0.25.0
-        version: 0.25.0(32fa58cda060c204f774521005ebeb95)
+        version: 0.25.0(253bdea236ceba2f8b8ef6de2132ab4c)
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -440,6 +443,11 @@ packages:
 
   '@deepseek-ai/dsh-client-ui-settings@0.2.1-alpha.2':
     resolution: {integrity: sha512-kVNTzpbNwQsxc7V8BO5+Ycs+ZQQxg+0KQV1IDrocec1v4OvdAkfS47G15q0on5tBe8mpynFNXSroLr0zgED0UQ==}
+    peerDependencies:
+      '@deepseek-ai/cordis': 4.0.5-alpha.1
+
+  '@deepseek-ai/dsh-client-ui-sidebar-right@0.2.1-alpha.2':
+    resolution: {integrity: sha512-q4J6LNwW9aynHbZ9xCeYi+ACcYPZoH/x+ZCUFlu4HlBbquYrNN7XiuGvj/GQvUA+HrAGoGyytTGG4lDdY7Za5Q==}
     peerDependencies:
       '@deepseek-ai/cordis': 4.0.5-alpha.1
 
@@ -2355,6 +2363,10 @@ snapshots:
       '@deepseek-ai/cordis': 4.0.5-alpha.1(@deepseek-ai/cordis-plugin-include@1.0.10-alpha.1)(@deepseek-ai/cordis-plugin-loader@1.0.6-alpha.1)
       '@deepseek-ai/schemastery': 3.18.4
 
+  '@deepseek-ai/dsh-client-ui-sidebar-right@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)':
+    dependencies:
+      '@deepseek-ai/cordis': 4.0.5-alpha.1(@deepseek-ai/cordis-plugin-include@1.0.10-alpha.1)(@deepseek-ai/cordis-plugin-loader@1.0.6-alpha.1)
+
   '@deepseek-ai/dsh-client-ui-slots@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)':
     dependencies:
       '@deepseek-ai/cordis': 4.0.5-alpha.1(@deepseek-ai/cordis-plugin-include@1.0.10-alpha.1)(@deepseek-ai/cordis-plugin-loader@1.0.6-alpha.1)
@@ -3455,7 +3467,7 @@ snapshots:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
-  dsh-better-sidebar@0.25.0(32fa58cda060c204f774521005ebeb95):
+  dsh-better-sidebar@0.25.0(253bdea236ceba2f8b8ef6de2132ab4c):
     dependencies:
       '@codemirror/commands': 6.11.1
       '@codemirror/lang-cpp': 6.0.3
@@ -3505,6 +3517,8 @@ snapshots:
       rxjs: 7.8.2
       ws: 8.22.0
       yaml: 2.9.1
+    optionalDependencies:
+      '@deepseek-ai/dsh-client-ui-sidebar-right': 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
