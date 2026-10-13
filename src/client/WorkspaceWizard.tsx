@@ -8,7 +8,7 @@ import { useState, type ReactNode } from 'react'
 import type { RemoteHostSummary, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { RemoteDirectoryPicker } from './RemoteDirectoryPicker.tsx'
-import { Btn, Field, Notice, Row, hairline, inputStyle } from './ui.tsx'
+import { Btn, Field, Notice, Row, hairline, inputStyle, optionStyle, selectStyle } from './ui.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -132,9 +132,9 @@ export function WorkspaceWizard(props: {
           value={alias}
           disabled={disabled || props.hosts.length === 0}
           onChange={(e) => pick(e.target.value)}
-          style={{ ...inputStyle, width: 'auto', flex: 1 }}
+          style={{ ...selectStyle, padding: '4px 8px', fontSize: 13, width: 'auto', flex: 1 }}
         >
-          {props.hosts.map((h) => <option key={h.alias} value={h.alias}>{h.alias} ({h.user}@{h.host})</option>)}
+          {props.hosts.map((h) => <option key={h.alias} value={h.alias} style={optionStyle}>{h.alias} ({h.user}@{h.host})</option>)}
         </select>
         <Btn onClick={runTest} disabled={disabled || alias === ''}>
           {busy === 'test' ? t('hosts.testing') : t('hosts.test')} {tested ? '✓' : ''}

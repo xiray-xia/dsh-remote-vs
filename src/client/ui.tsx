@@ -20,6 +20,30 @@ export const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
 }
 
+/**
+ * Native dropdown that follows the DSH theme in BOTH states: the closed box
+ * uses the translucent surface, while the open option popup (which Chrome
+ * renders from `color-scheme`, ignoring translucent backgrounds) gets
+ * explicit Canvas colors + a declared scheme so dark theme stays readable.
+ */
+export const selectStyle: CSSProperties = {
+  background: 'rgba(127,127,127,.12)',
+  color: 'inherit',
+  border: '1px solid rgba(127,127,127,.35)',
+  borderRadius: 6,
+  padding: '3px 8px',
+  fontSize: 12,
+  fontFamily: 'inherit',
+  outline: 'none',
+  colorScheme: 'light dark',
+}
+
+/** Option rows of the open popup: explicit theme-following colors. */
+export const optionStyle: CSSProperties = {
+  backgroundColor: 'Canvas',
+  color: 'CanvasText',
+}
+
 export const btnStyle: CSSProperties = {
   background: 'rgba(127,127,127,.15)',
   color: 'inherit',

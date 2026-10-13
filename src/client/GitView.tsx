@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { GitBranch, GitCommit, GitShow, GitStatus, RemoteWorkspaceBinding } from '../protocol.ts'
 import { GIT_LOG_MAX } from '../git-format.ts'
 import { RemoteApiError, api } from './api.ts'
-import { Btn, Notice, Row } from './ui.tsx'
+import { Btn, Notice, Row, optionStyle, selectStyle } from './ui.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -248,9 +248,9 @@ export function GitView(props: { t: (k: string) => string; workspaces: RemoteWor
           <select
             value={workspace.id}
             onChange={(e) => { setWsId(e.target.value); setFilter('') }}
-            style={{ background: 'rgba(127,127,127,.12)', color: 'inherit', border: '1px solid rgba(127,127,127,.35)', borderRadius: 6, padding: '3px 8px', fontSize: 12, flex: 1 }}
+            style={{ ...selectStyle, flex: 1 }}
           >
-            {props.workspaces.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.alias}:{w.remotePath})</option>)}
+            {props.workspaces.map((w) => <option key={w.id} value={w.id} style={optionStyle}>{w.name} ({w.alias}:{w.remotePath})</option>)}
           </select>
           <Btn onClick={refresh} disabled={loading}>{t('git.refresh')}</Btn>
         </Row>

@@ -285,7 +285,7 @@ export class RemotePool {
         } catch {
           // Ignore.
         }
-        reject(error)
+        reject(explainAuthError(host, error))
       }
       conn.on('ready', () => {
         if (settled) return
@@ -293,9 +293,21 @@ export class RemotePool {
         resolve(conn)
       })
       conn.on('error', (error: Error) => fail(error))
-      conn.on('keyboard-interactive', (_name, _instructions, _lang, _prompts, finish) => {
-        // Batch-style auth only: never answer interactive prompts.
-        fail(new Error('server requested keyboard-interactive auth (unsupported; use key or password auth)'))
+      conn.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
+        // Password entries answer a single hidden prompt (the standard
+        // password challenge shape) with the stored password — many servers
+        // offer keyboard-interactive instead of (or after) plain password.
+        // Anything else (multi-prompt 2FA, visible echo) stays unsupported.
+        const password = host.auth.kind === 'password' ? host.auth.password : undefined
+        if (password !== undefined && prompts.length === 1 && prompts[0]?.echo === false) {
+          try {
+            finish([password])
+          } catch {
+            // Channel raced away; the error handler reports it.
+          }
+          return
+        }
+        fail(new Error('server requested keyboard-interactive auth (unsupported shape; use key auth or a password challenge)'))
         try {
           finish([])
         } catch {
@@ -334,6 +346,7 @@ export class RemotePool {
             port: host.port,
             username: host.user,
             password: host.auth.password,
+            tryKeyboard: true,
             readyTimeout: READY_TIMEOUT_MS,
             keepaliveInterval: 30_000,
             keepaliveCountMax: 3,
@@ -345,6 +358,24 @@ export class RemotePool {
       }
     })
   }
+}
+
+/**
+ * Translate ssh2's generic auth failure into something actionable. Never
+ * includes secrets — only the entry shape and the likely server-side causes.
+ */
+function explainAuthError(host: RemoteHostEntry, error: Error): Error {
+  if (host.auth.kind !== 'password' || !/authentication methods failed/i.test(error.message)) {
+    return error
+  }
+  const hints = [
+    'verify the password (it may have changed/expired)',
+    'many servers only offer keyboard-interactive (now auto-answered — retry the test)',
+  ]
+  if (host.user === 'root') {
+    hints.push('OpenSSH 7+ defaults prohibit password login for root (PermitRootLogin); use a non-root user or switch to key auth')
+  }
+  return new Error(`${error.message} — password rejected by the server; ${hints.join('; ')}`)
 }
 
 /** Append with a 2 MiB cap and a truncation marker. */

@@ -7,7 +7,7 @@ import type { RemoteFileEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle } from './CodeEditor.tsx'
 import { InputDialog } from './Dialog.tsx'
-import { Btn, Notice, Row, hairline } from './ui.tsx'
+import { Btn, Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -400,9 +400,9 @@ export function FilesView(props: {
         <select
           value={effectiveWsId}
           onChange={(e) => { setWsId(e.target.value); setSelected(undefined) }}
-          style={{ ...{ background: 'rgba(127,127,127,.12)', color: 'inherit', border: '1px solid rgba(127,127,127,.35)', borderRadius: 6, padding: '3px 8px', fontSize: 12 }, flex: 1 }}
+          style={{ ...selectStyle, flex: 1 }}
         >
-          {props.workspaces.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.alias}:{w.remotePath})</option>)}
+          {props.workspaces.map((w) => <option key={w.id} value={w.id} style={optionStyle}>{w.name} ({w.alias}:{w.remotePath})</option>)}
         </select>
       </Row>
       {notice !== undefined && <Notice kind="info">{notice}</Notice>}

@@ -6,7 +6,7 @@ import { useState, type ReactNode } from 'react'
 import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
-import { Btn, Notice, Row } from './ui.tsx'
+import { Btn, Notice, Row, optionStyle, selectStyle } from './ui.tsx'
 
 function sessionStoreKey(alias: string): string {
   return `dsh-remote-vs.term.${alias}`
@@ -102,9 +102,9 @@ export function TerminalView(props: { t: (k: string) => string; hosts: RemoteHos
           value={effectiveAlias}
           disabled={connected || props.hosts.length === 0}
           onChange={(e) => setAlias(e.target.value)}
-          style={{ background: 'rgba(127,127,127,.12)', color: 'inherit', border: '1px solid rgba(127,127,127,.35)', borderRadius: 6, padding: '3px 8px', fontSize: 12, flex: 1 }}
+          style={{ ...selectStyle, flex: 1 }}
         >
-          {props.hosts.map((h) => <option key={h.alias} value={h.alias}>{h.alias} ({h.user}@{h.host})</option>)}
+          {props.hosts.map((h) => <option key={h.alias} value={h.alias} style={optionStyle}>{h.alias} ({h.user}@{h.host})</option>)}
         </select>
         {!connected ? (
           <Btn kind="primary" onClick={() => connect(false)} disabled={effectiveAlias === ''}>{t('term.connect')}</Btn>

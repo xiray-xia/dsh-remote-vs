@@ -65,8 +65,11 @@ function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 /** Raise a friendly git error for a failed exec result. */
-function throwIfGitFailed(r: RemoteExecResult): void {
+function throwIfGitFailed(r: RemoteExecResult, timeoutMs: number): void {
   if (r.success) return
+  if (r.timedOut) {
+    throw new RemoteApiError(502, `git timed out after ${Math.round(timeoutMs / 1000)}s (big/slow repo — retry, it may be warm now)`)
+  }
   const friendly = gitFailed(r.stderr)
   throw new RemoteApiError(502, friendly ?? (r.stderr.trim() || r.error || `git failed [exit code: ${r.exitCode}]`))
 }
@@ -140,29 +143,30 @@ export const api = {
   // -- terminal
   terminalClose: (id: string) => post<{ ok: boolean }>(REMOTE_API.terminalClose, { id }),
   // -- git (over the exec route; parsed in the browser, no host changes)
+  // Generous timeout: status/log on huge trees (cold cache) routinely exceed 30s.
   git: {
     async status(alias: string, path: string): Promise<GitStatus> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statusCommand(path), timeoutMs: 30_000 })
-      throwIfGitFailed(r)
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statusCommand(path), timeoutMs: 120_000 })
+      throwIfGitFailed(r, 120_000)
       return parseStatus(r.stdout)
     },
     async log(alias: string, path: string, max: number, branch?: string): Promise<GitCommit[]> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: logCommand(path, max, branch), timeoutMs: 30_000 })
-      throwIfGitFailed(r)
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: logCommand(path, max, branch), timeoutMs: 120_000 })
+      throwIfGitFailed(r, 120_000)
       return parseLog(r.stdout)
     },
     async branches(alias: string, path: string, current: string): Promise<GitBranch[]> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: branchesCommand(path), timeoutMs: 30_000 })
-      throwIfGitFailed(r)
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: branchesCommand(path), timeoutMs: 60_000 })
+      throwIfGitFailed(r, 60_000)
       return parseBranches(r.stdout, current)
     },
     async show(alias: string, path: string, ref: string): Promise<GitShow> {
       const [message, stat] = await Promise.all([
-        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: messageCommand(path, ref), timeoutMs: 30_000 }),
-        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statCommand(path, ref), timeoutMs: 30_000 }),
+        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: messageCommand(path, ref), timeoutMs: 60_000 }),
+        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statCommand(path, ref), timeoutMs: 60_000 }),
       ])
-      throwIfGitFailed(message)
-      throwIfGitFailed(stat)
+      throwIfGitFailed(message, 60_000)
+      throwIfGitFailed(stat, 60_000)
       return parseShow(ref, message.stdout, stat.stdout)
     },
   },
