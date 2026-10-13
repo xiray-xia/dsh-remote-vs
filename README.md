@@ -2,14 +2,15 @@
 
 Host 进程内的 SSH 主机管理 + helper 推送流水线 + 远端文件/终端/Git。
 主机配在 DSH 设置里（“远程主机”项）；装了 `dsh-better-sidebar` 时另有
-独立“远程”tab（工作区/文件/终端/Git），没装也不影响设置页与原生入口。
+独立“远程”tab（工作区/文件/终端/Git），没装则退到原生右侧栏“远程”页
+（同内容，引导页自助开，per-session 实例）。
 P2 起原生工具在远端工作区里透明跑远端（见下）。
 
 ```text
 ┌─ 本机 DSH Host ─────────────────────────────────┐
 │  本插件 Host 半      │  Client 半（浏览器）     │
 │  主机/密钥/推送/路由 │  设置两节 + 原生入口接管 │
-│  /api/dsh-remote/*   │  远程 tab（可选侧边栏）  │
+│  /api/dsh-remote/*   │  远程页(双面二选一)      │
 └──────────────────────┴──────────────────────────┘
        │ ssh2（文件/进程/终端）+ helper RPC（远端 fs）
        ▼
@@ -67,7 +68,10 @@ dsh_remote_vs/
 │   │   ├── bridge.ts       # 私有 realm 本地件发布（localFs 等早期服务）
 │   │   └── bridge-refs.ts  # refs 独立桥（local-refs 依赖 workingDirectory，必须分离）
 │   └── client/             # ── 浏览器半（React，打包进 lib/client.js）──
-│       ├── index.tsx       # tab 注册（可选侧边栏）+ 设置两节 + directoryFlow 双槽接管
+│       ├── index.tsx       # 双面决策（better 优先/settle 加速/原生兜底）+ 设置两节 + directoryFlow 双槽接管
+│       ├── RemoteRoot.tsx    # 双面共用根（工作区/文件/终端/Git 四子页）
+│       ├── NativeExplorer.tsx# 原生页类型定义 + seat 正文（无 sidebar 兜底）
+│       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # 远端 @引用/选中加对话
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / FilesView
 │       ├── CodeEditor / TerminalView / XTerm / GitView / Dialog

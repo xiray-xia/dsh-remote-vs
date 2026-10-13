@@ -111,6 +111,9 @@ const zh: Record<string, string> = {
   'route.aliasPath': '本地别名目录（原生工作区入口）',
   'settings.hosts': '远程主机',
   'settings.workspaces': '远程工作区',
+  'native.tab': '远程',
+  'native.guide.title': '远程',
+  'native.guide.desc': '远端文件、终端与 Git',
 }
 
 const en: Record<string, string> = {
@@ -221,6 +224,9 @@ const en: Record<string, string> = {
   'route.aliasPath': 'Local alias dir (native workspace entry)',
   'settings.hosts': 'Remote hosts',
   'settings.workspaces': 'Remote workspaces',
+  'native.tab': 'Remote',
+  'native.guide.title': 'Remote',
+  'native.guide.desc': 'Remote files, terminal and Git',
 }
 
 export type Lang = 'zh' | 'en'
