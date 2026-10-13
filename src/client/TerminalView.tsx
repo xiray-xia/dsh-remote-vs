@@ -115,6 +115,9 @@ export function TerminalView(props: { t: (k: string) => string; hosts: RemoteHos
           </>
         )}
       </Row>
+      {props.hosts.length === 0 && (
+        <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>{t('term.noHosts')}</div>
+      )}
       {error !== undefined && <Notice kind="error">{error}</Notice>}
       {exitMsg !== undefined && !connected && <Notice kind="info">{exitMsg}</Notice>}
       </div>

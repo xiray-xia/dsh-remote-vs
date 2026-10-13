@@ -1,11 +1,13 @@
 /**
  * Client half of dsh-remote-vs (Turn C): the `remote-vs:explorer` tab with
- * five sub-views (hosts / workspaces / files / terminal / git) over /api/dsh-remote.
+ * four sub-views (workspaces / files / terminal / git) over /api/dsh-remote.
+ * Host management lives in the DSH Settings dialog (`settings.section` entry).
  * Phase 4 also shadows the native directory-flow holes (Local/Remote dialog).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from 'dsh-better-sidebar'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { useCallback, useEffect, useState } from 'react'
 import type { RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts'
@@ -13,16 +15,16 @@ import { RemoteApiError, api } from './api.ts'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
 import { FilesView } from './FilesView.tsx'
 import { GitView } from './GitView.tsx'
-import { HostsView } from './HostsView.tsx'
+import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { Notice } from './ui.tsx'
 
-/** Services required before mounting (betterSidebar comes from that plugin's client half). */
-export const inject = ['betterSidebar', 'slots', 'uiWorkspace']
+/** Services required before mounting (slots/uiWorkspace are core web services). */
+export const inject = ['slots', 'uiWorkspace']
 
-type SubTab = 'hosts' | 'workspaces' | 'files' | 'terminal' | 'git'
+type SubTab = 'workspaces' | 'files' | 'terminal' | 'git'
 
 function RemoteIcon({ size }: { size?: number }): React.ReactNode {
   const s = size ?? 16
@@ -39,9 +41,10 @@ function RemoteRoot(): React.ReactNode {
   const [tab, setTab] = useState<SubTab>(() => {
     try {
       const saved = localStorage.getItem('dsh-remote-vs.tab')
-      return saved === 'workspaces' || saved === 'files' || saved === 'terminal' || saved === 'git' ? saved : 'hosts'
+      // 'hosts' was removed (moved to Settings); fall through to workspaces.
+      return saved === 'files' || saved === 'terminal' || saved === 'git' ? saved : 'workspaces'
     } catch {
-      return 'hosts'
+      return 'workspaces'
     }
   })
   const [hosts, setHosts] = useState<RemoteHostSummary[]>([])
@@ -76,7 +79,6 @@ function RemoteRoot(): React.ReactNode {
   }
 
   const tabs: { id: SubTab; label: string }[] = [
-    { id: 'hosts', label: t('tab.hosts') },
     { id: 'workspaces', label: `${t('tab.workspaces')} (${workspaces.length})` },
     { id: 'files', label: t('tab.files') },
     { id: 'terminal', label: t('tab.terminal') },
@@ -109,9 +111,6 @@ function RemoteRoot(): React.ReactNode {
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* All views stay mounted (state survives sub-tab switches); only the
           active one is displayed. Canvas views (editor/terminal) refit on show. */}
-      <div style={{ flex: 1, minHeight: 0, display: tab === 'hosts' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
-        <HostsView t={t} hosts={hosts} onChanged={refresh} />
-      </div>
       <div style={{ flex: 1, minHeight: 0, display: tab === 'workspaces' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
         <WorkspacesView
           t={t}
@@ -147,15 +146,58 @@ function RemoteRoot(): React.ReactNode {
 
 /** Client plugin body. */
 export function apply(ctx: Context): void {
-  ctx.effect(() => ctx.betterSidebar.registerTab({
-    id: 'remote-vs:explorer',
-    title: () => '远程',
-    description: () => '远端主机、文件与终端',
-    icon: (size: number) => <RemoteIcon size={size} />,
-    order: 30,
-    single: true,
-    component: () => <RemoteRoot />,
-  }), 'dsh-remote-vs: explorer tab')
+  // Explorer tab: only when better-sidebar is installed. No load-order edge
+  // exists (client inject metadata is prefetch-only), so poll briefly for a
+  // late arrival; give up quietly — directoryFlow + settings work standalone.
+  ctx.effect(() => {
+    let disposeTab: (() => void) | undefined
+    let tries = 0
+    const attempt = (): boolean => {
+      let sidebar: { registerTab: (def: {
+        id: string
+        title: () => string
+        description: () => string
+        icon: (size: number) => React.ReactNode
+        order: number
+        single: boolean
+        component: () => React.ReactNode
+      }) => () => void } | undefined
+      try {
+        sidebar = ctx.get('betterSidebar') ?? undefined
+      } catch {
+        return false
+      }
+      if (sidebar === undefined) return false
+      try {
+        disposeTab = sidebar.registerTab({
+          id: 'remote-vs:explorer',
+          title: () => '远程',
+          description: () => '远端文件、终端与 Git',
+          icon: (size: number) => <RemoteIcon size={size} />,
+          order: 30,
+          single: true,
+          component: () => <RemoteRoot />,
+        })
+      } catch {
+        return false
+      }
+      return true
+    }
+    if (!attempt()) {
+      const timer = setInterval(() => {
+        tries += 1
+        if (attempt() || tries >= 60) clearInterval(timer)
+      }, 500)
+      timer.unref?.()
+      return () => {
+        clearInterval(timer)
+        disposeTab?.()
+      }
+    }
+    return () => {
+      disposeTab?.()
+    }
+  }, 'dsh-remote-vs: explorer tab (optional sidebar)')
   // Phase 4: shadow the stock directory picker in both directory-flow holes
   // (single-kind shadowing: lowest priority renders; stock sits at 0).
   // Nested slots.inject because the ui-workspace entries may activate later
@@ -180,4 +222,25 @@ export function apply(ctx: Context): void {
       }, RemoteDirectoryFlow)
     }),
   ), 'dsh-remote-vs: directory flow')
+  // Host management lives in the Settings dialog (list slot: additive, order
+  // 20 lands after the stock sections). Self-fetching section, no inject face.
+  const settingsT = makeT(detectLang())
+  ctx.effect(() => ctx.slots.inject(
+    'settings.section',
+    () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'remote-hosts',
+      order: 20,
+      label: () => settingsT('settings.hosts'),
+    }, SettingsHostsSection),
+  ), 'dsh-remote-vs: settings hosts')
+  ctx.effect(() => ctx.slots.inject(
+    'settings.section',
+    () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'remote-workspaces',
+      order: 21,
+      label: () => settingsT('settings.workspaces'),
+    }, SettingsWorkspacesSection),
+  ), 'dsh-remote-vs: settings workspaces')
 }
