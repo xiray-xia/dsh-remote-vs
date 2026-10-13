@@ -3,9 +3,12 @@
  * tabs (CodeMirror) + new/rename/delete with inline dialogs.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import type { Context } from '@deepseek-ai/cordis'
 import type { RemoteFileEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle } from './CodeEditor.tsx'
+import { insertRemoteReference, sameLocalDir } from './composer.ts'
+import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { InputDialog } from './Dialog.tsx'
 import { Btn, Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
 
@@ -40,9 +43,53 @@ interface OpenFile {
 
 const WS_STORE = 'dsh-remote-vs.files.ws'
 
+/**
+ * Row-level `@file` insertion (the local explorer's hover button twin).
+ * Disabled while no session is on screen or the on-screen session lives in
+ * another workspace — a remote-relative mention would name nothing there.
+ */
+function RefButton(props: {
+  label: string
+  disabledTitle: string | undefined
+  onReference: () => void
+}): ReactNode {
+  const disabled = props.disabledTitle !== undefined
+  return (
+    <button
+      type="button"
+      aria-label={props.label}
+      title={disabled ? props.disabledTitle : props.label}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation()
+        if (!disabled) props.onReference()
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.opacity = disabled ? '0.35' : '1' }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = disabled ? '0.35' : '0.55' }}
+      style={{
+        marginLeft: 'auto',
+        flex: 'none',
+        background: 'rgba(77,107,254,.15)',
+        border: '1px solid rgba(77,107,254,.45)',
+        borderRadius: 4,
+        color: 'inherit',
+        fontSize: 11,
+        padding: '0 6px',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.35 : 0.55,
+      }}
+    >
+      {props.label}
+    </button>
+  )
+}
+
 export function FilesView(props: {
   t: (k: string) => string
+  ctx: Context
   workspaces: RemoteWorkspaceBinding[]
+  /** Binding id -> materialized local alias dir (the session↔binding gate). */
+  aliasPaths: Record<string, string>
   openWorkspaceId: string | undefined
   onWorkspaceOpened: () => void
   visible: boolean
@@ -82,6 +129,19 @@ export function FilesView(props: {
 
   const workspace = props.workspaces.find((w) => w.id === wsId) ?? props.workspaces[0]
   const effectiveWsId = workspace?.id ?? ''
+
+  // Chat target gate: reference insertion is only meaningful when the
+  // on-screen session belongs to the viewed binding (same alias dir) — a
+  // remote-relative mention names nothing anywhere else.
+  const chatTarget = useRemoteChatTarget(props.ctx)
+  const viewedAliasPath = workspace !== undefined ? props.aliasPaths[workspace.id] : undefined
+  const chatEnabled = chatTarget.sessionId !== undefined
+    && chatTarget.sessionWorkspacePath !== undefined
+    && viewedAliasPath !== undefined
+    && sameLocalDir(chatTarget.sessionWorkspacePath, viewedAliasPath)
+  const refDisabledTitle = chatTarget.sessionId === undefined
+    ? t('files.refDisabledNoSession')
+    : (!chatEnabled ? t('files.refDisabledMismatch') : undefined)
 
   // Deep link from the workspaces view ("open files").
   useEffect(() => {
@@ -347,7 +407,7 @@ export function FilesView(props: {
   const treePct = `${Math.round(treeRatio * 1000) / 10}%`
   const dividerActive = dividerHot || dragging
 
-  const renderTree = (alias: string, dir: string, depth: number): ReactNode => {
+  const renderTree = (alias: string, dir: string, depth: number, remoteRoot: string): ReactNode => {
     const key = dirKey(alias, dir)
     const rows = listings[key]
     if (loadingDirs.has(key) && rows === undefined) {
@@ -382,9 +442,17 @@ export function FilesView(props: {
               >
                 <span style={{ width: 12, opacity: entry.isDir ? 1 : 0 }}>{isOpen ? '▾' : '▸'}</span>
                 <span>{entry.isDir ? '📁' : entry.isSymlink ? '🔗' : '📄'}</span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.name}</span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{entry.name}</span>
+                <RefButton
+                  label={t('files.referenceFile')}
+                  disabledTitle={refDisabledTitle}
+                  onReference={() => {
+                    if (chatTarget.sessionId === undefined) return
+                    insertRemoteReference(props.ctx, chatTarget.sessionId, remoteRoot, entry.path, entry.isDir)
+                  }}
+                />
               </div>
-              {entry.isDir && isOpen && renderTree(alias, entry.path, depth + 1)}
+              {entry.isDir && isOpen && renderTree(alias, entry.path, depth + 1, remoteRoot)}
             </div>
           )
         })}
@@ -420,10 +488,18 @@ export function FilesView(props: {
       <div style={filesOpen
         ? { ...hairline, marginTop: 8, paddingTop: 6, flex: 'none', height: treePct, minHeight: 60, overflow: 'auto' }
         : { ...hairline, marginTop: 8, paddingTop: 6, flex: 1, minHeight: 120, overflow: 'auto' }}>
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>
-          <code>{workspace.alias}:{workspace.remotePath}</code>
+        <div style={{ fontSize: 12, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <code style={{ opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{workspace.alias}:{workspace.remotePath}</code>
+          <RefButton
+            label={t('files.referenceFile')}
+            disabledTitle={refDisabledTitle}
+            onReference={() => {
+              if (chatTarget.sessionId === undefined) return
+              insertRemoteReference(props.ctx, chatTarget.sessionId, workspace.remotePath, workspace.remotePath, true)
+            }}
+          />
         </div>
-        {renderTree(workspace.alias, workspace.remotePath, 0)}
+        {renderTree(workspace.alias, workspace.remotePath, 0, workspace.remotePath)}
       </div>
       {filesOpen && (
         <div
@@ -490,6 +566,11 @@ export function FilesView(props: {
                       path={active.path}
                       readOnly={active.truncated}
                       visible={props.visible}
+                      ctx={props.ctx}
+                      sessionId={chatTarget.sessionId}
+                      remoteRoot={workspace.remotePath}
+                      chatEnabled={chatEnabled}
+                      addLabel={t('files.addToConversation')}
                       onSave={saveActive}
                       onDirty={(dirty) => setOpen((prev) => prev.map((f) => (f.key === active.key ? { ...f, dirty } : f)))}
                     />
