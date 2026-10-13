@@ -1,0 +1,14 @@
+packages:
+  - .
+
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  cpu-features: false
+  koffi: false
+  node-pty: false
+  ssh2: false
+
+overrides:
+  '@deepseek-ai/schemastery': '3.18.4'
+  '@deepseek-ai/cosmokit': '1.8.5'
+  '@deepseek-ai/cordis': '4.0.5-alpha.1'
