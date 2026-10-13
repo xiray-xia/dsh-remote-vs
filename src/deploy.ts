@@ -9,8 +9,9 @@
  * probe-bundle marker (P0 behavior).
  */
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { RemotePool } from './pool.ts'
 import { RemoteFiles } from './sftp.ts'
 import type { RemoteStore } from './store.ts'
@@ -129,6 +130,74 @@ export function helperAvailability(): HelperAvailability[] {
 
 export function isHelperAvailable(kind: HelperKind): boolean {
   return helperAvailability().some(h => h.kind === kind && h.available)
+}
+
+/** This package's vendored helper seeds (`vendor/dsh-remote-helpers/`). */
+export function vendorHelperDir(): string | undefined {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url))
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'vendor', 'dsh-remote-helpers'))) {
+        return join(dir, 'vendor', 'dsh-remote-helpers')
+      }
+      dir = dirname(dir)
+    }
+  } catch {
+    // Fall through to undefined.
+  }
+  return undefined
+}
+
+export interface SeedReport {
+  seeded: string[]
+  skipped: string[]
+  failed: string[]
+  vendorMissing: boolean
+}
+
+/**
+ * Seed the local helper cache from the vendored copies shipped with the
+ * plugin, so a fresh install can push without manual staging. Copy-if-absent
+ * only — never overwrites (a newer/different local build always wins);
+ * tarballs are hash-verified after copy. Best-effort: throws nothing.
+ */
+export function seedHelperCache(): SeedReport {
+  const report: SeedReport = { seeded: [], skipped: [], failed: [], vendorMissing: true }
+  try {
+    const vendor = vendorHelperDir()
+    if (vendor === undefined) return report
+    report.vendorMissing = false
+    const cache = helpersDir()
+    mkdirSync(cache, { recursive: true })
+    for (const name of readdirSync(vendor)) {
+      const dest = join(cache, name)
+      if (existsSync(dest)) {
+        report.skipped.push(name)
+        continue
+      }
+      copyFileSync(join(vendor, name), dest)
+      if (name.endsWith('.tar.gz')) {
+        const sidecar = `${dest}.sha256`
+        const expected = existsSync(sidecar)
+          ? readFileSync(sidecar, 'utf8').split(/\s+/)[0]?.trim()
+          : readFileSync(join(vendor, `${name}.sha256`), 'utf8').split(/\s+/)[0]?.trim()
+        const actual = createHash('sha256').update(readFileSync(dest)).digest('hex')
+        if (expected === undefined || expected === '' || actual !== expected) {
+          try {
+            rmSync(dest, { force: true })
+          } catch {
+            // Ignore.
+          }
+          report.failed.push(name)
+          continue
+        }
+      }
+      report.seeded.push(name)
+    }
+  } catch {
+    // Best-effort: callers log the report, never throw.
+  }
+  return report
 }
 
 const PROBE_SCRIPT = [

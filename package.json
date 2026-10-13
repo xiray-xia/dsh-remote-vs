@@ -60,6 +60,7 @@
     "lib/**/*.d.ts",
     "lib/**/*.d.ts.map",
     "src",
+    "vendor/dsh-remote-helpers/*",
     "cordis.patch.yml",
     "README.md",
     "icon.svg",

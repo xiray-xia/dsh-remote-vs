@@ -1,0 +1,16 @@
+{
+  "kind": "executable",
+  "version": "0.2.1-alpha.2",
+  "platform": "linux-x64",
+  "target": "node24-linux-x64",
+  "tarball": "dsh-ssh-helper-0.2.1-alpha.2-linux-x64.tar.gz",
+  "tarballSha256": "241c1e96e4fec14808440ac767bce5df64d566164f9fb3f338f2474aa2c50421",
+  "binarySha256": "a19a508d4e0659713f88ea32307a2cec4b4c16afa62e92c0a9fb8e41bdf7c3da",
+  "protocol": 2,
+  "nodeVersion": "v24.21.0",
+  "glibcCeiling": "2.35",
+  "builtAt": "2026-10-12T14:27:00+08:00",
+  "builtOn": "WSL2 Ubuntu-22.04 (glibc 2.35), node v24.21.0, pnpm 11.28.5, tag dsh-v0.2.1-alpha.2 (d7432673)",
+  "sourcePatch": "glibc-ceiling.patch",
+  "notes": "Upstream gate (2.28) relaxed to 2.35 via DSH_GLIBC_CEILING: no docker for the manylinux pty recompile; fleet glibc is 2.35. Official 8-check suite passed (verify-ssh-helper-artifact --sandbox=required)."
+}
