@@ -17,7 +17,8 @@ export function WorkspacesView(props: {
   workspaces: RemoteWorkspaceBinding[]
   routing: RemoteRoutingStatus
   onChanged: () => void
-  onOpenFiles: (workspaceId: string) => void
+  /** Open the files view for a binding; omitted where no files view exists (settings section hides the button). */
+  onOpenFiles?: (workspaceId: string) => void
 }): ReactNode {
   const t = props.t
   const [wizard, setWizard] = useState(false)
@@ -71,7 +72,9 @@ export function WorkspacesView(props: {
           )}
           <div style={{ marginTop: 6 }}>
             <Row>
-              <Btn kind="primary" onClick={() => props.onOpenFiles(w.id)}>{t('ws.open')}</Btn>
+              {props.onOpenFiles !== undefined && (
+                <Btn kind="primary" onClick={() => props.onOpenFiles?.(w.id)}>{t('ws.open')}</Btn>
+              )}
               <Btn kind="danger" onClick={() => remove(w.id)} disabled={busy !== undefined}>{t('ws.delete')}</Btn>
             </Row>
           </div>
