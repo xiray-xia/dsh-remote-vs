@@ -32,6 +32,7 @@ P2 起原生工具在远端工作区里透明跑远端（见下）。
 | 导入 | 从 `~/.ssh/config`、从现有 `dsh-ssh.json` 一键导入（只读一次，不耦合）|
 | Agent 工具 | `remote_hosts` / `remote_exec` / `remote_read` / `remote_write` / `remote_ls` |
 | **P2 透明远端执行** | 远端工作区里原生 `read/write/edit/bash/glob/grep/jobs` 直接跑在远端 |
+| **P3 远端 @ 引用** | 远端会话 `@` 出远端文件候选（路由 fileReferences，scoped 实时/bare 走远端 rg 索引） |
 
 ## 工程结构
 
@@ -61,7 +62,10 @@ dsh_remote_vs/
 │   │   ├── ssh-proc.ts     # ssh2 进程运行时（setsid 组杀/marker/stdin/spill）
 │   │   ├── shell-bash.ts   # 路由 bash 执行器（本地原样/远端去 DSH_*）
 │   │   ├── router-spill.ts # 透明 spill 路由（session 世界键/远端目录）
-│   │   └── bridge.ts       # 私有 realm 本地三件套发布（localFs/…）
+│   │   ├── router-refs.ts  # 透明 @ 引用路由（agent 世界键，P3）
+│   │   ├── file-refs.ts    # 远端 @ 搜索（fs-ssh 实时列/rg 索引/官方评分移植）
+│   │   ├── bridge.ts       # 私有 realm 本地件发布（localFs 等早期服务）
+│   │   └── bridge-refs.ts  # refs 独立桥（local-refs 依赖 workingDirectory，必须分离）
 │   └── client/             # ── 浏览器半（React，打包进 lib/client.js）──
 │       ├── index.tsx       # tab 注册（可选侧边栏）+ 设置两节 + directoryFlow 双槽接管
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
@@ -104,7 +108,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
   - 删绑定后新调用明确拒绝（墓碑 fail-closed），历史记录可读
   - 断线：在途不重放；新调用自动重连
 - 验证：`npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`
-  （真远端 + 真 Cordis + 真路由类，53/53；P0 路由与 GUI 需重启 Host 后冒烟）
+  （真远端 + 真 Cordis + 真路由类，61/61；P0 路由与 GUI 需重启 Host 后冒烟）
 - 详见 `docs/P2-PLAN.md`（§8 验收矩阵逐项状态）
 
 ## Helper 自编译（P1）

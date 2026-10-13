@@ -19,6 +19,10 @@
       "types": "./lib/types/p2/bridge.d.ts",
       "default": "./lib/p2-bridge.js"
     },
+    "./p2-bridge-refs": {
+      "types": "./lib/types/p2/bridge-refs.d.ts",
+      "default": "./lib/p2-bridge-refs.js"
+    },
     "./p2-router-fs": {
       "types": "./lib/types/p2/router-fs.d.ts",
       "default": "./lib/p2-router-fs.js"
@@ -30,6 +34,10 @@
     "./p2-router-spill": {
       "types": "./lib/types/p2/router-spill.d.ts",
       "default": "./lib/p2-router-spill.js"
+    },
+    "./p2-router-refs": {
+      "types": "./lib/types/p2/router-refs.d.ts",
+      "default": "./lib/p2-router-refs.js"
     },
     "./p2-shell-bash": {
       "types": "./lib/types/p2/shell-bash.d.ts",
@@ -94,6 +102,7 @@
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-agent-preset": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-bash-local": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-file-reference": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-fs": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-shell": "^0.2.0-rc.1",
     "@deepseek-ai/dsh-spill": "^0.2.0-rc.1",
@@ -119,6 +128,7 @@
     "@deepseek-ai/dsh-client-ui-settings": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-workspace": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-file-reference": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-fs": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-host-directory-picker": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-host-webserver": "0.2.1-alpha.2",

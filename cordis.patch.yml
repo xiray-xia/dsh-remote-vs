@@ -15,6 +15,7 @@
       name: cordis:group
       group: true
       isolate:
+        fileReferences: true
         fs: true
         subprocess: true
         spillStore: true
@@ -25,9 +26,16 @@
           name: '@deepseek-ai/dsh-fs-sandbox'
         - id: local-spill
           name: '@deepseek-ai/dsh-spill-local'
+        - id: local-refs
+          name: '@deepseek-ai/dsh-file-reference-local'
         - id: local-bridge
           name: dsh-remote-vs/p2-bridge
           inject: [fs, subprocess, spillStore]
+        # Separate bridge: local-refs injects workingDirectory (downstream of
+        # our replaced fs), so it must not gate fs/subprocess/spillStore.
+        - id: local-bridge-refs
+          name: dsh-remote-vs/p2-bridge-refs
+          inject: [fileReferences]
 
     - id: remote-vs-fs-router
       name: dsh-remote-vs/p2-router-fs
@@ -40,6 +48,10 @@
     - id: remote-vs-spill-router
       name: dsh-remote-vs/p2-router-spill
       inject: [localSpillStore, remoteWorlds]
+
+    - id: remote-vs-file-refs-router
+      name: dsh-remote-vs/p2-router-refs
+      inject: [localFileReferences, remoteWorlds]
 
     # Remote agent preset, bound to this bundle's lifecycle.
     # Mirrored from preset-standard @ dsh 0.2.1-alpha.2 with these diffs:
@@ -243,4 +255,6 @@
 - id: fs-sandbox
   disabled: true
 - id: spill-local
+  disabled: true
+- id: file-reference-local
   disabled: true
