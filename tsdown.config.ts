@@ -97,9 +97,11 @@ export default [
     entry: {
       index: 'src/index.ts',
       'p2-bridge': 'src/p2/bridge.ts',
+      'p2-bridge-refs': 'src/p2/bridge-refs.ts',
       'p2-router-fs': 'src/p2/router-fs.ts',
       'p2-router-subprocess': 'src/p2/router-subprocess.ts',
       'p2-router-spill': 'src/p2/router-spill.ts',
+      'p2-router-refs': 'src/p2/router-refs.ts',
       'p2-shell-bash': 'src/p2/shell-bash.ts',
     },
     outDir: 'lib',
