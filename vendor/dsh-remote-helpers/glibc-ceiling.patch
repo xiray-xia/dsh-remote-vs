@@ -1,0 +1,31 @@
+diff --git a/scripts/ssh-helper/native.ts b/scripts/ssh-helper/native.ts
+index a6f4db14..e6a7ccee 100644
+--- a/scripts/ssh-helper/native.ts
++++ b/scripts/ssh-helper/native.ts
+@@ -4,6 +4,15 @@ import { open } from 'node:fs/promises'
+ import { join } from 'node:path'
+ import { payloadFiles, type SshHelperTarget } from './artifact.ts'
+ 
++/** Local-build override: DSH_GLIBC_CEILING (default 2.28) relaxes the payload baseline for fleets newer than 2.28. Upstream behavior unchanged when unset. */
++function glibcCeiling(): number[] {
++  const raw = (process.env.DSH_GLIBC_CEILING ?? "").trim();
++  if (raw === "") return [2, 28];
++  const parts = raw.split(".").map(Number);
++  if (parts.length === 0 || parts.some((n) => !Number.isInteger(n) || n < 0)) throw new Error(`Invalid DSH_GLIBC_CEILING: ${raw}`);
++  return parts;
++}
++
+ function newer(version: string, ceiling: number[]): boolean {
+   const components = version.split('.').map(Number)
+   for (let index = 0; index < Math.max(components.length, ceiling.length); index += 1) {
+@@ -58,8 +67,9 @@ export async function verifyNativePayload(directory: string, target: SshHelperTa
+       const expected = arch === 'arm64' ? /Machine:\s+AArch64/ : /Machine:\s+Advanced Micro Devices X86-64/
+       if (!expected.test(elfHeader)) throw new Error(`ELF architecture differs from ${target}: ${path}`)
+       const versions = execFileSync('readelf', ['--version-info', filename], { encoding: 'utf8' })
++      const ceiling = glibcCeiling();
+       for (const match of versions.matchAll(/\bGLIBC_(\d+(?:\.\d+)+)/g)) {
+-        if (newer(match[1] as string, [2, 28])) throw new Error(`${path} requires GLIBC_${match[1]}, exceeding 2.28`)
++        if (newer(match[1] as string, ceiling)) throw new Error(`${path} requires GLIBC_${match[1]}, exceeding ${ceiling.join(".")}`)
+       }
+     } else {
+       execFileSync('lipo', [filename, '-verify_arch', arch === 'arm64' ? 'arm64' : 'x86_64'], { stdio: 'pipe' })

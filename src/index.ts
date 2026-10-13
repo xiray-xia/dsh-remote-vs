@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { RemoteStore } from './store.ts'
 import { RemotePool } from './pool.ts'
+import { seedHelperCache } from './deploy.ts'
 import { makeRoutes } from './routes.ts'
 import { RemoteWorlds, type RoutingMode } from './p2/worlds.ts'
 import {
@@ -121,6 +122,20 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
       // Ignore.
     }
   })
+  // Seed the helper cache from vendored copies (fresh installs can push
+  // without manual staging; copy-if-absent, never overwrites).
+  try {
+    const seed = seedHelperCache()
+    if (!seed.vendorMissing && (seed.seeded.length > 0 || seed.failed.length > 0)) {
+      try {
+        ctx.logger.info(`[remote-vs] helper cache seeded: ${seed.seeded.length} copied, ${seed.skipped.length} kept${seed.failed.length > 0 ? `, FAILED: ${seed.failed.join(', ')}` : ''}`)
+      } catch {
+        // Ignore.
+      }
+    }
+  } catch {
+    // Best-effort only.
+  }
 
   const resolve = (): { announceToAgent: boolean; enabled: boolean } => ({
     announceToAgent: readField(config?.announceToAgent, false),
