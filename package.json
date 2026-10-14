@@ -78,14 +78,14 @@
     "icon.svg",
     "locale/*.json"
   ],
-  "author": "Chinesess",
+  "author": "xiray-xia",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Chinesess/dsh-remote-vs.git"
+    "url": "git+https://github.com/xiray-xia/dsh-remote-vs.git"
   },
   "bugs": {
-    "url": "https://github.com/Chinesess/dsh-remote-vs/issues"
+    "url": "https://github.com/xiray-xia/dsh-remote-vs/issues"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
