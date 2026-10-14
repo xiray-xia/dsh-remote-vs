@@ -4,3 +4,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .spike/
+# Local-only working docs (never push to GitHub; see MAINTENANCE §1)
+docs/P2-PLAN.md
+docs/MAINTENANCE.md
