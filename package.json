@@ -73,10 +73,20 @@
     "vendor/dsh-remote-helpers/*",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
+    "LICENSE",
     "icon.svg",
     "locale/*.json"
   ],
+  "author": "Chinesess",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chinesess/dsh-remote-vs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Chinesess/dsh-remote-vs/issues"
+  },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.11.1",
