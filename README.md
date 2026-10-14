@@ -1,5 +1,9 @@
 # dsh-remote-vs · DSH 远程开发（VSCode 式）
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+中文 | [English](./README.en.md)
+
 Host 进程内的 SSH 主机管理 + helper 推送流水线 + 远端文件/终端/Git。
 主机配在 DSH 设置里（“远程主机”项）；装了 `dsh-better-sidebar` 时另有
 独立“远程”tab（工作区/文件/终端/Git），没装则退到原生右侧栏“远程”页
@@ -80,7 +84,7 @@ dsh_remote_vs/
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
 │       └── i18n.ts / theme.ts / ui.tsx # 双语词典/主题信号/共享样式
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
-├── docs/
+├── docs/                   # 本地工作文档（不推送 GitHub）
 │   ├── P2-PLAN.md          # P2 架构/分期/验收矩阵（含逐项状态）
 │   └── MAINTENANCE.md      # DSH 升级影响面 + helper 升级流程（升级先读它）
 ├── locale/                 # 插件元信息双语
@@ -147,3 +151,11 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 改完 client 后硬刷新浏览器即可；host 半改动需重启 `dsh web`。
 DSH 发新版时先读 `docs/MAINTENANCE.md` 再动手。
+
+## 开源许可
+
+MIT © 2026 Chinesess —— 见 [LICENSE](./LICENSE)。
+
+`vendor/` 里的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.1-alpha.2`
+tag 以官方原脚本构建，具体流程与唯一有记录的偏离见上文"Helper 自编译"节
+（种子包里的 `glibc-ceiling.patch`）。
