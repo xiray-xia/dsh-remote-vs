@@ -10,7 +10,7 @@ import { CodeEditor, type CodeEditorHandle } from './CodeEditor.tsx'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { InputDialog } from './Dialog.tsx'
-import { Btn, Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
+import { Btn, Notice, Row, Spinner, hairline, optionStyle, selectStyle } from './ui.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -406,6 +406,7 @@ export function FilesView(props: {
   const filesOpen = open.length > 0
   const treePct = `${Math.round(treeRatio * 1000) / 10}%`
   const dividerActive = dividerHot || dragging
+  const refreshing = loadingDirs.has(dirKey(workspace.alias, workspace.remotePath))
 
   const renderTree = (alias: string, dir: string, depth: number, remoteRoot: string): ReactNode => {
     const key = dirKey(alias, dir)
@@ -479,9 +480,9 @@ export function FilesView(props: {
         <Row>
           <Btn onClick={() => setDialog({ kind: 'file' })}>{t('files.newFile')}</Btn>
           <Btn onClick={() => setDialog({ kind: 'folder' })}>{t('files.newFolder')}</Btn>
-          <Btn onClick={() => selected !== undefined && setDialog({ kind: 'rename' })} disabled={selected === undefined}>✏️</Btn>
-          <Btn kind="danger" onClick={deleteSelected} disabled={selected === undefined}>🗑</Btn>
-          <Btn onClick={() => workspace !== undefined && void loadDir(workspace.alias, workspace.remotePath, true)}>{t('files.refresh')}</Btn>
+          <Btn onClick={() => selected !== undefined && setDialog({ kind: 'rename' })} disabled={selected === undefined} title={t('files.renameSelected')}>✏️</Btn>
+          <Btn kind="danger" onClick={deleteSelected} disabled={selected === undefined} title={t('files.deleteSelected')}>🗑</Btn>
+          <Btn onClick={() => workspace !== undefined && void loadDir(workspace.alias, workspace.remotePath, true)} disabled={refreshing}>{refreshing ? <><Spinner /> {t('files.refresh')}</> : t('files.refresh')}</Btn>
         </Row>
       </div>
       </div>

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { GitBranch, GitCommit, GitShow, GitStatus, RemoteWorkspaceBinding } from '../protocol.ts'
 import { GIT_LOG_MAX } from '../git-format.ts'
 import { RemoteApiError, api } from './api.ts'
-import { Btn, Notice, Row, optionStyle, selectStyle } from './ui.tsx'
+import { Btn, Notice, Row, Spinner, optionStyle, selectStyle } from './ui.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -252,7 +252,7 @@ export function GitView(props: { t: (k: string) => string; workspaces: RemoteWor
           >
             {props.workspaces.map((w) => <option key={w.id} value={w.id} style={optionStyle}>{w.name} ({w.alias}:{w.remotePath})</option>)}
           </select>
-          <Btn onClick={refresh} disabled={loading}>{t('git.refresh')}</Btn>
+          <Btn onClick={refresh} disabled={loading}>{loading ? <><Spinner /> {t('git.refresh')}</> : t('git.refresh')}</Btn>
         </Row>
         {notice !== undefined && <Notice kind="info">{notice}</Notice>}
         {error !== undefined && <Notice kind="error">{error}{'\n'}{t('git.hint')}</Notice>}
