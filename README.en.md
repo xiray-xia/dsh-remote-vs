@@ -25,6 +25,16 @@ Since P2, native tools inside remote workspaces transparently run remotely (see 
 └────────────────────────────────────────────┘
 ```
 
+## Install
+
+```sh
+dsh plugin add github:xiray-xia/dsh-remote-vs
+```
+
+Requires DSH `0.2.1-alpha.3`. On first install, allow the printed build scripts
+in the profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
+open Settings → Remote hosts to configure.
+
 ## Capabilities
 
 | Capability | Notes |
