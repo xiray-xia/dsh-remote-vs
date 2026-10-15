@@ -94,6 +94,12 @@ export interface RemoteRoutingStatus {
   tombstones: string[]
 }
 
+/** Plugin identity (workspaces GET extension for the Settings display). */
+export interface RemotePluginMeta {
+  /** Version from the shipped package.json ('unknown' when unreadable). */
+  version: string
+}
+
 /** Remote OS probe outcome. */
 export interface RemoteProbe {
   alias: string

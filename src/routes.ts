@@ -4,7 +4,9 @@
  * Every route carries the loopback-only trust fence.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -26,6 +28,38 @@ const terminalWss = new WebSocketServer({ noServer: true })
 function queryParam(url: URL, name: string): string | undefined {
   const value = url.searchParams.get(name)
   return value === null ? undefined : value
+}
+
+/** This plugin's version from the shipped package.json (Settings display). */
+let cachedVersion: string | undefined
+
+function pluginVersion(): string {
+  if (cachedVersion !== undefined) return cachedVersion
+  try {
+    // Walk up from lib/: the first package.json on the way may belong to an
+    // enclosing project (profile dir, workspace root), so the name gate is
+    // load-bearing — never report a foreign version.
+    let dir = dirname(fileURLToPath(import.meta.url))
+    for (let depth = 0; depth < 4; depth += 1) {
+      const pkg = join(dir, 'package.json')
+      try {
+        if (existsSync(pkg)) {
+          const raw = JSON.parse(readFileSync(pkg, 'utf8')) as { name?: unknown; version?: unknown }
+          if (raw.name === 'dsh-remote-vs' && typeof raw.version === 'string' && raw.version !== '') {
+            cachedVersion = raw.version
+            return cachedVersion
+          }
+        }
+      } catch {
+        // Keep walking.
+      }
+      dir = dirname(dir)
+    }
+  } catch {
+    // Fall through to unknown.
+  }
+  cachedVersion = 'unknown'
+  return cachedVersion
 }
 
 export interface RemoteRoutesDeps {
@@ -325,6 +359,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
             mode: worlds.mode,
             aliasPaths,
             tombstones: store.listTombstones(),
+            version: pluginVersion(),
           })
           return
         }

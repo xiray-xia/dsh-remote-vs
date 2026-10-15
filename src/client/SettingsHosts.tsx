@@ -18,6 +18,7 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
   const [t] = useState(() => makeT(detectLang()))
   const [hosts, setHosts] = useState<RemoteHostSummary[]>([])
   const [mode, setMode] = useState<'off' | 'shadow' | 'enforce'>('off')
+  const [version, setVersion] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
 
@@ -27,6 +28,7 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
       ([rows, w]) => {
         setHosts(rows)
         setMode(w.mode)
+        setVersion(w.version)
       },
       (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
     )
@@ -62,6 +64,11 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
             <option value="enforce" style={optionStyle}>{t('route.enforce')}</option>
           </select>
           {saving && <span style={{ fontSize: 12, opacity: 0.6 }}>{t('route.saving')}</span>}
+          {version !== '' && (
+            <span style={{ marginLeft: 'auto', fontSize: 11, opacity: 0.6 }}>
+              {t('plugin.version')}: <code>v{version}</code>
+            </span>
+          )}
         </Row>
         <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>{t('route.hint')}</div>
       </div>
