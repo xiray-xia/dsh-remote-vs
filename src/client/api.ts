@@ -13,6 +13,7 @@ import {
   type RemoteExecResult,
   type RemoteFileEntry,
   type RemoteHostSummary,
+  type RemotePluginMeta,
   type RemoteProbe,
   type RemoteRead,
   type RemoteRoutingStatus,
@@ -124,7 +125,7 @@ export const api = {
   exec: (alias: string, command: string, timeoutMs?: number) =>
     post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs }),
   // -- workspaces
-  getWorkspaces: () => call<{ workspaces: RemoteWorkspaceBinding[] } & RemoteRoutingStatus>(REMOTE_API.workspaces),
+  getWorkspaces: () => call<{ workspaces: RemoteWorkspaceBinding[] } & RemoteRoutingStatus & RemotePluginMeta>(REMOTE_API.workspaces),
   createWorkspace: (payload: { name: string; alias: string; remotePath: string }) =>
     call<{ workspace: RemoteWorkspaceBinding; aliasPath: string }>(REMOTE_API.workspaces, { method: 'POST', body: JSON.stringify(payload) }),
   deleteWorkspace: (id: string) =>
