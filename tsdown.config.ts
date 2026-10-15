@@ -35,6 +35,13 @@ const CLIENT_EXTERNALS = [
 
 type BuildPlugin = NonNullable<UserConfig['plugins']>
 
+/** Compact local-time build stamp (MMDD-HHmm) injected as __RVS_BUILD__. */
+function buildStamp(): string {
+  const now = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+}
+
 /** Reject Node builtins and cross-plugin value imports in the client bundle. */
 function purityGatePlugin(): BuildPlugin {
   return {
@@ -123,6 +130,11 @@ export default [
     external: [...CLIENT_EXTERNALS],
     define: {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+      // Baked at build time and shown in the editor info bar. The GUI serves
+      // plugin bundles captured when `dsh web` started (immutable revisions,
+      // refreshed only by the dev HMR watch), so a stale bundle is otherwise
+      // indistinguishable from broken code — this stamp settles it at a glance.
+      __RVS_BUILD__: JSON.stringify(buildStamp()),
     },
     inputOptions: {
       resolve: {

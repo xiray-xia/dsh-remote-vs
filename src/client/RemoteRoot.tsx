@@ -1,134 +1,269 @@
 /**
- * The explorer root shared by both surfaces: the better-sidebar tab (global,
- * one instance) and the native right-Sidebar page (per-session seat, one
- * instance per session that opened it). Four sub-views (workspaces / files /
- * terminal / git) over /api/dsh-remote; all views stay mounted, only the
- * active one displays, and canvas views (editor/terminal) refit on show.
+ * Sidebar surface (better-sidebar tab, or the native right-Sidebar fallback):
+ * a VS Code-style activity rail plus one column that shows the active view.
  *
- * `visible` gates the canvas refit signals: the better tab always passes
- * true (it owns tab visibility itself); the native page passes the seat's
- * `tab.visible` (foreground session + expanded + selected).
+ * The editor itself lives in the conversation view next to 轨迹 whenever that
+ * registration succeeds (`editorSurface === 'center'`), so the tree keeps the
+ * whole column; on a host where the conversation slot is unavailable the old
+ * split (panel above the editor) still applies and nothing becomes
+ * unreachable.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { useCallback, useEffect, useState } from 'react'
-import type { RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts'
-import { RemoteApiError, api } from './api.ts'
-import { FilesView } from './FilesView.tsx'
-import { GitView } from './GitView.tsx'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { EditorPane } from './EditorPane.tsx'
+import { RemoteExplorer } from './RemoteExplorer.tsx'
+import { SearchView } from './SearchView.tsx'
+import { HistoryPanel } from './scm/HistoryPanel.tsx'
+import { ScmPanel } from './scm/ScmPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
-import { detectLang, makeT } from './i18n.ts'
-import { Notice } from './ui.tsx'
+import { useBootstrap, useExplorer } from './store.tsx'
+import { DialogHost } from './vsc/kit.tsx'
+import {
+  IconBranch,
+  IconCode,
+  IconDiff,
+  IconHistory,
+  IconSearch,
+  IconServer,
+  IconTerminal,
+  MiniSpinner,
+} from './vsc/kit.tsx'
 
-type SubTab = 'workspaces' | 'files' | 'terminal' | 'git'
+type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'workspaces'
 
-export function RemoteRoot(props: { ctx: Context; visible?: boolean }): React.ReactNode {
-  const [t] = useState(() => makeT(detectLang()))
-  const [tab, setTab] = useState<SubTab>(() => {
+const SPLIT_KEY = 'dsh-remote-vs.split'
+const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
+
+export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNode {
+  useBootstrap(props.ctx)
+  return (
+    <>
+      <DialogHost />
+      <Shell ctx={props.ctx} visible={props.visible !== false} />
+    </>
+  )
+}
+
+function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
+  const store = useExplorer()
+  const t = store.t
+  // The active panel lives in the shared store so other surfaces (the tree's
+  // "Find in Folder…", the SCM panel's history shortcut) can switch it.
+  const view = store.view
+  const [showHidden, setShowHidden] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('dsh-remote-vs.tab')
-      // 'hosts' was removed (moved to Settings); fall through to workspaces.
-      return saved === 'files' || saved === 'terminal' || saved === 'git' ? saved : 'workspaces'
+      return localStorage.getItem(HIDDEN_KEY) === '1'
     } catch {
-      return 'workspaces'
+      return false
     }
   })
-  const [hosts, setHosts] = useState<RemoteHostSummary[]>([])
-  const [workspaces, setWorkspaces] = useState<RemoteWorkspaceBinding[]>([])
-  const [routing, setRouting] = useState<RemoteRoutingStatus>({ mode: 'off', aliasPaths: {}, tombstones: [] })
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [filesWorkspaceId, setFilesWorkspaceId] = useState<string | undefined>(undefined)
+  const [split, setSplit] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(SPLIT_KEY))
+      return Number.isFinite(saved) && saved > 0.15 && saved < 0.9 ? saved : 0.45
+    } catch {
+      return 0.45
+    }
+  })
+  const splitRef = useRef(split)
+  const [dragging, setDragging] = useState(false)
+  const dragRef = useRef<{ startY: number; startRatio: number } | undefined>(undefined)
+  const columnRef = useRef<HTMLDivElement>(null)
 
-  const refresh = useCallback(() => {
-    setError(undefined)
-    Promise.all([api.getHosts(), api.getWorkspaces()]).then(
-      ([h, w]) => {
-        setHosts(h)
-        setWorkspaces(w.workspaces)
-        setRouting({ mode: w.mode, aliasPaths: w.aliasPaths, tombstones: w.tombstones })
-      },
-      (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
-    )
-  }, [])
+  const go = useCallback((next: RailView): void => {
+    store.setView(next)
+  }, [store])
+
+  // Panels are mounted on first visit and then kept alive (see panelFor).
+  const [mounted, setMounted] = useState<Set<RailView>>(() => new Set<RailView>([store.view]))
+  useEffect(() => {
+    setMounted(prev => (prev.has(view) ? prev : new Set(prev).add(view)))
+  }, [view])
+
+  // A profile with no binding has nothing to explore: the workspaces view (the
+  // wizard) takes over until one exists.
+  useEffect(() => {
+    if (store.workspaces.length === 0 && view !== 'workspaces') go('workspaces')
+  }, [store.workspaces.length, view, go])
 
   useEffect(() => {
-    refresh()
-  }, [refresh])
-
-  const switchTab = (next: SubTab): void => {
-    setTab(next)
     try {
-      localStorage.setItem('dsh-remote-vs.tab', next)
+      localStorage.setItem(HIDDEN_KEY, showHidden ? '1' : '0')
     } catch {
-      // Private mode: ignore.
+      // Ignore.
+    }
+  }, [showHidden])
+
+  const onDividerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // Older engine: the buttons gate below covers it.
+    }
+    dragRef.current = { startY: e.clientY, startRatio: splitRef.current }
+    setDragging(true)
+  }
+  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    if (drag === undefined) return
+    if ((e.buttons & 1) === 0) {
+      dragRef.current = undefined
+      setDragging(false)
+      return
+    }
+    const total = columnRef.current?.clientHeight ?? 0
+    if (total < 200) return
+    const next = Math.min(0.88, Math.max(0.12, drag.startRatio + (e.clientY - drag.startY) / total))
+    splitRef.current = next
+    setSplit(next)
+  }
+  const onDividerEnd = (): void => {
+    if (dragRef.current === undefined) return
+    dragRef.current = undefined
+    setDragging(false)
+    try {
+      localStorage.setItem(SPLIT_KEY, String(splitRef.current))
+    } catch {
+      // Ignore.
     }
   }
 
-  const tabs: { id: SubTab; label: string }[] = [
-    { id: 'workspaces', label: `${t('tab.workspaces')} (${workspaces.length})` },
-    { id: 'files', label: t('tab.files') },
-    { id: 'terminal', label: t('tab.terminal') },
-    { id: 'git', label: t('tab.git') },
-  ]
+  if (!store.ready) {
+    return (
+      <div className="rvs-root">
+        <div className="rvs-empty" style={{ margin: 'auto' }}><MiniSpinner /> {t('common.loading')}</div>
+      </div>
+    )
+  }
 
-  const shown = props.visible !== false
+  const editorInSidebar = store.editorSurface === 'sidebar'
+  const browsing = view === 'explorer' || view === 'search' || view === 'scm' || view === 'history'
+  const showEditorWithView = editorInSidebar && browsing && store.tabs.length > 0
+
+  /**
+   * One panel body. Every visited panel stays MOUNTED (hidden by CSS), which
+   * is what keeps the explorer's listings / expansion set — and the terminal's
+   * connection — alive across rail switches: re-mounting used to refetch the
+   * whole visible tree and flash a reload on every return.
+   */
+  const panelFor = (id: RailView): ReactNode => {
+    switch (id) {
+      case 'search': return <SearchView />
+      case 'scm': return <ScmPanel onOpenHistory={() => go('history')} />
+      case 'history': return <HistoryPanel />
+      case 'terminal':
+        // The terminal draws its own header + tab strip, so it takes the whole
+        // slot (no extra padding wrapper).
+        return <TerminalView t={t} hosts={store.hosts} visible={props.visible && view === 'terminal'} />
+      case 'workspaces':
+        return (
+          <div className="rvs-viewpad" style={{ height: '100%' }}>
+            <WorkspacesView
+              t={t}
+              hosts={store.hosts}
+              workspaces={store.workspaces}
+              routing={store.routing}
+              onChanged={store.refreshAll}
+              onOpenFiles={(value) => { store.selectWorkspace(value); go('explorer') }}
+            />
+          </div>
+        )
+      case 'editor':
+        return <EditorPane visible={props.visible && view === 'editor'} />
+      default:
+        return <RemoteExplorer showHidden={showHidden} onToggleHidden={() => setShowHidden(v => !v)} />
+    }
+  }
+
+  // Without a conversation-view slot the editor has no center tab, so it keeps
+  // its rail entry (and the split) — the older layout, still fully reachable.
+  const editorInStack = editorInSidebar && !showEditorWithView
+
+  const panel = (
+    <div className="rvs-pane grow">
+      {[...mounted]
+        // With the sidebar split active the editor renders below the divider,
+        // never in the stack (two live buffers for one tab would fight).
+        .filter(id => !(showEditorWithView && id === 'editor'))
+        .map(id => (
+          <div key={id} className="rvs-viewslot" style={{ display: view === id ? 'flex' : 'none' }}>
+            {panelFor(id)}
+          </div>
+        ))}
+    </div>
+  )
+
+  const railButton = (id: RailView, title: string, icon: ReactNode, badge = 0): ReactNode => (
+    <button
+      key={id}
+      type="button"
+      className={`rvs-rail-btn${view === id ? ' active' : ''}`}
+      title={title}
+      aria-label={title}
+      onClick={() => go(id)}
+    >
+      {icon}
+      {badge > 0 && <span className="rvs-rail-badge">{badge > 99 ? '99+' : badge}</span>}
+    </button>
+  )
 
   return (
-    <div style={{ padding: '10px 12px 16px', fontSize: 13, lineHeight: 1.5, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, boxSizing: 'border-box' }}>
-      <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap', flex: 'none' }}>
-        {tabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => switchTab(item.id)}
-            style={{
-              background: tab === item.id ? 'rgba(77,107,254,.25)' : 'rgba(127,127,127,.12)',
-              color: 'inherit',
-              border: `1px solid ${tab === item.id ? 'rgba(77,107,254,.6)' : 'rgba(127,127,127,.3)'}`,
-              borderRadius: 6,
-              padding: '4px 12px',
-              fontSize: 13,
-              cursor: 'pointer',
-            }}
+    <div className="rvs-root">
+      <div className="rvs-rail">
+        {railButton('explorer', t('tab.files'), <IconCode size={17} />)}
+        {railButton('search', t('tab.search'), <IconSearch size={17} />)}
+        {railButton('scm', t('tab.git'), <IconBranch size={17} />, store.buckets.total)}
+        {railButton('history', t('tab.history'), <IconHistory size={17} />)}
+        <div className="rvs-rail-sep" />
+        {editorInStack && store.tabs.length > 0
+          && railButton('editor', store.activeTab?.rel.split('/').pop() ?? t('tab.editor'), <IconDiff size={17} />, store.tabs.length)}
+        {railButton('terminal', t('tab.terminal'), <IconTerminal size={17} />)}
+        {railButton('workspaces', t('tab.workspaces'), <IconServer size={17} />, store.workspaces.length)}
+      </div>
+      <div className="rvs-column" ref={columnRef}>
+        <div className="rvs-globalbar">
+          <select
+            className="rvs-select"
+            value={store.workspace?.id ?? ''}
+            onChange={(e) => store.selectWorkspace(e.target.value)}
+            title={t('files.selectWorkspace')}
           >
-            {item.label}
-          </button>
-        ))}
-      </div>
-      {error !== undefined && <div style={{ flex: 'none' }}><Notice kind="error">{error}</Notice></div>}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* All views stay mounted (state survives sub-tab switches); only the
-          active one is displayed. Canvas views (editor/terminal) refit on show. */}
-      <div style={{ flex: 1, minHeight: 0, display: tab === 'workspaces' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
-        <WorkspacesView
-          t={t}
-          hosts={hosts}
-          workspaces={workspaces}
-          routing={routing}
-          onChanged={refresh}
-          onOpenFiles={(id) => {
-            setFilesWorkspaceId(id)
-            switchTab('files')
-          }}
-        />
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: tab === 'files' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
-        <FilesView
-          t={t}
-          ctx={props.ctx}
-          workspaces={workspaces}
-          aliasPaths={routing.aliasPaths}
-          openWorkspaceId={filesWorkspaceId}
-          onWorkspaceOpened={() => setFilesWorkspaceId(undefined)}
-          visible={shown && tab === 'files'}
-        />
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: tab === 'terminal' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
-        <TerminalView t={t} hosts={hosts} visible={shown && tab === 'terminal'} />
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: tab === 'git' ? 'flex' : 'none', flexDirection: 'column', overflow: 'hidden' }}>
-        <GitView t={t} workspaces={workspaces} />
-      </div>
+            {store.workspaces.map(item => (
+              <option key={item.id} value={item.id}>{item.name} ({item.alias})</option>
+            ))}
+          </select>
+          {store.repoRoot !== undefined && store.head !== undefined && (
+            <span className="rvs-pill" title={store.repoRoot}>
+              ⑂ {store.head.detached ? t('scm.detached') : store.head.branch}
+              {store.head.ahead > 0 && ` ↑${store.head.ahead}`}
+              {store.head.behind > 0 && ` ↓${store.head.behind}`}
+            </span>
+          )}
+          {store.gitBusy && <MiniSpinner />}
+        </div>
+        {store.error !== undefined && <div className="rvs-banner error">{store.error}</div>}
+        {showEditorWithView
+          ? (
+            <>
+              <div className="rvs-pane" style={{ height: `${Math.round(split * 1000) / 10}%`, flex: 'none' }}>{panel}</div>
+              <div
+                className="rvs-vsplit-handle"
+                data-dragging={dragging ? 'true' : 'false'}
+                onPointerDown={onDividerDown}
+                onPointerMove={onDividerMove}
+                onPointerUp={onDividerEnd}
+                onPointerCancel={onDividerEnd}
+                title={t('editor.resizeHint')}
+              />
+              <div className="rvs-pane grow">
+                <EditorPane visible={props.visible} />
+              </div>
+            </>
+          )
+          : <div className="rvs-pane grow">{panel}</div>}
       </div>
     </div>
   )

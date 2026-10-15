@@ -131,14 +131,18 @@ function subscribeTarget(ctx: Context, listener: () => void): () => void {
 /**
  * Live chat target for remote reference insertion. Snapshot-cached (stable
  * identity while the values stand) for `useSyncExternalStore`.
+ *
+ * `ctx` is optional because the shared explorer store boots asynchronously:
+ * before it is installed the buttons simply stay disabled.
  */
-export function useRemoteChatTarget(ctx: Context): RemoteChatTarget {
+export function useRemoteChatTarget(ctx: Context | undefined): RemoteChatTarget {
   const cacheRef = useRef<RemoteChatTarget>({ sessionId: undefined, sessionWorkspacePath: undefined })
   const subscribe = useCallback(
-    (listener: () => void) => subscribeTarget(ctx, listener),
+    (listener: () => void) => (ctx === undefined ? () => {} : subscribeTarget(ctx, listener)),
     [ctx],
   )
   const getSnapshot = useCallback(() => {
+    if (ctx === undefined) return cacheRef.current
     const next = readTarget(ctx)
     const prev = cacheRef.current
     if (prev.sessionId === next.sessionId && prev.sessionWorkspacePath === next.sessionWorkspacePath) return prev

@@ -6,14 +6,18 @@
  * local viewer's twin — see selection-popup.ts); the payload is a fenced
  * `rel:lines` block inserted into the on-screen session's composer draft.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, type ReactNode } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
-import { EditorState, type Extension } from '@codemirror/state'
-import { EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view'
+import { EditorState, StateEffect, StateField, Compartment, type Extension } from '@codemirror/state'
+import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
+import { bracketMatching, ensureSyntaxTree, indentOnInput } from '@codemirror/language'
 import { closeBrackets } from '@codemirror/autocomplete'
+import { search } from '@codemirror/search'
+import { syntaxHighlighting } from '@codemirror/language'
+import { vscodeHighlightStyle } from './vsc/editor-palette.ts'
+import { FindWidget, stepFind } from './vsc/FindWidget.tsx'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 import { json } from '@codemirror/lang-json'
@@ -21,8 +25,18 @@ import { markdown } from '@codemirror/lang-markdown'
 import { html } from '@codemirror/lang-html'
 import { css } from '@codemirror/lang-css'
 import { yaml } from '@codemirror/lang-yaml'
+import { java } from '@codemirror/lang-java'
+import { cpp } from '@codemirror/lang-cpp'
+import { go } from '@codemirror/lang-go'
+import { rust } from '@codemirror/lang-rust'
+import { xml } from '@codemirror/lang-xml'
+import { shell } from '@codemirror/legacy-modes/mode/shell'
+import { properties } from '@codemirror/legacy-modes/mode/properties'
+import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile'
+import { diff } from '@codemirror/legacy-modes/mode/diff'
 import { appendToDraft, buildRemoteSelectionInsert } from './composer.ts'
 import { useSelectionPopup } from './selection-popup.ts'
+import { initialEditorTheme, watchEditorScheme } from './vsc/editor-theme.ts'
 
 export interface CodeEditorHandle {
   getContent: () => string
@@ -30,48 +44,26 @@ export interface CodeEditorHandle {
   markSaved: () => void
 }
 
-function langFor(path: string): Extension[] {
-  const ext = path.split('.').pop()?.toLowerCase() ?? ''
-  switch (ext) {
-    case 'js':
-    case 'jsx':
-    case 'mjs':
-    case 'cjs':
-      return [javascript()]
-    case 'ts':
-    case 'tsx':
-    case 'mts':
-      return [javascript({ typescript: true })]
-    case 'py':
-      return [python()]
-    case 'json':
-      return [json()]
-    case 'md':
-    case 'markdown':
-      return [markdown()]
-    case 'html':
-    case 'htm':
-    case 'vue':
-      return [html()]
-    case 'css':
-      return [css()]
-    case 'yaml':
-    case 'yml':
-      return [yaml()]
-    default:
-      return []
-  }
+/** Compartment holding the fallback highlighter (armed only when needed). */
+const fallbackCompartment = new Compartment()
+
+/** True while CodeMirror's own highlighter has produced token spans. */
+function primaryColored(host: Element): boolean {
+  return host.querySelector('[class*="rvs-ck-"]') !== null
 }
 
-const theme = EditorView.theme({
-  '&': { backgroundColor: 'transparent', color: 'inherit', fontSize: '13px', height: '100%' },
-  '.cm-content': { fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)' },
-  '.cm-gutters': { backgroundColor: 'transparent', borderRight: '1px solid rgba(127,127,127,.25)', color: 'inherit', opacity: 0.7 },
-  '.cm-activeLineGutter': { backgroundColor: 'rgba(127,127,127,.15)' },
-  '&.cm-focused': { outline: 'none' },
-  '.cm-selectionBackground': { backgroundColor: 'rgba(77,107,254,.3) !important' },
-})
+// (The reveal state field + helper live in vsc/reveal-line.ts so the
+// self-check harness can drive a jump without mounting the React component.)
 
+import { langFor } from './vsc/editor-langs.ts'
+import { canFallbackHighlight, fallbackHighlight } from './vsc/fallback-highlight.ts'
+import { revealLine, revealLineField, setRevealLine } from './vsc/reveal-line.ts'
+
+/**
+ * The editor surface is OPAQUE and scrolls in the editor's own palette
+ * (`vsc/editor-theme.ts`): a code editor is not a translucent DSH panel, and
+ * the VS Code theme is what gives the tokens their readable colors.
+ */
 export const CodeEditor = forwardRef<CodeEditorHandle, {
   initial: string
   path: string
@@ -84,6 +76,18 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   remoteRoot?: string | undefined
   chatEnabled?: boolean
   addLabel?: string
+  /** 1-based line to reveal after mount (a content-search hit). */
+  revealLine?: number
+  /** Bumped per reveal request, so the same line can be jumped to twice. */
+  revealNonce?: number
+  /** Reports how many token spans the grammar produced (diagnostics). */
+  onTokens?: (count: number) => void
+  /**
+   * Element the find widget is portalled into (the code-area box). Portalling
+   * puts the widget OUTSIDE every scroller in the editor subtree, so no scroll
+   * position can carry it off-screen.
+   */
+  overlayHost?: HTMLElement | null
   onSave: () => void
   onDirty: (dirty: boolean) => void
 }>(function CodeEditor(props, ref) {
@@ -117,6 +121,80 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   })
   const popupRef = useRef(selectionPopup)
   popupRef.current = selectionPopup
+
+  // Find widget (Ctrl/Cmd+F). The view is mirrored into state so the widget
+  // can re-render once the editor exists; `findSeed` carries a selection into
+  // the query box.
+  const [findOpen, setFindOpen] = useState(false)
+  const findOpenRef = useRef(false)
+  findOpenRef.current = findOpen
+  const [findSeed, setFindSeed] = useState({ text: '', id: 0 })
+  const [view, setView] = useState<EditorView | undefined>(undefined)
+  /** Landing highlight for a jump (null = nothing lit). */
+  const [litPosition, setLitPosition] = useState<number | null>(null)
+
+  // Light the landing line whenever the position changes.
+  useEffect(() => {
+    const current = viewRef.current
+    if (current === undefined) return
+    try {
+      current.dispatch({ effects: setRevealLine.of(litPosition) })
+    } catch {
+      // Disposed.
+    }
+  }, [litPosition, view])
+
+  /**
+   * Re-jump when the ADDRESSED LINE changes on a mounted editor: opening a
+   * second search hit in a file that is already open must move the caret, not
+   * silently do nothing (the mount-time reveal only covers the first open).
+   */
+  useEffect(() => {
+    const target = props.revealLine
+    if (target === undefined || target <= 0) return
+    const current = viewRef.current
+    if (current === undefined) return
+    // A short delay lets a just-updated document settle before measuring.
+    const timer = window.setTimeout(() => revealLine(current, target, setLitPosition), 60)
+    return () => window.clearTimeout(timer)
+    // `revealNonce` re-runs this for a repeat jump to the same line.
+  }, [props.revealLine, props.revealNonce, view])
+
+  /**
+   * Anchor for the find widget: viewport coordinates of the editor's top-right
+   * corner, refreshed while the widget is open. `position: fixed` on these
+   * coordinates is what makes the box immune to whatever scrolls — the editor
+   * lives in a slot whose height this plugin does not control, so an ancestor
+   * scroller may well be the one moving.
+   */
+  const [anchor, setAnchor] = useState<{ top: number; right: number } | undefined>(undefined)
+  useEffect(() => {
+    if (!findOpen) {
+      setAnchor(undefined)
+      return
+    }
+    const update = (): void => {
+      const host = hostRef.current
+      if (host === null) return
+      const rect = host.getBoundingClientRect()
+      setAnchor({
+        top: Math.max(4, rect.top + 6),
+        right: Math.max(8, window.innerWidth - rect.right + 18),
+      })
+    }
+    update()
+    window.addEventListener('resize', update)
+    // Capture phase: catches scrolling of ANY ancestor, not just the document.
+    window.addEventListener('scroll', update, true)
+    // Layout can also change without a scroll event (panel resize, split drag),
+    // so keep polling cheaply while the widget is open.
+    const timer = window.setInterval(update, 350)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+      window.clearInterval(timer)
+    }
+  }, [findOpen])
 
   useImperativeHandle(ref, () => ({
     getContent: () => viewRef.current?.state.doc.toString() ?? savedRef.current,
@@ -152,17 +230,54 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
         ...defaultKeymap,
         ...historyKeymap,
         { key: 'Mod-s', run: () => { propsRef.current.onSave(); return true }, preventDefault: true },
+        // Ctrl/Cmd+F opens OUR widget (the built-in search panel is never
+        // mounted, so `searchKeymap` is deliberately absent). A selection seeds
+        // the query, the way it does in VS Code, so find-on-selection is one
+        // keystroke instead of a copy-paste.
+        {
+          key: 'Mod-f',
+          run: (view) => {
+            const sel = view.state.selection.main
+            if (!sel.empty) {
+              const text = view.state.sliceDoc(sel.from, sel.to)
+              if (text !== '' && text.length <= 200) {
+                setFindSeed(prev => ({ text, id: prev.id + 1 }))
+              }
+            }
+            setFindOpen(true)
+            return true
+          },
+          preventDefault: true,
+        },
+        { key: 'F3', run: (view) => { stepFind(view, true); return true }, preventDefault: true },
+        { key: 'Shift-F3', run: (view) => { stepFind(view, false); return true }, preventDefault: true },
+        {
+          key: 'Escape',
+          run: () => {
+            if (!findOpenRef.current) return false
+            setFindOpen(false)
+            return true
+          },
+        },
       ]),
       lineNumbers(),
       highlightActiveLine(),
       indentOnInput(),
       bracketMatching(),
       closeBrackets(),
-      syntaxHighlighting(defaultHighlightStyle),
+      // Match highlighting only; the widget drives it.
+      search({ top: true }),
+      initialEditorTheme(),
+      // Syntax highlighting, OUTSIDE the theme compartment: colors come from
+      // fixed `rvs-ck-*` classes in vsc.css, so this never needs reconfiguring
+      // and cannot be lost by a scheme flip.
+      syntaxHighlighting(vscodeHighlightStyle()),
+      // Fallback coloring, off until it is needed (see `armFallback`).
+      fallbackCompartment.of([]),
+      revealLineField,
       EditorView.lineWrapping,
       EditorState.readOnly.of(propsRef.current.readOnly === true),
       ...langFor(propsRef.current.path),
-      theme,
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return
         const dirty = update.state.doc.toString() !== savedRef.current
@@ -226,8 +341,63 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       parent: host,
     })
     viewRef.current = view
+    setView(view)
+    /**
+     * Self-verifying coloring.
+     *
+     * The primary highlighter needs a grammar, an idle-time parse and a
+     * decoration rebuild; when any link fails the file renders monochrome, and
+     * that failure is silent. So after mounting we LOOK at the result: if no
+     * token span appeared (and the tokenizer knows the extension), the fallback
+     * highlighter is switched on and the file gets colored from the same
+     * tokenizer the diff panes use. The console line names which path colored
+     * the file, so a screenshot or a pasted line is enough to diagnose.
+     */
+    const stamp = (source: string): void => {
+      const primary = host.querySelectorAll('[class*="rvs-ck-"]').length
+      const fallback = host.querySelectorAll('span[class^="rvs-t-"]').length
+      const count = primary > 0 ? primary : fallback
+      console.info(`[dsh-remote-vs] build ${__RVS_BUILD__} · ${source} · colored tokens: ${count} (${propsRef.current.path})`)
+      propsRef.current.onTokens?.(count)
+    }
+    const armFallback = (): void => {
+      const needsFallback = !primaryColored(host) && canFallbackHighlight(propsRef.current.path)
+      if (needsFallback) {
+        try {
+          view.dispatch({
+            effects: fallbackCompartment.reconfigure(
+              fallbackHighlight(propsRef.current.path, () => primaryColored(host)),
+            ),
+          })
+        } catch {
+          // A disposed view: nothing to color.
+        }
+      }
+      window.setTimeout(() => stamp(needsFallback ? 'fallback' : 'grammar'), 120)
+    }
+    // Two passes: the first lets CodeMirror's own highlighter settle, the
+    // second reports what actually ended up on screen.
+    window.setTimeout(armFallback, 250)
+    // Warm the parser once so the file is never left MONOCHROME: Lezer
+    // languages are highlighted from a syntax tree built by an idle-time
+    // worker, and a busy main thread (the chat stream, say) can starve it
+    // indefinitely. Forcing a bounded synchronous parse here costs a few
+    // milliseconds and removes that whole failure mode. (The jump itself is
+    // handled by the reveal effect below, which also covers re-jumps.)
+    window.setTimeout(() => {
+      try {
+        ensureSyntaxTree(view.state, view.viewport.to, 300)
+        view.dispatch({})
+      } catch {
+        // A disposed view: nothing to warm.
+      }
+    }, 120)
+    // Recolor live when the app scheme flips (compartment reconfigure, so the
+    // undo history and the cursor survive the swap).
+    const unwatchTheme = watchEditorScheme(view)
     return () => {
       popupRef.current.hide()
+      unwatchTheme()
       view.destroy()
       viewRef.current = undefined
     }
@@ -238,7 +408,24 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   const popup = selectionPopup.popup
   return (
     <>
-      <div ref={hostRef} style={{ height: '100%', overflow: 'auto' }} />
+      <div style={{ position: 'relative', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+        <div ref={hostRef} className="rvs-edge" style={{ height: '100%' }} />
+      </div>
+      {/* Portalled to <body> with fixed coordinates: the widget is then outside
+          every scroller and every clipping ancestor in the editor subtree. */}
+      {findOpen && typeof document !== 'undefined' && createPortal(
+        <FindWidget
+          view={view}
+          open={findOpen}
+          seed={findSeed}
+          anchor={anchor}
+          onClose={() => {
+            setFindOpen(false)
+            view?.focus()
+          }}
+        />,
+        document.body,
+      )}
       {popup !== null && typeof document !== 'undefined' && createPortal(
         <button
           ref={selectionPopup.buttonRef}

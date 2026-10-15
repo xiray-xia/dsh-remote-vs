@@ -4,17 +4,19 @@
 
 中文 | [English](./README.en.md)
 
-Host 进程内的 SSH 主机管理 + helper 推送流水线 + 远端文件/终端/Git。
+Host 进程内的 SSH 主机管理 + helper 推送流水线 + **VS Code 式远端工作台**
+（资源管理器 / 搜索 / 源代码管理 / 提交图 / 多标签编辑器 / 并排 Diff / 多终端）。
 主机配在 DSH 设置里（“远程主机”项）；装了 `dsh-better-sidebar` 时另有
-独立“远程”tab（工作区/文件/终端/Git），没装则退到原生右侧栏“远程”页
-（同内容，引导页自助开，per-session 实例）。
+独立“远程”tab，没装则退到原生右侧栏“远程”页（同内容，引导页自助开，per-session 实例）。
+编辑器还额外挂到会话视图槽，与“对话 / 轨迹”并列成一个**远程编辑器**标签，
+这样代码区是整屏宽的；右侧栏那份是窄屏备用面。
 P2 起原生工具在远端工作区里透明跑远端（见下）。
 
 ```text
 ┌─ 本机 DSH Host ─────────────────────────────────┐
 │  本插件 Host 半      │  Client 半（浏览器）     │
 │  主机/密钥/推送/路由 │  设置两节 + 原生入口接管 │
-│  /api/dsh-remote/*   │  远程页(双面二选一)      │
+│  /api/dsh-remote/*   │  工作台（右侧栏 + 会话视图）│
 └──────────────────────┴──────────────────────────┘
        │ ssh2（文件/进程/终端）+ helper RPC（远端 fs）
        ▼
@@ -35,15 +37,38 @@ dsh plugin add github:xiray-xia/dsh-remote-vs
 
 ## 能力
 
+### 远端工作台（VS Code 式 UI）
+
+| 能力 | 说明 |
+| --- | --- |
+| 资源管理器 | 懒加载目录树 + 展开折叠 + 隐藏文件开关；右键菜单：新建/改名/删除/复制/移动/粘贴/在此文件夹查找/插入 `@` 引用；git 状态色与文件夹聚合标记 |
+| 搜索 | 两档：**文件名**（远端 `find`）与**内容**（远端 `grep`）。内容档带范围目录、`Aa`（大小写）/`ab_`（全字）/`.*`（正则）、结果按文件分组、命中高亮，点条目跳到该行 |
+| 源代码管理 | 变更/暂存/未跟踪/忽略分桶，逐文件与**逐 hunk** 暂存/还原、丢弃（带确认）、提交；分支/远程/stash 面板；同步（fetch/pull/push） |
+| 并排 Diff | 左右**严格等分** + 中间 gutter 逐 hunk 按钮 + **顶部横向滚动条**（一行很长也不会破坏对称）+ 行号钉在左侧；可切「变更前 / 变更后」，变更后可编辑并保存 |
+| 提交图 | SVG 分支/合并图 + 提交详情 + 点击提交展开变更文件 + 进文件看 diff |
+| 多标签编辑器 | 打开/保存/重载、脏标记、多文件标签并存；图片预览、Markdown/HTML 预览（源码/预览切换） |
+| 语法高亮 | VS Code **Dark+ / Light+** 配色；覆盖 java/aidl/smali、c/c++、go、rust、js/ts、json、py、yaml、xml、html/css、md、sh、properties/rc/toml、diff 等；**兜底着色器**在语法包没命中时自动接管，不会出现整篇无色。诚实说明：kotlin / gradle / smali 用 Java 语法着色（没有专用语法包），效果是关键字/字符串/注释正确、专有语法不细分 |
+| 查找 | 编辑器内 `Ctrl+F`（`Aa`/`ab_`/`.*`、`3/17` 计数、↑↓、`F3`/`Shift+F3`、`Esc`）；**选中文本按 `Ctrl+F` 直接填入**；查找框钉在右上角，滚动不带走 |
+| 跳转 | 从搜索结果点进文件 → 跳到该行 + 垂直居中 + **落地行高亮**（约 2.6 秒后淡出）；同文件反复跳都生效 |
+| 多终端 | 标签式多终端（`+` 新建、`✕`/中键关闭带确认）、可跨主机；刷新页面按 session id 自动重连回原会话 |
+| 工作区 | 绑定列表 + 路由档位下拉 + 新建工作区双模向导（本地 / 远端） |
+
+### 主机与通道
+
 | 能力 | 说明 |
 | --- | --- |
 | 主机管理 | 增删改查、连接测试；证书 / 密码认证；配置存 `$DSH_HOME/dsh-remote.json`（0600），与 `dsh-ssh.json` 独立 |
 | 密钥 bootstrap | 密码主机一键生成专用密钥对并下发 `authorized_keys`，之后走密钥 |
 | 推送流水线 | 远端 arch/系统探测 → 版本比对 → 一致跳过 / 否则推送；executable 通道推送自编译 helper |
-| 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名 + CodeMirror 多开编辑 + 拖拽分割线 |
+| 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名。边界已加固：0 字节文件不再卡死，每个 SFTP 操作 60s 超时回收通道（详见 `docs/MAINTENANCE.md` §2.20） |
 | 远端终端 | ssh2 PTY + WebSocket，xterm 渲染（复制粘贴/主题跟随/刷新重连） |
 | Git 图谱 | 远端仓库状态 + 分支 + SVG 提交图 + 提交详情（exec + 前端解析，零 Host 增量）|
 | 导入 | 从 `~/.ssh/config`、从现有 `dsh-ssh.json` 一键导入（只读一次，不耦合）|
+
+### Agent 能力
+
+| 能力 | 说明 |
+| --- | --- |
 | Agent 工具 | `remote_hosts` / `remote_exec` / `remote_read` / `remote_write` / `remote_ls` |
 | **P2 透明远端执行** | 远端工作区里原生 `read/write/edit/bash/glob/grep/jobs` 直接跑在远端 |
 | **P3 远端 @ 引用** | 远端会话 `@` 出远端文件候选（路由 fileReferences，scoped 实时/bare 走远端 rg 索引） |
@@ -68,6 +93,9 @@ dsh_remote_vs/
 │   ├── tools.ts            # 5 个 Agent 工具定义
 │   ├── http.ts / loopback.ts # JSON 体读写 + 回环信任围栏
 │   ├── git-format.ts       # git 命令构造 + 纯前端解析（Host 零增量）
+│   ├── git-ops.ts          # 远端 git 全量动作：status/diff/分支/远程/stash/提交/hunk 补丁构造 + 解析器
+│   ├── fs-ops.ts           # 远端文件操作命令构造（复制/移动/删除/stat）
+│   ├── search-ops.ts       # 远端内容搜索（grep 构造 + NUL 分隔解析 + 命中切分）
 │   ├── p2/                 # ── P2 透明路由 ──
 │   │   ├── worlds.ts       # 世界判定（cwd 键/别名/墓碑）+ RPC/FS/进程远端上下文
 │   │   ├── helper-rpc.ts   # ssh2 exec 通道上的 helper wire 协议（握手/心跳）
@@ -82,12 +110,33 @@ dsh_remote_vs/
 │   │   └── bridge-refs.ts  # refs 独立桥（local-refs 依赖 workingDirectory，必须分离）
 │   └── client/             # ── 浏览器半（React，打包进 lib/client.js）──
 │       ├── index.tsx       # 双面决策（better 优先/settle 加速/原生兜底）+ 设置两节 + directoryFlow 双槽接管
-│       ├── RemoteRoot.tsx    # 双面共用根（工作区/文件/终端/Git 四子页）
+│       ├── store.tsx       # 双面共用的模块级状态（useSyncExternalStore；打开的文件/终端/视图都在这）
+│       ├── RemoteRoot.tsx  # 右侧栏挂载面：VS Code 式活动栏（资源管理器/搜索/SCM/提交图/编辑器/终端/工作区）
+│       ├── RemoteEditorView.tsx # 会话视图挂载面（与 对话/轨迹 并列的「远程编辑器」标签，整屏宽）
+│       ├── RemoteExplorer.tsx   # 资源管理器：树 + 右键菜单 + 文件操作 + @ 引用 + 状态标记
+│       ├── SearchView.tsx       # 搜索面板：文件名 / 内容 两档 + Aa/ab_/.* + 分组结果 + 跳转
+│       ├── EditorPane.tsx       # 编辑器面板：多标签 + 信息栏（构建戳/tok 计数）+ 图片/MD/HTML 预览
+│       ├── CodeEditor.tsx       # CodeMirror 封装：语法包表/主题/查找框/跳转/兜底着色接线
+│       ├── scm/            # ── 源代码管理 ──
+│       │   ├── ScmPanel.tsx     # 变更/暂存/未跟踪 + 逐文件逐 hunk 操作 + 提交框
+│       │   ├── DiffView.tsx     # 并排 diff（顶部横向滚动条/hunk 按钮/可编辑变更后侧）
+│       │   ├── HistoryPanel.tsx # SVG 提交图 + 提交详情 + 展开变更文件
+│       │   ├── actions.ts       # 远端 git 动作层（exec 通道）
+│       │   ├── diff-model.ts    # unified diff → 并排行投影（纯函数）
+│       │   └── status-map.ts    # 状态分桶 + 树标记（纯函数）
+│       ├── vsc/            # ── VS Code 皮肤与控件（零新依赖）──
+│       │   ├── kit.tsx / vsc.css    # 图标/对话框/右键菜单/分段控件 + 全部样式（.rvs-root 作用域）
+│       │   ├── editor-palette.ts    # Dark+/Light+ 配色 + 固定类名（rvs-ck-*）
+│       │   ├── editor-theme.ts      # 编辑器容器主题（明暗热切换）
+│       │   ├── editor-langs.ts      # 扩展名 → CodeMirror 语法包
+│       │   ├── fallback-highlight.ts# 语法包没命中时的兜底着色（用 tokenize.ts）
+│       │   ├── FindWidget.tsx       # Ctrl+F 查找框（固定右上角）
+│       │   ├── reveal-line.ts       # 跳转 + 落地行高亮
+│       │   ├── tokenize.ts / markdown.tsx # 只读面板分词器 / 零依赖 Markdown 渲染
 │       ├── NativeExplorer.tsx# 原生页类型定义 + seat 正文（无 sidebar 兜底）
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # 远端 @引用/选中加对话
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
-│       ├── HostsView / WorkspacesView / WorkspaceWizard / FilesView
-│       ├── CodeEditor / TerminalView / XTerm / GitView / Dialog
+│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / Dialog
 │       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表，自取数）
 │       ├── DirectoryFlow.tsx        # 原生入口 occupant（本地双模/远端向导）
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
@@ -105,8 +154,28 @@ dsh_remote_vs/
 新版本 helper 编好后把 4 件套（tarball + sha256 + helper.json + 补丁说明）
 换进 vendor 并提交即可，见 `docs/MAINTENANCE.md` §4。
 
-`.spike/`（gitignored）是真机验证脚本：`p2-router.ts` 主回归（真远端 + 真
-Cordis + 真路由类）+ `grep-probe.mjs` 等探针，构建见 `tsconfig.scratch.json`。
+`.spike/`（gitignored）是真机验证脚本 + 本地自检脚本：`p2-router.ts` 主回归（真远端 + 真
+Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
+`model-check.mjs` / `reveal-check.mjs` / `fallback-check.mjs`（见下文“开发”）。
+
+## 远端工作台（VS Code 式）
+
+两个挂载面共用一份状态（`store.tsx`）：**右侧栏「远程」**（装了 better-sidebar 走独立 tab，
+否则走原生右栏页）与**会话视图「远程编辑器」**（与 对话/轨迹 并列，代码区整屏宽）。
+
+- **活动栏**：资源管理器 / 搜索 / 源代码管理 / 提交图 / 编辑器 / 终端 / 工作区；面板首次访问后
+  保持挂载，切回来不重新拉取、不闪。
+- **编辑器**：多标签 + 信息栏（路径、语言、**构建戳**、`tok N` 着色 token 数、已保存状态、重载/保存）。
+  信息栏三个标记是给排障用的：构建戳判定"浏览器跑的是不是刚编的包"，`tok 0` 判定语法包是否命中。
+- **查找与跳转**：`Ctrl+F` 查找框固定右上角（`position: fixed` 锚定编辑器矩形，任何祖先滚动都不带走）；
+  选中文本按 `Ctrl+F` 直接填入；从搜索结果跳转会**居中 + 落地行高亮**。
+- **终端**：标签式多终端，session id 逐个持久化，刷新页面自动重连回原会话。
+- **已知边界（诚实说明）**：
+  - 切到「远程编辑器」标签**没有公开 API**，插件只能按标签文字点击外壳自己的 tab，失败时给 toast
+    提示手动切（`revealEditor()`）；
+  - 未跟踪目录在状态里是**一行**（`dir/`），点它只提示不展开（性能取舍）；
+  - 打开文件读取上限 8MiB（helper 官方常量），超限以只读方式呈现；
+  - 查找框用固定定位浮在代码上方（与 VS Code 一致），不占布局空间。
 
 ## P2 透明远端执行（Windows 原生）
 
@@ -158,8 +227,24 @@ pnpm run build
 dsh plugin --profile web add link:<本目录绝对路径>
 ```
 
-改完 client 后硬刷新浏览器即可；host 半改动需重启 `dsh web`。
-DSH 发新版时先读 `docs/MAINTENANCE.md` 再动手。
+**改完必须重启 `dsh web`（客户端半也一样）**：插件包在 Host 启动时被读进内存
+（`initialBundleSnapshot`，URL 带 `rev` 且响应 `immutable` 一年），浏览器刷新——包括
+`Ctrl+Shift+R`——只会取回启动时抓下的那批字节。判定方法：
+
+1. 构建后 `lib/client.js` 里会注入构建戳（`MMDD-HHmm`），编辑器信息栏右侧显示的就是它；
+2. 重启 `dsh web` → 刷新页面：**戳变了才算生效**；
+3. 颜色类问题再看 `tok N`：`0` = 该扩展名没命中语法包，且兜底着色器也没接管（会给括号里的文件路径）。
+
+自检（不需要真机、不需要 DSH，几十秒）：
+
+```sh
+node .spike/model-check.mjs      # 48 项：真 git/grep 输出 → 解析器、diff 模型、高亮类名↔CSS 契约
+node .spike/reveal-check.mjs     # 5 项：跳转落点、落地高亮、同文件二次跳转
+node .spike/fallback-check.mjs   # 12 项：兜底着色器在真 DOM 里给 java/cpp/shell 上色
+```
+
+真机回归仍是 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`。
+DSH 发新版时先读 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手。
 
 ## 开源许可
 

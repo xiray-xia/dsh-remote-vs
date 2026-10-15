@@ -255,6 +255,117 @@ export interface GitBranch {
   upstream: string
   /** True when this is the current HEAD. */
   head: boolean
+  /** True for a remote-tracking branch (`refs/remotes/...`). */
+  remote?: boolean
+}
+
+/** One path row of the detailed (NUL-separated) porcelain status. */
+export interface GitPathStatus {
+  /** Repo-relative path (the destination for renames). */
+  path: string
+  /** Staged (index) status column. */
+  x: string
+  /** Unstaged (worktree) status column. */
+  y: string
+  /** Rename/copy source. */
+  origPath?: string
+}
+
+/** Detailed status: every entry plus the ignored half (drives tree greying). */
+export interface GitStatusDetail {
+  entries: GitPathStatus[]
+  /** Ignored paths, as `git status --ignored=matching` reports them. */
+  ignored: string[]
+  /** True when the byte cap cut the listing short. */
+  truncated: boolean
+}
+
+/** One configured remote URL. */
+export interface GitRemote {
+  name: string
+  url: string
+  kind: 'fetch' | 'push'
+}
+
+/** One stash entry. */
+export interface GitStash {
+  /** `stash@{0}`. */
+  ref: string
+  message: string
+  /** Unix seconds. */
+  date: number
+}
+
+/** One file row of a commit (`--name-status`). */
+export interface GitCommitFile {
+  /** Single letter, or `R100`-style for renames. */
+  status: string
+  path: string
+  origPath?: string
+}
+
+/** One hunk of a unified diff, with a ready-to-apply patch body. */
+export interface UnifiedHunk {
+  oldStart: number
+  oldCount: number
+  newStart: number
+  newCount: number
+  /** Text after the `@@` marker. */
+  heading: string
+  /** Raw hunk lines (leading ' ', '-', '+', '\'). */
+  lines: string[]
+  /** File header + hunk header + lines: exactly what `git apply` needs. */
+  patch: string
+}
+
+/** One file block of a unified diff. */
+export interface UnifiedDiffFile {
+  /** Destination path (source path for deletions). */
+  path: string
+  oldPath: string
+  status: 'M' | 'A' | 'D' | 'R' | 'C' | 'U'
+  binary: boolean
+  hunks: UnifiedHunk[]
+}
+
+/** One row of the side-by-side diff projection. */
+export interface DiffRow {
+  id: number
+  /** Left (before) text; '' when the row has no left counterpart. */
+  old: string
+  /** Right (after) text; '' when the row has no right counterpart. */
+  new: string
+  oldNum: number | null
+  newNum: number | null
+  /** False when the row does not exist on the right side at all. */
+  inNew: boolean
+  oldDel: boolean
+  newAdd: boolean
+  /** Index into the model's hunk list, or -1 outside every hunk. */
+  hunk: number
+}
+
+/** One hunk as the view needs it (numbers + the patch to stage/revert). */
+export interface DiffHunkView {
+  index: number
+  oldStart: number
+  newStart: number
+  oldCount: number
+  newCount: number
+  heading: string
+  /** Row index of the hunk's first changed line. */
+  startRow: number
+  patch: string
+}
+
+/** The full side-by-side model for one file. */
+export interface DiffModel {
+  rows: DiffRow[]
+  hunks: DiffHunkView[]
+  /** True when git reported a binary diff (no rows). */
+  binary: boolean
+  /** True when the two sides are byte-identical. */
+  empty: boolean
 }
 
 /** Commit detail. */

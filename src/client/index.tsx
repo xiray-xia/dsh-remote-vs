@@ -11,11 +11,15 @@ import type {} from 'dsh-better-sidebar'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import './vsc/vsc.css'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
 import { registerNativeExplorer } from './NativeExplorer.tsx'
+import { RemoteEditorView } from './RemoteEditorView.tsx'
 import { RemoteRoot } from './RemoteRoot.tsx'
 import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
+import { setEditorSurface } from './store.tsx'
 import { detectLang, makeT } from './i18n.ts'
+import { setIconService, type IconServiceLike } from './vsc/kit.tsx'
 
 /** Services required before mounting (slots/uiWorkspace are core web services). */
 export const inject = ['slots', 'uiWorkspace']
@@ -69,6 +73,17 @@ export function apply(ctx: Context): void {
         return false
       }
       if (sidebar === undefined) return false
+      // The host icon classifier paints the remote tree with the same glyphs
+      // the local sidebar uses (and honours any registered icon theme). It is
+      // optional: without it the built-in SVG set takes over.
+      try {
+        const candidate = sidebar as unknown as Partial<IconServiceLike>
+        if (typeof candidate.fileIcon === 'function' && typeof candidate.folderIcon === 'function') {
+          setIconService(candidate as IconServiceLike)
+        }
+      } catch {
+        // Ignore: icons fall back to the built-in set.
+      }
       try {
         disposeBetter = sidebar.registerTab({
           id: 'remote-vs:explorer',
@@ -177,4 +192,33 @@ export function apply(ctx: Context): void {
       label: () => settingsT('settings.workspaces'),
     }, SettingsWorkspacesSection),
   ), 'dsh-remote-vs: settings workspaces')
+  // The editor tab in the conversation view (right next to 对话 / 轨迹): at
+  // full width the file editor and the side-by-side diff stop competing with
+  // the tree for a narrow sidebar column. The store then flips the editor
+  // surface to 'center' and the sidebar keeps the whole column for browsing.
+  // A host without this slot keeps the old sidebar split (nothing disappears).
+  const viewT = makeT(detectLang())
+  ctx.effect(() => {
+    let dispose: (() => void) | undefined
+    try {
+      dispose = ctx.slots.inject('conversation.view', () => ctx.slots.register({
+        name: 'conversation.view',
+        id: 'remote-editor',
+        order: 30,
+        label: () => viewT('view.editor'),
+      }, () => <RemoteEditorView ctx={ctx} />))
+    } catch (error) {
+      console.warn('[dsh-remote-vs] conversation.view registration failed:', error)
+      return () => {}
+    }
+    setEditorSurface('center')
+    return () => {
+      setEditorSurface('sidebar')
+      try {
+        dispose?.()
+      } catch {
+        // Ignore.
+      }
+    }
+  }, 'dsh-remote-vs: conversation view (editor + diff)')
 }

@@ -1,0 +1,2090 @@
+/**
+ * VS Code-style design system for the remote explorer. Every surface below
+ * is scoped under `.rvs-root` so the sheet can never leak into the host GUI,
+ * and every host token carries a literal fallback: the plugin also renders in
+ * the native right-Sidebar fallback and on hosts whose alias tokens differ.
+ *
+ * Palette and metrics are aligned with the reference implementation
+ * (dsh-solution-explorer): 13px/20px panel type, 5px/10px tree rows with a
+ * 10px radius, a 30px activity button with the badge tucked into the icon's
+ * bottom-right corner, GitHub-Dark token colors, and the
+ * `--e2b714 / #4ec9b0 / #f14c4c` modified/added/deleted triple.
+ */
+
+.rvs-root {
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-active: var(--dsw-alias-interactive-bg-active, rgba(77, 107, 254, .22));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  --rvs-input: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
+  --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
+  --rvs-layer3: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, .16));
+  --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
+  --rvs-accent: var(--dsw-alias-button-info-fill, #4d6bfe);
+  --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-git-m: #e2b714;
+  --rvs-git-a: #4ec9b0;
+  --rvs-git-d: #f14c4c;
+  --rvs-git-r: #4ec9b0;
+  --rvs-git-c: #58a6ff;
+  --rvs-git-u: #f14c4c;
+  --rvs-git-x: #6e6e6e;
+  --rvs-add-bg: rgba(78, 201, 176, .15);
+  --rvs-del-bg: rgba(241, 76, 76, .15);
+  /* Opaque equivalents, for elements that must not show what scrolls under
+     them (the pinned diff line numbers). */
+  --rvs-add-solid: #e4f6f1;
+  --rvs-del-solid: #fdeaea;
+  --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  /* Opaque code surfaces (Light+ default; the dark block below flips them). */
+  --rvs-code-bg: #ffffff;
+  --rvs-code-fg: #1f1f1f;
+  --rvs-code-gutter-fg: #237893;
+
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--rvs-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/**
+ * Code surfaces are OPAQUE, in the editor's own palette rather than the DSH
+ * skin: syntax colors need a definite background to stay readable, and the
+ * app shell marks its resolved scheme on <body> (same signal theme.ts reads).
+ */
+body[data-ds-dark-theme] .rvs-root {
+  --rvs-code-bg: #1e1e1e;
+  --rvs-code-fg: #d4d4d4;
+  --rvs-code-gutter-fg: #858585;
+  --rvs-add-solid: #16332e;
+  --rvs-del-solid: #3b2325;
+}
+
+.rvs-edge {
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+}
+
+.rvs-root *,
+.rvs-portal * {
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------ activity rail */
+
+.rvs-rail {
+  flex: none;
+  width: 38px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  border-right: 1px solid var(--rvs-border);
+  background: var(--dsw-specific-sidebar-fill, transparent);
+}
+
+.rvs-rail-btn {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  cursor: pointer;
+}
+
+.rvs-rail-btn:hover {
+  color: var(--rvs-fg);
+  background: var(--rvs-hover);
+}
+
+.rvs-rail-btn.active {
+  color: var(--rvs-fg);
+  background: var(--rvs-hover);
+  box-shadow: inset 2px 0 0 var(--rvs-brand);
+}
+
+.rvs-rail-btn.danger:hover {
+  color: var(--rvs-danger);
+}
+
+.rvs-rail-badge {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--rvs-accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.rvs-rail-sep {
+  flex: none;
+  width: 20px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--rvs-border);
+}
+
+/* -------------------------------------------------------- panel + editor */
+
+.rvs-column {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rvs-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/**
+ * One lazily-mounted panel slot: a visited panel stays mounted and is merely
+ * hidden, so returning to the explorer (or the terminal) neither refetches nor
+ * flashes a reload.
+ */
+.rvs-viewslot {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/** Padding for the legacy views (workspaces / terminal) that draw no chrome. */
+.rvs-viewpad {
+  padding: 10px 12px 14px;
+  box-sizing: border-box;
+}
+
+.rvs-pane.grow {
+  flex: 1;
+}
+
+.rvs-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-header .rvs-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--rvs-fg3);
+}
+
+.rvs-hbtn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  cursor: pointer;
+}
+
+.rvs-hbtn:hover {
+  color: var(--rvs-fg);
+  background: var(--rvs-hover);
+}
+
+.rvs-hbtn.danger:hover {
+  color: #fff;
+  background: var(--rvs-danger);
+}
+
+.rvs-hbtn:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+.rvs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.rvs-globalbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--rvs-border);
+  font-size: 11px;
+}
+
+.rvs-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.rvs-scroll::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(127, 127, 127, .4));
+  border-radius: 4px;
+}
+
+.rvs-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--dsw-alias-scrollbar-hover-l2, rgba(127, 127, 127, .6));
+}
+
+.rvs-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rvs-vsplit-handle {
+  flex: none;
+  position: relative;
+  height: 7px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.rvs-vsplit-handle::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 1px;
+  background: var(--rvs-border);
+}
+
+.rvs-vsplit-handle:hover::after,
+.rvs-vsplit-handle[data-dragging='true']::after {
+  top: 2px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--rvs-brand);
+}
+
+/* ------------------------------------------------------------------ tree */
+
+.rvs-tree {
+  padding: 4px 6px 12px;
+  min-width: 0;
+}
+
+.rvs-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-node:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-node.selected {
+  background: var(--rvs-active);
+}
+
+.rvs-node.cut {
+  opacity: .5;
+}
+
+.rvs-node.drop-target {
+  background: var(--rvs-active);
+  outline: 1px solid var(--rvs-brand);
+  outline-offset: -1px;
+}
+
+.rvs-node-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--rvs-fg3);
+}
+
+.rvs-node-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-node-actions {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.rvs-node:hover .rvs-node-actions {
+  display: flex;
+}
+
+.rvs-git-letter {
+  flex: none;
+  width: 14px;
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.rvs-git-M, .rvs-letter-M { color: var(--rvs-git-m); }
+.rvs-git-A, .rvs-letter-A { color: var(--rvs-git-a); }
+.rvs-git-D, .rvs-letter-D { color: var(--rvs-git-d); }
+.rvs-git-R, .rvs-letter-R { color: var(--rvs-git-r); }
+.rvs-git-C, .rvs-letter-C { color: var(--rvs-git-c); }
+.rvs-git-U, .rvs-letter-U { color: var(--rvs-git-u); }
+.rvs-git-q, .rvs-letter-q, .rvs-git-\\? { color: var(--rvs-git-a); }
+.rvs-git-x, .rvs-letter-x { color: var(--rvs-git-x); }
+.rvs-git-T, .rvs-letter-T { color: var(--rvs-git-m); }
+
+.rvs-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  border: 1px solid var(--rvs-brand);
+  border-radius: 4px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  outline: none;
+}
+
+.rvs-empty {
+  padding: 18px 14px;
+  color: var(--rvs-fg3);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.7;
+}
+
+.rvs-banner {
+  margin: 6px 8px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.rvs-banner.info {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg2);
+}
+
+.rvs-banner.error {
+  background: rgba(200, 60, 60, .16);
+  color: var(--rvs-danger);
+}
+
+.rvs-banner.warn {
+  background: rgba(226, 183, 20, .14);
+  color: var(--rvs-git-m);
+}
+
+/* --------------------------------------------------------- source control */
+
+.rvs-scm-section {
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-scm-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px 0 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--rvs-fg2);
+}
+
+.rvs-scm-head:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-scm-head .rvs-count {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--rvs-fg3);
+}
+
+.rvs-scm-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rvs-scm-section.collapsed > *:not(.rvs-scm-head) {
+  display: none !important;
+}
+
+.rvs-chevron {
+  flex: none;
+  transition: transform .12s ease;
+}
+
+.rvs-chevron.open {
+  transform: rotate(90deg);
+}
+
+.rvs-scm-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px 3px 22px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 19px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-scm-item:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-scm-item.selected {
+  background: var(--rvs-active);
+}
+
+.rvs-scm-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-scm-dir {
+  flex: none;
+  color: var(--rvs-fg3);
+}
+
+.rvs-scm-actions {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 1px;
+}
+
+.rvs-scm-item:hover .rvs-scm-actions {
+  display: flex;
+}
+
+.rvs-commit-box {
+  flex: none;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-commit-input {
+  width: 100%;
+  min-height: 58px;
+  max-height: 180px;
+  padding: 6px 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  resize: vertical;
+  outline: none;
+}
+
+.rvs-commit-input:focus {
+  border-color: var(--rvs-brand);
+}
+
+.rvs-commit-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.rvs-commit-btn {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: var(--rvs-accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rvs-commit-btn:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.rvs-repo-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 12px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.rvs-repo-item:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-repo-item.active {
+  background: var(--rvs-active);
+}
+
+.rvs-repo-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-repo-branch {
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--rvs-hover);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rvs-fg);
+}
+
+.rvs-subpanel {
+  margin: 6px 8px;
+  padding: 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.rvs-subpanel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--rvs-fg2);
+  font-weight: 600;
+}
+
+.rvs-chip {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.rvs-chip:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-chip.primary {
+  background: var(--rvs-accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.rvs-chip.danger:hover {
+  background: var(--rvs-danger);
+  border-color: transparent;
+  color: #fff;
+}
+
+.rvs-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.rvs-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 6px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.rvs-input:focus {
+  border-color: var(--rvs-brand);
+}
+
+.rvs-select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 6px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  color-scheme: light dark;
+}
+
+.rvs-select option {
+  background: Canvas;
+  color: CanvasText;
+}
+
+/* ---------------------------------------------------------------- editor */
+
+.rvs-etabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 32px;
+  padding: 0 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--rvs-border);
+  scrollbar-width: none;
+}
+
+.rvs-etabs::-webkit-scrollbar {
+  height: 0;
+}
+
+.rvs-etab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 190px;
+  margin: 4px 0;
+  padding: 0 4px 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rvs-etab:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-etab.active {
+  background: var(--rvs-layer3);
+  color: var(--rvs-fg);
+}
+
+.rvs-etab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-etab-dot {
+  flex: none;
+  font-size: 9px;
+  color: var(--rvs-git-m);
+}
+
+.rvs-etab-close {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: .65;
+}
+
+.rvs-etab-close:hover {
+  background: var(--rvs-hover);
+  opacity: 1;
+}
+
+.rvs-einfo {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px 2px 10px;
+  border-bottom: 1px solid var(--rvs-border);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-einfo-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Truncate from the LEFT (keep the tail) without reordering the text:
+     `plaintext` gives the content its own LTR base direction, which is what
+     stops a leading "/" from rendering as a trailing one. */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+.rvs-einfo-spacer {
+  margin-left: auto;
+}
+
+.rvs-status.dirty { color: var(--rvs-git-m); }
+.rvs-status.saved { color: var(--rvs-git-a); }
+.rvs-status.saving { color: var(--rvs-fg2); }
+
+.rvs-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Anchors portalled overlays (the find widget) outside every scroller. */
+  position: relative;
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+}
+
+.rvs-editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--rvs-code-bg);
+}
+
+/* ------------------------------------------------------- preview surfaces */
+
+.rvs-preview-img {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background-color: var(--rvs-code-bg);
+  background-image:
+    linear-gradient(45deg, rgba(127, 127, 127, .08) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(127, 127, 127, .08) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(127, 127, 127, .08) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(127, 127, 127, .08) 75%);
+  background-size: 20px 20px, 20px 20px, 20px 20px, 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.rvs-preview-img img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.rvs-markdown {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 24px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--rvs-code-fg);
+  background: var(--rvs-code-bg);
+  user-select: text;
+}
+
+.rvs-markdown h1, .rvs-markdown h2, .rvs-markdown h3, .rvs-markdown h4 {
+  margin: 14px 0 6px;
+  line-height: 1.35;
+}
+
+.rvs-markdown h1 { font-size: 19px; border-bottom: 1px solid var(--rvs-border); padding-bottom: 5px; }
+.rvs-markdown h2 { font-size: 16px; border-bottom: 1px solid var(--rvs-border); padding-bottom: 4px; }
+.rvs-markdown h3 { font-size: 14px; }
+.rvs-markdown p { margin: 6px 0; }
+.rvs-markdown ul, .rvs-markdown ol { margin: 6px 0; padding-left: 22px; }
+.rvs-markdown li { margin: 2px 0; }
+.rvs-markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--rvs-hover);
+  font-family: var(--rvs-mono);
+  font-size: 12px;
+}
+.rvs-markdown pre {
+  margin: 8px 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--rvs-input);
+  overflow-x: auto;
+}
+.rvs-markdown pre code { padding: 0; background: transparent; }
+.rvs-markdown blockquote {
+  margin: 8px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--rvs-border2);
+  color: var(--rvs-fg2);
+}
+.rvs-markdown a { color: var(--dsw-alias-label-link, #58a6ff); text-decoration: none; }
+.rvs-markdown a:hover { text-decoration: underline; }
+.rvs-markdown table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+.rvs-markdown th, .rvs-markdown td { border: 1px solid var(--rvs-border2); padding: 4px 8px; }
+.rvs-markdown hr { border: none; border-top: 1px solid var(--rvs-border); margin: 12px 0; }
+
+.rvs-html-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* ------------------------------------------------------------------ diff */
+
+.rvs-diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rvs-diff-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--rvs-border);
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-seg {
+  display: inline-flex;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.rvs-seg button {
+  padding: 2px 9px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-fg2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rvs-seg button.active {
+  background: var(--rvs-active);
+  color: var(--rvs-fg);
+}
+
+.rvs-seg button:hover:not(.active) {
+  background: var(--rvs-hover);
+}
+
+.rvs-diff-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: var(--rvs-mono);
+  font-size: 12px;
+  line-height: 18px;
+  scrollbar-width: thin;
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+}
+
+/**
+ * Top horizontal scrollbar.
+ *
+ * The two panes scroll horizontally on their own — so a long line can never
+ * widen the layout — and this proxy bar drives both of them from the TOP of
+ * the view, instead of forcing a scroll to the bottom of the file to reach a
+ * horizontal bar. Its inner spacer is sized to the widest pane.
+ */
+.rvs-hbar {
+  flex: none;
+  height: 13px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--rvs-border);
+  scrollbar-width: thin;
+}
+
+.rvs-hbar-inner {
+  height: 1px;
+}
+
+.rvs-hbar::-webkit-scrollbar {
+  height: 9px;
+}
+
+.rvs-hbar::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(127, 127, 127, .45));
+  border-radius: 5px;
+}
+
+.rvs-hbar::-webkit-scrollbar-thumb:hover {
+  background: var(--dsw-alias-scrollbar-hover-l2, rgba(127, 127, 127, .65));
+}
+
+.rvs-hbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rvs-diff-cols {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+/**
+ * One diff pane. `flex: 1 1 0` keeps the panes EXACTLY equal however long a
+ * line is (the previous row markup let a long line widen its own pane, which
+ * is what broke the symmetry), and each pane carries its own horizontal
+ * scroll — hidden, because the top bar is the user-facing control.
+ */
+.rvs-diff-col {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.rvs-diff-col::-webkit-scrollbar {
+  height: 0;
+  width: 0;
+}
+
+.rvs-dline {
+  display: flex;
+  align-items: flex-start;
+  height: 18px;
+  line-height: 18px;
+  white-space: pre;
+}
+
+.rvs-dline-num {
+  /* Pinned while the line scrolls sideways, so a long line never takes the
+     line numbers away with it. */
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: none;
+  width: 3.4em;
+  padding-right: 6px;
+  text-align: right;
+  color: var(--rvs-fg3);
+  opacity: .85;
+  user-select: none;
+  background: var(--rvs-code-bg);
+}
+
+.rvs-row-del .rvs-dline-num {
+  background: var(--rvs-del-solid);
+}
+
+.rvs-row-add .rvs-dline-num {
+  background: var(--rvs-add-solid);
+}
+
+.rvs-dline-text {
+  flex: 1;
+  padding-right: 10px;
+  user-select: text;
+}
+
+.rvs-gutter-col {
+  flex: none;
+  width: 30px;
+  border-left: 1px solid var(--rvs-border);
+  border-right: 1px solid var(--rvs-border);
+  user-select: none;
+}
+
+.rvs-gutter-line {
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rvs-diff-grid::-webkit-scrollbar {
+  width: 9px;
+  height: 0;
+}
+
+.rvs-diff-grid::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(127, 127, 127, .4));
+  border-radius: 4px;
+}
+
+.rvs-diff-row {
+  display: flex;
+  align-items: stretch;
+  min-width: max-content;
+}
+
+.rvs-cell {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  white-space: pre;
+}
+
+.rvs-cell.left {
+  flex: 1 1 50%;
+  border-right: 1px solid var(--rvs-border);
+}
+
+.rvs-cell.right {
+  flex: 1 1 50%;
+}
+
+.rvs-cell.solo {
+  flex: 1 1 100%;
+}
+
+.rvs-cell-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px 0 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.rvs-num {
+  flex: none;
+  display: inline-block;
+  width: 3.2em;
+  padding-right: 6px;
+  text-align: right;
+  color: var(--rvs-fg3);
+  opacity: .6;
+  user-select: none;
+}
+
+.rvs-row-del {
+  background: var(--rvs-del-bg);
+}
+
+.rvs-row-del .rvs-dline-text,
+.rvs-row-del .rvs-cell-text,
+.rvs-row-del .rvs-dline-num,
+.rvs-row-del .rvs-num {
+  color: #f14c4c;
+}
+
+.rvs-row-add {
+  background: var(--rvs-add-bg);
+}
+
+.rvs-row-add .rvs-dline-text,
+.rvs-row-add .rvs-cell-text,
+.rvs-row-add .rvs-dline-num,
+.rvs-row-add .rvs-num {
+  color: #4ec9b0;
+}
+
+.rvs-row-empty {
+  color: var(--rvs-fg3);
+  opacity: .35;
+}
+
+.rvs-gutter {
+  flex: none;
+  width: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--rvs-border);
+  border-right: 1px solid var(--rvs-border);
+  user-select: none;
+}
+
+.rvs-gutter-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  opacity: .7;
+}
+
+.rvs-hunk-btns {
+  display: flex;
+  gap: 2px;
+}
+
+.rvs-hunk-btn {
+  width: 13px;
+  height: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rvs-hunk-btn:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-hunk-btn.stage:hover {
+  color: var(--rvs-git-a);
+}
+
+.rvs-hunk-btn.revert:hover {
+  color: var(--rvs-git-d);
+}
+
+/**
+ * Token colors: VS Code Dark+ / Light+, matching the CodeMirror theme in
+ * `vsc/editor-theme.ts`. Keeping ONE palette for both surfaces means a file
+ * does not change colors when the diff is switched to its editable side.
+ */
+.rvs-t-comment { color: #6a9955; }
+.rvs-t-string { color: #ce9178; }
+.rvs-t-keyword { color: #569cd6; }
+.rvs-t-number { color: #b5cea8; }
+.rvs-t-func { color: #dcdcaa; }
+.rvs-t-type { color: #4ec9b0; }
+.rvs-t-attr { color: #9cdcfe; }
+.rvs-t-variable { color: #9cdcfe; }
+.rvs-t-operator { color: #d4d4d4; }
+.rvs-t-punct { color: #d4d4d4; }
+.rvs-t-tag { color: #569cd6; }
+.rvs-t-meta { color: #c586c0; }
+.rvs-t-insert { color: #4ec9b0; }
+.rvs-t-delete { color: #f14c4c; }
+
+body:not([data-ds-dark-theme]) .rvs-t-comment { color: #008000; }
+body:not([data-ds-dark-theme]) .rvs-t-string { color: #a31515; }
+body:not([data-ds-dark-theme]) .rvs-t-keyword { color: #0000ff; }
+body:not([data-ds-dark-theme]) .rvs-t-number { color: #098658; }
+body:not([data-ds-dark-theme]) .rvs-t-func { color: #795e26; }
+body:not([data-ds-dark-theme]) .rvs-t-type { color: #267f99; }
+body:not([data-ds-dark-theme]) .rvs-t-attr,
+body:not([data-ds-dark-theme]) .rvs-t-variable { color: #001080; }
+body:not([data-ds-dark-theme]) .rvs-t-operator,
+body:not([data-ds-dark-theme]) .rvs-t-punct { color: #1f1f1f; }
+body:not([data-ds-dark-theme]) .rvs-t-meta { color: #af00db; }
+
+/**
+ * CodeMirror token colors, applied through FIXED class names emitted by the
+ * highlight style (`vsc/editor-palette.ts`). Fixed names mean the colors come
+ * from this stylesheet — the same one that paints the rest of the UI — so a
+ * code file can never go monochrome because a generated class name changed or
+ * an injected style failed. Same Dark+ / Light+ palette as the diff panes
+ * above, so a file keeps its colors when switching between the two views.
+ */
+.rvs-ck-comment { color: #6a9955; }
+.rvs-ck-keyword { color: #569cd6; }
+.rvs-ck-control { color: #c586c0; }
+.rvs-ck-string { color: #ce9178; }
+.rvs-ck-regexp { color: #d16969; }
+.rvs-ck-number { color: #b5cea8; }
+.rvs-ck-constant { color: #569cd6; }
+.rvs-ck-func { color: #dcdcaa; }
+.rvs-ck-type { color: #4ec9b0; }
+.rvs-ck-variable { color: #9cdcfe; }
+.rvs-ck-attr { color: #9cdcfe; }
+.rvs-ck-meta { color: #c586c0; }
+.rvs-ck-punct { color: #d4d4d4; }
+.rvs-ck-op { color: #d4d4d4; }
+.rvs-ck-heading { color: #569cd6; font-weight: 700; }
+.rvs-ck-em { font-style: italic; }
+.rvs-ck-link { color: #9cdcfe; text-decoration: underline; }
+.rvs-ck-strike { text-decoration: line-through; }
+.rvs-ck-invalid { color: #f44747; }
+
+body:not([data-ds-dark-theme]) .rvs-ck-comment { color: #008000; }
+body:not([data-ds-dark-theme]) .rvs-ck-keyword { color: #0000ff; }
+body:not([data-ds-dark-theme]) .rvs-ck-control { color: #af00db; }
+body:not([data-ds-dark-theme]) .rvs-ck-string { color: #a31515; }
+body:not([data-ds-dark-theme]) .rvs-ck-regexp { color: #811f3f; }
+body:not([data-ds-dark-theme]) .rvs-ck-number { color: #098658; }
+body:not([data-ds-dark-theme]) .rvs-ck-constant { color: #0070c1; }
+body:not([data-ds-dark-theme]) .rvs-ck-func { color: #795e26; }
+body:not([data-ds-dark-theme]) .rvs-ck-type { color: #267f99; }
+body:not([data-ds-dark-theme]) .rvs-ck-variable { color: #001080; }
+body:not([data-ds-dark-theme]) .rvs-ck-attr { color: #e50000; }
+body:not([data-ds-dark-theme]) .rvs-ck-meta { color: #0000ff; }
+body:not([data-ds-dark-theme]) .rvs-ck-punct,
+body:not([data-ds-dark-theme]) .rvs-ck-op { color: #1f1f1f; }
+body:not([data-ds-dark-theme]) .rvs-ck-heading { color: #0000ff; }
+body:not([data-ds-dark-theme]) .rvs-ck-link { color: #001080; }
+body:not([data-ds-dark-theme]) .rvs-ck-invalid { color: #cd3131; }
+
+/**
+ * Opaque editor surface, also as plain CSS: the CodeMirror theme paints it too
+ * (following the scheme through a Compartment), but a transparent editor is
+ * the one failure a user notices immediately, so the container states it as
+ * well.
+ */
+.rvs-edge .cm-editor,
+.rvs-edge .cm-scroller,
+.rvs-edge .cm-gutters {
+  background-color: var(--rvs-code-bg);
+}
+
+.rvs-edge .cm-editor {
+  color: var(--rvs-code-fg);
+}
+
+.rvs-edge .cm-gutters {
+  color: var(--rvs-code-gutter-fg, var(--rvs-fg3));
+  border-right: 1px solid var(--rvs-border);
+}
+
+.rvs-edge .cm-activeLine {
+  background-color: rgba(127, 127, 127, .08);
+}
+
+.rvs-edge .cm-activeLineGutter {
+  background-color: rgba(127, 127, 127, .12);
+}
+
+/* ------------------------------------------------------------ find widget */
+
+/**
+ * "You landed here": the transient highlight on the line a jump landed on
+ * (search hit, @-reference).
+ *
+ * Deliberately NOT a warm/amber wash: over the dark editor that muddies into a
+ * brown-black band that reads as a shadow and swallows annotation colors. This
+ * is the accent blue instead — a tinted band with a bright edge on the left and
+ * hairlines top/bottom, so it reads as a marked region while every token keeps
+ * its own colour and contrast.
+ */
+.rvs-reveal-line {
+  background-color: rgba(88, 166, 255, .22);
+  box-shadow:
+    inset 3px 0 0 0 #58a6ff,
+    inset 0 1px 0 0 rgba(88, 166, 255, .38),
+    inset 0 -1px 0 0 rgba(88, 166, 255, .38);
+}
+
+body:not([data-ds-dark-theme]) .rvs-reveal-line {
+  background-color: rgba(77, 107, 254, .14);
+  box-shadow:
+    inset 3px 0 0 0 #4d6bfe,
+    inset 0 1px 0 0 rgba(77, 107, 254, .35),
+    inset 0 -1px 0 0 rgba(77, 107, 254, .35);
+}
+
+/**
+ * CodeMirror's own search decorations, also stated here: the editor's theme is
+ * injected by the library, and these must stay readable even when only this
+ * stylesheet is in play.
+ */
+.rvs-edge .cm-searchMatch {
+  background-color: rgba(226, 183, 20, .30);
+  outline: 1px solid rgba(226, 183, 20, .55);
+}
+
+.rvs-edge .cm-searchMatch-selected {
+  background-color: rgba(226, 183, 20, .48);
+}
+
+.rvs-edge .cm-selectionBackground,
+.rvs-edge .cm-content ::selection {
+  background-color: rgba(58, 110, 165, .55) !important;
+}
+
+/** Build stamp in the editor info bar: identifies the loaded client bundle. */
+.rvs-build {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 4px;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+  font-family: var(--rvs-mono);
+  opacity: .85;
+  user-select: text;
+}
+
+.rvs-find {
+  position: absolute;
+  top: 6px;
+  right: 18px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px 3px 7px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+  background-color: Canvas;
+  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
+  color: var(--rvs-fg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+  font-size: 12px;
+}
+
+.rvs-find-input {
+  width: 170px;
+  padding: 2px 6px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 5px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.rvs-find-input:focus {
+  border-color: var(--rvs-brand);
+}
+
+.rvs-find-count {
+  flex: none;
+  min-width: 54px;
+  text-align: center;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-find-count.none {
+  color: var(--rvs-git-d);
+}
+
+.rvs-code {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 0 16px;
+  font-family: var(--rvs-mono);
+  font-size: 12.5px;
+  line-height: 18px;
+  white-space: pre;
+  scrollbar-width: thin;
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+}
+
+.rvs-code-line {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+}
+
+.rvs-code-line:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-code-text {
+  flex: 1;
+  padding-right: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* ---------------------------------------------------------- history list */
+
+.rvs-commit-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px 4px 4px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-commit-item:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-commit-item.selected {
+  background: var(--rvs-active);
+}
+
+.rvs-graph-svg {
+  flex: none;
+  display: block;
+}
+
+.rvs-commit-hash {
+  flex: none;
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-commit-msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-commit-date {
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-ref-badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--rvs-border2);
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--rvs-fg2);
+}
+
+.rvs-ref-badge.head {
+  border-color: var(--rvs-brand);
+  background: rgba(77, 107, 254, .2);
+  color: var(--rvs-fg);
+}
+
+.rvs-ref-badge.tag {
+  border-color: rgba(226, 183, 20, .55);
+  background: rgba(226, 183, 20, .16);
+  color: var(--rvs-git-m);
+}
+
+.rvs-detail {
+  margin: 0 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--rvs-border2);
+  border-left: 3px solid var(--rvs-accent);
+  border-radius: 8px;
+  background: var(--rvs-layer3);
+  font-size: 12px;
+}
+
+.rvs-detail-meta {
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+}
+
+.rvs-detail-body {
+  margin: 6px 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--rvs-fg2);
+  user-select: text;
+}
+
+.rvs-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.rvs-file-row:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Same tail-first truncation as the info bar; `plaintext` keeps the path's
+     own LTR order (see .rvs-einfo-path). */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+.rvs-file-status {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------- context menu */
+
+.rvs-portal {
+  font-family: inherit;
+}
+
+/**
+ * Floating surfaces (menu / modal / toast) paint an OPAQUE base first and then
+ * lay the skin's overlay token on top. The token is frequently translucent, so
+ * using it alone let the panel's own text bleed through the menu and overlap
+ * the entries; `Canvas` follows the resolved light/dark scheme, so the base is
+ * correct in either theme.
+ */
+.rvs-menu,
+.rvs-modal-box,
+.rvs-toast {
+  background-color: Canvas;
+  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
+  color: var(--rvs-fg);
+}
+
+.rvs-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 172px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.rvs-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--rvs-border);
+}
+
+.rvs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-menu-item:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-menu-item.danger {
+  color: var(--vsc-danger, #f14c4c);
+}
+
+.rvs-menu-item.danger:hover {
+  background: rgba(241, 76, 76, .16);
+}
+
+.rvs-menu-item:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.rvs-menu-item:disabled:hover {
+  background: transparent;
+}
+
+.rvs-menu-hint {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: .6;
+}
+
+/* ------------------------------------------------------- modal + toast */
+
+.rvs-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .45);
+  backdrop-filter: blur(2px);
+  animation: rvsFade .12s ease;
+}
+
+.rvs-modal-box {
+  width: min(420px, calc(100vw - 40px));
+  padding: 16px 18px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 10px;
+  color: var(--rvs-fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .38);
+  font-size: 13px;
+  animation: rvsPop .14s ease;
+}
+
+.rvs-modal-title {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rvs-modal-text {
+  margin-bottom: 12px;
+  color: var(--rvs-fg2);
+  font-size: 12.5px;
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.rvs-modal-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rvs-modal-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.rvs-modal-btn:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-modal-btn.primary {
+  border-color: transparent;
+  background: var(--rvs-accent);
+  color: #fff;
+}
+
+.rvs-modal-btn.danger {
+  border-color: transparent;
+  background: var(--rvs-danger);
+  color: #fff;
+}
+
+.rvs-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 18px;
+  z-index: 100001;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.rvs-toast {
+  max-width: 340px;
+  padding: 7px 12px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+  color: var(--rvs-fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+  animation: rvsPop .14s ease;
+}
+
+.rvs-toast.error {
+  border-color: rgba(241, 76, 76, .6);
+  background-image: linear-gradient(rgba(58, 31, 34, .92), rgba(58, 31, 34, .92));
+}
+
+/* ------------------------------------------------------------- terminal */
+
+.rvs-term-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 32px;
+  padding: 0 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--rvs-border);
+  scrollbar-width: none;
+}
+
+.rvs-term-tabs::-webkit-scrollbar {
+  height: 0;
+}
+
+.rvs-term-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  margin: 4px 0;
+  padding: 0 6px 0 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rvs-term-tab:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-term-tab.active {
+  background: var(--rvs-layer3);
+  color: var(--rvs-fg);
+}
+
+.rvs-term-tab.dead {
+  color: var(--rvs-git-d);
+}
+
+.rvs-term-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-term-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.rvs-term-slot {
+  position: absolute;
+  inset: 0;
+}
+
+.rvs-term-dead {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+}
+
+.rvs-toast.error {
+  border-color: rgba(241, 76, 76, .6);
+  background: #3a1f22;
+}
+
+@keyframes rvsFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes rvsPop {
+  from { opacity: 0; transform: scale(.97) translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+
+.rvs-search-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+/* --------------------------------------------------------- search options */
+
+.rvs-toggles {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.rvs-toggle {
+  min-width: 26px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border: none;
+  border-right: 1px solid var(--rvs-border);
+  background: transparent;
+  color: var(--rvs-fg3);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rvs-toggle:last-child {
+  border-right: none;
+}
+
+.rvs-toggle:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-toggle.active {
+  background: var(--rvs-active);
+  color: var(--rvs-fg);
+  box-shadow: inset 0 0 0 1px var(--rvs-brand);
+}
+
+.rvs-glyph {
+  font-family: var(--rvs-mono);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.rvs-glyph-underline {
+  text-decoration: underline;
+}
+
+.rvs-scope-label {
+  flex: none;
+  align-self: center;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------- search results */
+
+.rvs-hit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-hit:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-hit-file {
+  font-weight: 600;
+}
+
+.rvs-hit-line {
+  padding-left: 30px;
+  align-items: flex-start;
+  font-family: var(--rvs-mono);
+  font-size: 12px;
+  color: var(--rvs-fg2);
+}
+
+.rvs-hit-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--rvs-hover);
+  font-size: 10.5px;
+  line-height: 15px;
+  text-align: center;
+  color: var(--rvs-fg3);
+}
+
+.rvs-hit-lineno {
+  flex: none;
+  width: 3.2em;
+  text-align: right;
+  color: var(--rvs-fg3);
+  opacity: .8;
+  font-size: 11px;
+}
+
+.rvs-hit-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+  direction: ltr;
+}
+
+.rvs-mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: rgba(226, 183, 20, .3);
+  color: inherit;
+}
+
+.rvs-hit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-hit:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-hit-dir {
+  flex: none;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+.rvs-hit-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.rvs-kbd {
+  padding: 0 4px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--rvs-fg3);
+}
