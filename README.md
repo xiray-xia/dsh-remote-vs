@@ -154,7 +154,7 @@ DSH 发新版时先读 `docs/MAINTENANCE.md` 再动手。
 
 ## 开源许可
 
-MIT © 2026 Chinesess —— 见 [LICENSE](./LICENSE)。
+MIT © 2026 xiray-xia —— 见 [LICENSE](./LICENSE)。
 
 `vendor/` 里的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.1-alpha.2`
 tag 以官方原脚本构建，具体流程与唯一有记录的偏离见上文"Helper 自编译"节
