@@ -155,7 +155,7 @@ Before touching anything for a new DSH release, read `docs/MAINTENANCE.md`.
 
 ## License
 
-MIT © 2026 Chinesess — see [LICENSE](./LICENSE).
+MIT © 2026 xiray-xia — see [LICENSE](./LICENSE).
 
 The `vendor/` helper seed is built from DeepSeek Harness sources (MIT) at tag `dsh-v0.2.1-alpha.2`
 with the stock build script; see "Self-built helper" above for the exact procedure and the single
