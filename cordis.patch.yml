@@ -54,12 +54,15 @@
       inject: [localFileReferences, remoteWorlds]
 
     # Remote agent preset, bound to this bundle's lifecycle.
-    # Mirrored from preset-standard @ dsh 0.2.1-alpha.2 with these diffs:
+    # Mirrored from preset-standard @ dsh 0.2.1-alpha.3 with these diffs:
     #   1. persona prefix reframed for remote SSH work (transparent routing);
     #   2. tool-bash moved into an isolated shell group with our routed bash
     #      executor (stock root shell stays pwsh on Windows);
     #   3. tool-pwsh row dropped.
     # Everything else is byte-identical so future diffs against stock stay obvious.
+    # alpha.3 note: stock dropped `toolFilter` (subagent children now inherit
+    # the parent composition; fork must not select presets) — our mirror drops
+    # both blocks with it.
     - id: preset-remote
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -124,8 +127,8 @@
                 name: '@deepseek-ai/dsh-plan-mode'
                 config:
                   section: >
-                    You are in plan mode. Stay in plan mode until exit_plan_mode
-                    succeeds or the user switches the session mode. Imperative
+                    You are in plan mode. Stay in plan mode until the user approves your plan through exit_plan_mode
+                    or switches the session mode. Imperative
                     language to implement changes means plan the implementation, not
                     execute it. A user's conversational agreement — including an
                     answer confirming something you asked — approves nothing and
@@ -208,23 +211,11 @@
                   provider: spawn
                   toolName: subagent
                   modelSelectionSettings: true
-                  toolFilter:
-                    deny:
-                      - schedule_create
-                      - schedule_delete
-                      - schedule_list
-                      - schedule_update
               - id: tool-subagent-fork
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
                   provider: fork
                   toolName: subagent_fork
-                  toolFilter:
-                    deny:
-                      - schedule_create
-                      - schedule_delete
-                      - schedule_list
-                      - schedule_update
               - id: workflow-ptc
                 name: '@deepseek-ai/dsh-workflow-ptc'
                 config:
