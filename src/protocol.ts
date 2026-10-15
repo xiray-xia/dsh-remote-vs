@@ -17,6 +17,7 @@ export const REMOTE_API = {
   importDshSsh: '/api/dsh-remote/import-dsh-ssh',
   terminal: '/api/dsh-remote/terminal',
   terminalClose: '/api/dsh-remote/terminal-close',
+  routing: '/api/dsh-remote/routing',
 } as const
 
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */

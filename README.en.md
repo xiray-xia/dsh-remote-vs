@@ -106,7 +106,7 @@ Single-Host mixed routing: native tools dispatch by which world the session cwd 
 over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one Host and one GUI.
 
 - Alias dirs: `$DSH_HOME/remote-ssh/aliases/<id>` (empty shells, routing keys only), auto-registered into the native workspace list as `<server> > <base>`
-- Routing switch (profile patch `- id: remote-vs`, `config.routingMode`, volatile, no restart):
+- Routing switch (dropdown at the top of Settings → Remote hosts; underneath it is profile patch `- id: remote-vs`, `config.routingMode`, volatile, no restart):
   `off` (default, local passthrough) / `shadow` (logs, still local) / `enforce` (real routing)
 - New workspace: the native "Add workspace…" entry is adopted (local/remote dual tab; remote leg = host→push→bind wizard)
 - Presets: a `Remote` preset (bash toolset); under enforce, new remote sessions switch to it automatically (default preset only, never overrides an explicit choice)

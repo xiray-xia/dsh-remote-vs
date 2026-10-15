@@ -88,6 +88,22 @@ export function Btn(props: {
   )
 }
 
+/**
+ * Inline loading spinner (SMIL rotation, no CSS dependency): a dim track
+ * ring plus a bright arc rotating around it. Inherits text color.
+ */
+export function Spinner(props: { size?: number }): ReactNode {
+  const s = props.size ?? 12
+  return (
+    <svg width={s} height={s} viewBox="0 0 16 16" aria-hidden="true" style={{ display: 'inline-block', verticalAlign: '-2px' }}>
+      <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+      <path d="M 8 1.5 A 6.5 6.5 0 0 1 14.5 8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.9s" repeatCount="indefinite" />
+      </path>
+    </svg>
+  )
+}
+
 export function Notice(props: { kind: 'info' | 'error'; children: ReactNode }): ReactNode {
   return (
     <div

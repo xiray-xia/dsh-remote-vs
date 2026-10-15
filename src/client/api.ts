@@ -129,6 +129,9 @@ export const api = {
     call<{ workspace: RemoteWorkspaceBinding; aliasPath: string }>(REMOTE_API.workspaces, { method: 'POST', body: JSON.stringify(payload) }),
   deleteWorkspace: (id: string) =>
     call<{ ok: boolean }>(`${REMOTE_API.workspaces}?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // -- routing mode (volatile, persists to the profile patch)
+  setRoutingMode: (mode: 'off' | 'shadow' | 'enforce') =>
+    post<{ mode: 'off' | 'shadow' | 'enforce' }>(REMOTE_API.routing, { mode }).then((r) => r.mode),
   // -- deploy
   deployStatus: (alias: string) =>
     call<{ deploy: RemoteDeployState; helpers: HelperAvailability[] }>(

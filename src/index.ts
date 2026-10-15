@@ -205,7 +205,7 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     enabled: readField(config?.enabled, true),
   })
 
-  const { routes, upgrade, terminalSessions } = makeRoutes({ store, pool, worlds })
+  const { routes, upgrade, terminalSessions } = makeRoutes({ store, pool, worlds, ctx })
   let disposeRoutes: (() => void) | undefined
 
   const tools = [

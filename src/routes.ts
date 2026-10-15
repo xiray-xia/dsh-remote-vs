@@ -6,6 +6,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdirSync } from 'node:fs'
 import { WebSocketServer } from 'ws'
+import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { readJsonBody, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
@@ -31,10 +32,44 @@ export interface RemoteRoutesDeps {
   store: RemoteStore
   pool: RemotePool
   worlds: RemoteWorlds
+  /** Host context (soft reads only: loader/settings for the routing route). */
+  ctx: Context
+}
+
+/** Package name our loader row is mounted from (ns discovery key). */
+const REMOTE_PACKAGE_NAME = 'dsh-remote-vs'
+
+/**
+ * This plugin's own loader entry id (the settings-form namespace).
+ *
+ * Settings are addressed by profile entry id, which is a mount choice, not
+ * a package property — an aggregate bundle may mount this package under any
+ * id. So the row is identified by package name plus fiber identity, with an
+ * enabled same-name row as fallback (the dsh-better-sidebar pattern). All
+ * reads are soft: unknown compositions answer undefined instead of throwing.
+ */
+function ownSettingsNs(ctx: Context): string | undefined {
+  let fallback: string | undefined
+  try {
+    const loader = ctx.get('loader') as
+      | { entries?: () => Iterable<{ options: { id?: unknown; name?: unknown }; fiber?: unknown; disabled?: unknown }> }
+      | undefined
+    if (typeof loader?.entries !== 'function') return undefined
+    const self = (ctx as unknown as { fiber?: unknown }).fiber
+    for (const entry of loader.entries()) {
+      const id = entry.options.id
+      if (entry.options.name !== REMOTE_PACKAGE_NAME || typeof id !== 'string' || id === '') continue
+      if (self !== undefined && entry.fiber === self) return id
+      if (entry.disabled !== true && fallback === undefined) fallback = id
+    }
+  } catch {
+    return undefined
+  }
+  return fallback
 }
 
 export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrade: WebUpgradeRoute; terminalSessions: TerminalSessionRegistry } {
-  const { store, pool, worlds } = deps
+  const { store, pool, worlds, ctx } = deps
   const files = new RemoteFiles(pool)
   const terminalSessions = new TerminalSessionRegistry(pool)
 
@@ -338,6 +373,46 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         }
         void worlds.syncWorkspaces().catch(() => undefined)
         writeJson(res, 200, { ok: true })
+      },
+    },
+    // --------------------------------------------- routing mode (volatile)
+    // The Settings UI flips off/shadow/enforce here instead of editing the
+    // profile patch by hand. The write goes through the official settings
+    // service (same channel the Settings dialog uses): it validates against
+    // our Config schema, persists to the profile patch, and volatile
+    // reconciliation applies it live — no restart, survives restarts.
+    {
+      kind: 'exact',
+      path: REMOTE_API.routing,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if ((req.method ?? 'GET') !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
+          return
+        }
+        const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+        const mode = body?.mode
+        if (mode !== 'off' && mode !== 'shadow' && mode !== 'enforce') {
+          writeJson(res, 400, { error: `mode must be one of off/shadow/enforce (got ${JSON.stringify(mode) ?? 'missing'})` })
+          return
+        }
+        try {
+          const settings = ctx.get('settings') as
+            | { update?: (ns: string, patch: Record<string, unknown>) => Promise<void> }
+            | undefined
+          if (typeof settings?.update !== 'function') {
+            writeJson(res, 503, { error: 'settings service unavailable (cannot persist routing mode)' })
+            return
+          }
+          const ns = ownSettingsNs(ctx) ?? 'remote-vs'
+          await settings.update(ns, { routingMode: mode })
+          writeJson(res, 200, { mode: worlds.mode })
+        } catch (error) {
+          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
       },
     },
     // ------------------------------------------------------------ deploy
