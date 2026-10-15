@@ -1,0 +1,371 @@
+/**
+ * Search panel: one view, two modes.
+ *
+ *  - **文件名** — a remote `find -iname` (depth- and count-capped).
+ *  - **内容** — a recursive remote `grep` with the VS Code option set
+ *    (Aa / ab_ / .*), a scope field ("in folder"), and results grouped per
+ *    file; clicking a hit opens the file at that line.
+ *
+ * The explorer's context menu raises a scoped request through the shared
+ * store (`requestSearch`), which is what makes "Find in Folder…" work from the
+ * tree without the two views knowing about each other.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  DEFAULT_CONTENT_OPTIONS,
+  contentSearchCommand,
+  groupHits,
+  parseContentHits,
+  splitMatches,
+  type ContentHit,
+} from '../search-ops.ts'
+import { searchFiles, type SearchHit } from './scm/actions.ts'
+import { repoRelative, useExplorer } from './store.tsx'
+import { api } from './api.ts'
+import {
+  FileIcon,
+  IconCase,
+  IconContentSearch,
+  IconFileSearch,
+  IconFindInFolder,
+  IconRegex,
+  IconWholeWord,
+  MiniSpinner,
+  Segmented,
+  baseName,
+} from './vsc/kit.tsx'
+
+type Mode = 'name' | 'content'
+
+const MODE_KEY = 'dsh-remote-vs.search.mode'
+const OPTIONS_KEY = 'dsh-remote-vs.search.options'
+
+interface ContentOptions {
+  caseSensitive: boolean
+  wholeWord: boolean
+  regex: boolean
+}
+
+function readMode(): Mode {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'content' ? 'content' : 'name'
+  } catch {
+    return 'name'
+  }
+}
+
+function readOptions(): ContentOptions {
+  try {
+    const raw = localStorage.getItem(OPTIONS_KEY)
+    if (raw === null) return { caseSensitive: false, wholeWord: false, regex: false }
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return { caseSensitive: false, wholeWord: false, regex: false }
+    const { caseSensitive, wholeWord, regex } = parsed as Record<string, unknown>
+    return { caseSensitive: caseSensitive === true, wholeWord: wholeWord === true, regex: regex === true }
+  } catch {
+    return { caseSensitive: false, wholeWord: false, regex: false }
+  }
+}
+
+/** Path of `full` relative to `root` (the label under a result). */
+function relativeTo(root: string, full: string): string {
+  const base = root.replace(/\/+$/, '')
+  if (full === base) return ''
+  if (full.startsWith(`${base}/`)) return full.slice(base.length + 1)
+  return full
+}
+
+export function SearchView(): ReactNode {
+  const store = useExplorer()
+  const { t, alias, root, repoRoot } = store
+  const [mode, setModeState] = useState<Mode>(readMode)
+  const [query, setQuery] = useState('')
+  /** Absolute remote directory the search runs in ('' = workspace root). */
+  const [scope, setScope] = useState('')
+  const [options, setOptions] = useState<ContentOptions>(readOptions)
+
+  const [nameHits, setNameHits] = useState<SearchHit[]>([])
+  const [nameTruncated, setNameTruncated] = useState(false)
+  const [contentHits, setContentHits] = useState<ContentHit[]>([])
+  const [contentTruncated, setContentTruncated] = useState(false)
+  const [linesClipped, setLinesClipped] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [ran, setRan] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const seq = useRef(0)
+
+  const effectiveScope = scope === '' ? root : scope
+  const scopeLabel = useMemo(() => {
+    if (effectiveScope === '' || root === '') return ''
+    if (effectiveScope === root) return root
+    return relativeTo(root, effectiveScope)
+  }, [effectiveScope, root])
+
+  const setMode = useCallback((next: Mode): void => {
+    setModeState(next)
+    try {
+      localStorage.setItem(MODE_KEY, next)
+    } catch {
+      // Private mode: ignore.
+    }
+  }, [])
+
+  const setOption = useCallback((patch: Partial<ContentOptions>): void => {
+    setOptions(prev => {
+      const next = { ...prev, ...patch }
+      try {
+        localStorage.setItem(OPTIONS_KEY, JSON.stringify(next))
+      } catch {
+        // Private mode: ignore.
+      }
+      return next
+    })
+  }, [])
+
+  const run = useCallback(async (text: string, activeMode: Mode, dir: string, opts: ContentOptions): Promise<void> => {
+    const trimmed = text.trim()
+    if (trimmed === '' || alias === '' || dir === '') {
+      setNameHits([])
+      setContentHits([])
+      setRan(false)
+      setError(undefined)
+      return
+    }
+    const ticket = ++seq.current
+    setBusy(true)
+    setError(undefined)
+    try {
+      if (activeMode === 'name') {
+        const result = await searchFiles(alias, dir, trimmed)
+        if (seq.current !== ticket) return
+        setNameHits(result.hits)
+        setNameTruncated(result.truncated)
+        setContentHits([])
+      } else {
+        const command = contentSearchCommand(dir, trimmed, {
+          ...DEFAULT_CONTENT_OPTIONS,
+          caseSensitive: opts.caseSensitive,
+          wholeWord: opts.wholeWord,
+          regex: opts.regex,
+        })
+        const result = await api.exec(alias, command, 120_000)
+        if (seq.current !== ticket) return
+        if (!result.success && result.stdout.trim() === '' && result.stderr.trim() !== '') {
+          // grep exits 1 when nothing matched — that is a result, not a failure,
+          // so only a non-empty stderr with no output counts as an error.
+          setContentHits([])
+          setContentTruncated(false)
+          setLinesClipped(false)
+          setError(result.stderr.trim())
+        } else {
+          const parsed = parseContentHits(result.stdout, DEFAULT_CONTENT_OPTIONS.maxResults)
+          setContentHits(parsed.hits)
+          setContentTruncated(parsed.truncated)
+          setLinesClipped(parsed.linesClipped)
+          setNameHits([])
+        }
+      }
+      setRan(true)
+    } catch (caught) {
+      if (seq.current !== ticket) return
+      setError(caught instanceof Error ? caught.message : String(caught))
+      setContentHits([])
+      setNameHits([])
+      setRan(true)
+    } finally {
+      if (seq.current === ticket) setBusy(false)
+    }
+  }, [alias])
+
+  // Debounced run on every input change (query, mode, scope, toggles).
+  useEffect(() => {
+    const timer = setTimeout(() => { void run(query, mode, effectiveScope, options) }, 350)
+    timer.unref?.()
+    return () => clearTimeout(timer)
+  }, [query, mode, effectiveScope, options, run])
+
+  // A scoped request from the tree ("Find in Folder…").
+  const request = store.searchRequest
+  useEffect(() => {
+    if (request === undefined) return
+    setMode(request.mode)
+    setScope(request.scope === root ? '' : request.scope)
+    setQuery(request.query)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.id])
+
+  const openHit = (path: string, line?: number): void => {
+    if (line === undefined) {
+      const rel = repoRelative(repoRoot, path)
+      if (rel !== '' && store.marks.files.has(rel)) {
+        store.openDiff(rel, false, store.marks.files.get(rel) === '?')
+        return
+      }
+      store.openFile(path)
+      return
+    }
+    store.openFile(path, { line })
+  }
+
+  const groups = useMemo(() => groupHits(contentHits), [contentHits])
+
+  const toggle = (title: string, active: boolean, onClick: () => void, body: ReactNode): ReactNode => (
+    <button
+      type="button"
+      className={`rvs-toggle${active ? ' active' : ''}`}
+      title={title}
+      aria-pressed={active}
+      onClick={onClick}
+    >
+      {body}
+    </button>
+  )
+
+  const count = mode === 'name' ? nameHits.length : contentHits.length
+
+  return (
+    <div className="rvs-pane grow">
+      <div className="rvs-header">
+        <span className="rvs-title">{t('tab.search')}</span>
+        {busy && <MiniSpinner />}
+        <span className="rvs-count">{count > 0 ? count : ''}</span>
+      </div>
+
+      <div className="rvs-search-row">
+        <span className="rvs-node-icon" title={mode === 'name' ? t('search.modeNameHint') : t('search.modeContentHint')}>
+          {mode === 'name' ? <IconFileSearch size={15} /> : <IconContentSearch size={15} />}
+        </span>
+        <Segmented<Mode>
+          value={mode}
+          onChange={setMode}
+          options={[
+            { id: 'name', label: t('search.modeName'), title: t('search.modeNameHint') },
+            { id: 'content', label: t('search.modeContent'), title: t('search.modeContentHint') },
+          ]}
+        />
+      </div>
+
+      <div className="rvs-search-row" style={{ borderBottom: mode === 'content' ? 'none' : undefined }}>
+        <input
+          className="rvs-input"
+          placeholder={mode === 'name' ? t('search.placeholder') : t('search.placeholderContent')}
+          value={query}
+          spellCheck={false}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void run(query, mode, effectiveScope, options)
+            } else if (e.key === 'Escape') {
+              setQuery('')
+            }
+          }}
+        />
+        {mode === 'content' && (
+          <span className="rvs-toggles">
+            {toggle(t('search.matchCase'), options.caseSensitive, () => setOption({ caseSensitive: !options.caseSensitive }), <IconCase size={14} />)}
+            {toggle(t('search.wholeWord'), options.wholeWord, () => setOption({ wholeWord: !options.wholeWord }), <IconWholeWord size={14} />)}
+            {toggle(t('search.useRegex'), options.regex, () => setOption({ regex: !options.regex }), <IconRegex size={14} />)}
+          </span>
+        )}
+      </div>
+
+      {mode === 'content' && (
+        <div className="rvs-search-row" style={{ paddingTop: 2 }}>
+          <span className="rvs-scope-label" title={t('search.inFolder')}>{t('search.inFolder')}</span>
+          <input
+            className="rvs-input"
+            placeholder={t('search.inFolderPlaceholder')}
+            value={scopeLabel}
+            spellCheck={false}
+            onChange={(e) => {
+              const value = e.target.value.trim()
+              if (value === '' || value === root) {
+                setScope('')
+                return
+              }
+              setScope(value.startsWith('/') ? value : `${root.replace(/\/+$/, '')}/${value.replace(/^\.?\//, '')}`)
+            }}
+            onKeyDown={(e) => { if (e.key === 'Escape') setScope('') }}
+          />
+          <button type="button" className="rvs-hbtn" title={t('search.resetScope')} onClick={() => setScope('')}>
+            <IconFindInFolder size={14} />
+          </button>
+        </div>
+      )}
+
+      {error !== undefined && <div className="rvs-banner error">{error}</div>}
+      {contentTruncated && <div className="rvs-banner warn">{t('search.truncated')}</div>}
+      {linesClipped && <div className="rvs-banner warn">{t('search.linesClipped')}</div>}
+
+      <div className="rvs-scroll">
+        {!ran && query.trim() === '' && (
+          <div className="rvs-empty">{mode === 'name' ? t('search.hint') : t('search.hintContent')}</div>
+        )}
+
+        {mode === 'name' && (
+          <>
+            {ran && nameHits.length === 0 && query.trim() !== '' && <div className="rvs-empty">{t('search.empty')}</div>}
+            {nameHits.map(hit => (
+              <button
+                key={hit.path}
+                type="button"
+                className="rvs-hit"
+                title={hit.path}
+                onClick={() => openHit(`${root.replace(/\/+$/, '')}/${hit.path}`)}
+              >
+                <span className="rvs-node-icon">
+                  {hit.isDir ? <span style={{ color: 'var(--rvs-fg3)' }}>▸</span> : <FileIcon path={hit.path} size={14} />}
+                </span>
+                <span className="rvs-hit-name">{hit.name}</span>
+                {hit.dir !== '' && <span className="rvs-hit-dir">{hit.dir}</span>}
+              </button>
+            ))}
+            {nameTruncated && <div className="rvs-empty">{t('search.truncated')}</div>}
+          </>
+        )}
+
+        {mode === 'content' && (
+          <>
+            {ran && contentHits.length === 0 && query.trim() !== '' && error === undefined && (
+              <div className="rvs-empty">{t('search.emptyContent').replace('{scope}', scopeLabel || root)}</div>
+            )}
+            {groups.map(group => (
+              <div key={group.path}>
+                <button
+                  type="button"
+                  className="rvs-hit rvs-hit-file"
+                  title={group.path}
+                  onClick={() => openHit(group.path, group.hits[0]?.line)}
+                >
+                  <span className="rvs-node-icon"><FileIcon path={group.path} size={14} /></span>
+                  <span className="rvs-hit-name">{baseName(group.path)}</span>
+                  <span className="rvs-hit-dir">{relativeTo(root, group.path)}</span>
+                  <span className="rvs-hit-count">{group.hits.length}</span>
+                </button>
+                {group.hits.map(hit => (
+                  <button
+                    key={hit.line}
+                    type="button"
+                    className="rvs-hit rvs-hit-line"
+                    title={`${group.path}:${hit.line}`}
+                    onClick={() => openHit(group.path, hit.line)}
+                  >
+                    <span className="rvs-hit-lineno">{hit.line}</span>
+                    <span className="rvs-hit-text">
+                      {splitMatches(hit.text, query.trim(), options.regex, options.caseSensitive).map((part, index) => (
+                        part.hit
+                          ? <mark key={index} className="rvs-mark">{part.text}</mark>
+                          : <span key={index}>{part.text}</span>
+                      ))}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

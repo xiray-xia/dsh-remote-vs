@@ -1,0 +1,579 @@
+/**
+ * Remote git operations beyond the read-only P2 set: command builders for
+ * stage / unstage / discard / commit / stash / branch / remote / sync, plus
+ * parsers for porcelain-v1 `-z`, unified diff and name-status output.
+ *
+ * Everything here runs on the REMOTE host through the existing exec route
+ * (client/api.ts) — this module is pure string work: no dependencies, no
+ * host-side code, safe to import from the browser bundle.
+ *
+ * Safety model: every path/ref/name that reaches a command is asserted
+ * against a strict charset first and then single-quoted, so a file name can
+ * never escape into shell syntax; destructive verbs (clean / push / branch
+ * delete / stash drop) are only ever emitted by their own dedicated builder.
+ */
+import { assertRef, assertRemoteDir, shQuote } from './git-format.ts'
+import type {
+  GitCommitFile,
+  GitPathStatus,
+  GitRemote,
+  GitStash,
+  GitStatusDetail,
+  UnifiedDiffFile,
+  UnifiedHunk,
+} from './protocol.ts'
+
+/** Byte cap on captured output (protects one exec round trip). */
+export const GIT_CAP = 2_000_000
+
+/** Env prefix: never block on a prompt, never page, never open an editor. */
+const GIT_ENV = 'GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat GIT_EDITOR=true'
+
+/** `git` pinned to a work dir: no pager, no path quoting, no prompts. */
+function git(workdir: string): string {
+  return `${GIT_ENV} git --no-pager -C ${shQuote(assertRemoteDir(workdir))} -c core.quotepath=false`
+}
+
+/** Pipe a command through a byte cap so one huge repo cannot flood the wire. */
+function capped(command: string, bytes: number = GIT_CAP): string {
+  return `${command} | head -c ${bytes}`
+}
+
+// ------------------------------------------------------------- assertions
+
+/** Assert a repo-relative path (no `..`, no leading `/`, no control chars). */
+export function assertRepoPath(path: string): string {
+  if (typeof path !== 'string' || path === '' || path.length > 4096) {
+    throw new Error(`invalid repo path: ${String(path)}`)
+  }
+  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '')
+  if (/[\0\n\r]/.test(normalized)) throw new Error('repo path contains control characters')
+  if (normalized.startsWith('/')) throw new Error('repo path must be relative to the repository root')
+  if (normalized.split('/').some(seg => seg === '..')) throw new Error('repo path must not contain ..')
+  return normalized
+}
+
+/** Single-quote one or more asserted repo paths for the command line. */
+export function relPaths(paths: readonly string[]): string {
+  if (paths.length === 0) throw new Error('at least one path is required')
+  return paths.map(p => shQuote(assertRepoPath(p))).join(' ')
+}
+
+/** Assert a `stash@{n}` reference (assertRef rejects braces by design). */
+export function assertStashRef(ref: string): string {
+  if (!/^stash@\{\d+\}$/.test(ref)) throw new Error(`invalid stash ref: ${ref}`)
+  return ref
+}
+
+/** Assert a branch name (same charset as a ref, plus the git branch rules we care about). */
+export function assertBranchName(name: string): string {
+  if (typeof name !== 'string' || name === '' || name.length > 128) throw new Error(`invalid branch: ${name}`)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) || name.includes('..') || name.endsWith('/') || name.endsWith('.')) {
+    throw new Error(`invalid branch: ${name}`)
+  }
+  return name
+}
+
+/** Assert a remote name (`origin`, `upstream`, ...). */
+export function assertRemoteName(name: string): string {
+  if (typeof name !== 'string' || name === '' || name.length > 128) throw new Error(`invalid remote: ${name}`)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) throw new Error(`invalid remote: ${name}`)
+  return name
+}
+
+/** Assert a remote URL (anything printable without control characters). */
+export function assertRemoteUrl(url: string): string {
+  if (typeof url !== 'string' || url === '' || url.length > 2048) throw new Error('invalid remote URL')
+  if (/[\0\n\r]/.test(url)) throw new Error('remote URL contains control characters')
+  return url
+}
+
+// -------------------------------------------------------- read builders
+
+/** Resolve the enclosing repository root (fails outside a work tree). */
+export function repoProbeCommand(workdir: string): string {
+  return `${git(workdir)} rev-parse --show-toplevel 2>/dev/null`
+}
+
+/** Discover repositories under a workspace root (depth-capped). */
+export function repoDiscoveryCommand(root: string): string {
+  const dir = shQuote(assertRemoteDir(root))
+  return capped(`find ${dir} -maxdepth 3 \\( -name .git -type d -o -name .git -type f \\) -prune -print 2>/dev/null`, 64_000)
+}
+
+/**
+ * Branch + ahead/behind + every entry with its ignored half, NUL separated.
+ *
+ * `--untracked-files=normal` (not `all`) is deliberate: an untracked DIRECTORY
+ * then arrives as a single `dir/` record instead of every file inside it,
+ * which is what keeps this call fast on a remote tree that also contains
+ * node_modules or a build output directory. `--ignored=matching` reports
+ * ignored paths one level deep for the tree's greying, under the same bound.
+ */
+export function statusDetailCommand(workdir: string): string {
+  return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=normal --ignored=matching`)
+}
+
+/** Branch header only (`## branch...upstream [ahead N, behind M]`), NUL safe. */
+export function branchHeaderCommand(workdir: string): string {
+  return capped(`${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
+}
+
+/** Full message of the current HEAD commit. */
+export function headMessageCommand(workdir: string): string {
+  return capped(`${git(workdir)} log -1 --pretty=%B`, 64_000)
+}
+
+export interface DiffRequest {
+  /** Diff the index against HEAD instead of the worktree against the index. */
+  staged?: boolean
+  /** Diff this revision instead of HEAD/index. */
+  ref?: string
+  /** Restrict to one repo-relative path. */
+  path?: string
+  /** Context lines (default git's 3). */
+  context?: number
+  /** `--stat` instead of a patch. */
+  stat?: boolean
+}
+
+/** Unified diff (or a diffstat) for one side of the working tree. */
+export function diffCommand(workdir: string, request: DiffRequest = {}): string {
+  const parts = [`${git(workdir)} diff --no-color --no-ext-diff`]
+  if (request.stat === true) parts.push('--stat')
+  if (request.context !== undefined) parts.push(`-U${Math.max(0, Math.min(200, Math.floor(request.context)))}`)
+  if (request.staged === true) parts.push('--cached')
+  if (request.ref !== undefined) parts.push(assertRef(request.ref))
+  if (request.path !== undefined) parts.push('--', shQuote(assertRepoPath(request.path)))
+  return capped(parts.join(' '))
+}
+
+/** Files touched by one commit (`--name-status`, no patch body). */
+export function commitFilesCommand(workdir: string, ref: string): string {
+  return capped(`${git(workdir)} show --no-color --format= --name-status ${assertRef(ref)} --`)
+}
+
+/** One file's content at a revision (`rev` may also be `:0` for the index). */
+export function fileAtRevCommand(workdir: string, rev: string, path: string): string {
+  const spec = rev === ':0' ? `:${assertRepoPath(path)}` : `${assertRef(rev)}:${assertRepoPath(path)}`
+  return capped(`${git(workdir)} show ${shQuote(spec)}`)
+}
+
+/** Local + remote-tracking branches with their upstream and tip. */
+export function allBranchesCommand(workdir: string): string {
+  return capped(`${git(workdir)} for-each-ref --format='%(refname:short)%x1f%(objectname:short)%x1f%(upstream:short)%x1f%(HEAD)%x1f%(refname)' refs/heads refs/remotes`)
+}
+
+/** Every configured remote with its URLs. */
+export function remotesCommand(workdir: string): string {
+  return capped(`${git(workdir)} remote -v`)
+}
+
+/** Stash stack, newest first. */
+export function stashListCommand(workdir: string): string {
+  return capped(`${git(workdir)} stash list --pretty=format:'%gd%x1f%gs%x1f%ct%x1e'`)
+}
+
+// ------------------------------------------------------- write builders
+
+/** Stage paths (additions, modifications, deletions and renames). */
+export function stageCommand(workdir: string, paths: readonly string[]): string {
+  return `${git(workdir)} add -A -- ${relPaths(paths)}`
+}
+
+/** Unstage paths (index back to HEAD, worktree untouched). */
+export function unstageCommand(workdir: string, paths: readonly string[]): string {
+  return `${git(workdir)} restore --staged -- ${relPaths(paths)}`
+}
+
+/** Discard worktree edits for tracked paths (irreversible). */
+export function restoreWorktreeCommand(workdir: string, paths: readonly string[]): string {
+  return `${git(workdir)} restore --worktree -- ${relPaths(paths)}`
+}
+
+/** Delete untracked paths from disk (irreversible; the UI confirms first). */
+export function cleanUntrackedCommand(workdir: string, paths: readonly string[]): string {
+  return `${git(workdir)} clean -f -d -- ${relPaths(paths)}`
+}
+
+export interface CommitRequest {
+  /** Commit message (multi-line through a single -m is fine). */
+  message: string
+  /** Amend the previous commit instead of adding one. */
+  amend?: boolean
+  /** Skip hooks (the UI never uses this; kept for parity). */
+  noVerify?: boolean
+}
+
+/** Create a commit with the given message. */
+export function commitCommand(workdir: string, request: CommitRequest): string {
+  const message = request.message.replace(/\r\n/g, '\n').trimEnd()
+  if (message.trim() === '') throw new Error('commit message is empty')
+  const parts = [`${git(workdir)} commit --no-edit -m ${shQuote(message)}`]
+  if (request.amend === true) parts.push('--amend')
+  if (request.noVerify === true) parts.push('--no-verify')
+  return capped(parts.join(' '))
+}
+
+/** Check out an existing ref (branch, tag or hash). */
+export function checkoutCommand(workdir: string, ref: string): string {
+  return `${git(workdir)} checkout ${shQuote(assertRef(ref))}`
+}
+
+/** Create (and check out) a branch, optionally from a start point. */
+export function createBranchCommand(workdir: string, name: string, from?: string): string {
+  const start = from !== undefined && from !== '' ? ` ${shQuote(assertRef(from))}` : ''
+  return `${git(workdir)} checkout -b ${shQuote(assertBranchName(name))}${start}`
+}
+
+/** Delete a branch (`force` maps to -D). */
+export function deleteBranchCommand(workdir: string, name: string, force: boolean): string {
+  return `${git(workdir)} branch ${force ? '-D' : '-d'} ${shQuote(assertBranchName(name))}`
+}
+
+/** Rename a branch. */
+export function renameBranchCommand(workdir: string, from: string, to: string): string {
+  return `${git(workdir)} branch -m ${shQuote(assertBranchName(from))} ${shQuote(assertBranchName(to))}`
+}
+
+/** Merge a ref into the current branch (no editor prompt). */
+export function mergeCommand(workdir: string, ref: string): string {
+  return capped(`${git(workdir)} merge --no-edit ${shQuote(assertRef(ref))}`)
+}
+
+/** Publish a branch to a remote and set its upstream. */
+export function publishBranchCommand(workdir: string, branch: string, remote: string): string {
+  return capped(`${git(workdir)} push --set-upstream ${shQuote(assertRemoteName(remote))} ${shQuote(assertBranchName(branch))}`)
+}
+
+/** Fetch every remote, pruning deleted tracking refs. */
+export function fetchCommand(workdir: string): string {
+  return capped(`${git(workdir)} fetch --all --prune`)
+}
+
+/** Pull the current branch (merge, no editor prompt). */
+export function pullCommand(workdir: string): string {
+  return capped(`${git(workdir)} pull --no-edit`)
+}
+
+/** Push the current branch. */
+export function pushCommand(workdir: string): string {
+  return capped(`${git(workdir)} push`)
+}
+
+/** Stash the working tree (optionally including untracked files). */
+export function stashSaveCommand(workdir: string, message: string, includeUntracked: boolean): string {
+  const text = message.trim() === '' ? 'dsh-remote-vs stash' : message.trim()
+  return `${git(workdir)} stash push ${includeUntracked ? '-u ' : ''}-m ${shQuote(text)}`
+}
+
+/** Apply (and keep) a stash entry. */
+export function stashApplyCommand(workdir: string, ref: string): string {
+  return `${git(workdir)} stash apply ${shQuote(assertStashRef(ref))}`
+}
+
+/** Apply and drop a stash entry. */
+export function stashPopCommand(workdir: string, ref: string): string {
+  return `${git(workdir)} stash pop ${shQuote(assertStashRef(ref))}`
+}
+
+/** Drop a stash entry (irreversible). */
+export function stashDropCommand(workdir: string, ref: string): string {
+  return `${git(workdir)} stash drop ${shQuote(assertStashRef(ref))}`
+}
+
+/** Register a remote. */
+export function addRemoteCommand(workdir: string, name: string, url: string): string {
+  return `${git(workdir)} remote add ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`
+}
+
+/** Remove a remote. */
+export function removeRemoteCommand(workdir: string, name: string): string {
+  return `${git(workdir)} remote remove ${shQuote(assertRemoteName(name))}`
+}
+
+/** Point an existing remote at a new URL. */
+export function setRemoteUrlCommand(workdir: string, name: string, url: string): string {
+  return `${git(workdir)} remote set-url ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`
+}
+
+/** Initialize a repository in place. */
+export function initCommand(workdir: string): string {
+  return `${git(workdir)} init`
+}
+
+/**
+ * Apply a patch file (staged into the index, or reversed out of the worktree).
+ * The caller writes the patch through SFTP first — no stdin channel exists on
+ * the exec route, and a temp file also keeps the patch out of shell quoting.
+ */
+export function applyPatchCommand(workdir: string, patchPath: string, mode: 'stage' | 'unstage' | 'revert'): string {
+  const file = shQuote(assertRemoteDir(patchPath))
+  const args = mode === 'stage'
+    ? '--cached --whitespace=nowarn'
+    : mode === 'unstage'
+      ? '--cached --reverse --whitespace=nowarn'
+      : '--reverse --whitespace=nowarn'
+  return capped(`${git(workdir)} apply ${args} ${file}; rm -f ${file}`)
+}
+
+// ------------------------------------------------------------- parsers
+
+/** Enclosing repository root from `rev-parse --show-toplevel`. */
+export function parseRepoRoot(stdout: string): string | undefined {
+  const line = stdout.split('\n')[0]?.trim() ?? ''
+  return line.startsWith('/') ? line : undefined
+}
+
+/** Repository dirs found under a workspace root. */
+export function parseRepoDiscovery(stdout: string): string[] {
+  const seen = new Set<string>()
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim().replace(/\/\.git$/, '')
+    if (line.startsWith('/') && !seen.has(line)) seen.add(line)
+  }
+  // A root that is itself a repo sorts first, then shallowest first.
+  return [...seen].sort((a, b) => (a.split('/').length - b.split('/').length) || a.localeCompare(b))
+}
+
+/**
+ * Porcelain v1 in `-z` form: `XY PATH\0` records, rename/copy records carry
+ * `XY NEW\0OLD\0` (the field order is reversed versus the arrow form), and
+ * ignored entries arrive as `!! PATH`.
+ */
+export function parseStatusDetail(stdout: string): GitStatusDetail {
+  const fields = stdout.split('\0')
+  const entries: GitPathStatus[] = []
+  const ignored: string[] = []
+  let truncated = false
+  let i = 0
+  while (i < fields.length) {
+    const field = fields[i] as string
+    i += 1
+    if (field === '') continue
+    if (field.startsWith('##')) continue
+    if (field.length < 4 || field[2] !== ' ') {
+      // A truncated tail (the byte cap can cut mid-record) — stop here.
+      if (field.length > 0 && !fields[i - 1 + 1]?.startsWith('##')) truncated = true
+      break
+    }
+    const x = field[0] as string
+    const y = field[1] as string
+    const path = field.slice(3)
+    const renamed = x === 'R' || x === 'C' || y === 'R' || y === 'C'
+    let origPath: string | undefined
+    if (renamed) {
+      origPath = fields[i]
+      i += 1
+    }
+    if (x === '!' && y === '!') {
+      if (ignored.length < 4000) ignored.push(path)
+      else truncated = true
+      continue
+    }
+    if (entries.length >= 4000) {
+      truncated = true
+      continue
+    }
+    entries.push(origPath === undefined ? { path, x, y } : { path, x, y, origPath })
+  }
+  return { entries, ignored, truncated }
+}
+
+/** Split one unified diff into per-file blocks. */
+export function parseUnifiedDiff(text: string): UnifiedDiffFile[] {
+  const lines = text.split('\n')
+  const files: UnifiedDiffFile[] = []
+  let current: UnifiedDiffFile | undefined
+  let header: string[] = []
+  let hunk: { header: string; lines: string[] } | undefined
+
+  const flushHunk = (): void => {
+    if (current === undefined || hunk === undefined) return
+    const parsed = parseHunkHeader(hunk.header)
+    if (parsed === undefined) { hunk = undefined; return }
+    current.hunks.push({ ...parsed, lines: hunk.lines, patch: [...header, hunk.header, ...hunk.lines].join('\n') + '\n' })
+    hunk = undefined
+  }
+  const flushFile = (): void => {
+    flushHunk()
+    if (current !== undefined) files.push(current)
+    current = undefined
+  }
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      flushFile()
+      const paths = parseDiffHeaderPaths(line)
+      header = [line]
+      current = { path: paths.newPath, oldPath: paths.oldPath, status: paths.oldPath === paths.newPath ? 'M' : 'R', binary: false, hunks: [] }
+      continue
+    }
+    if (current === undefined) continue
+    if (hunk !== undefined && (line.startsWith(' ') || line.startsWith('+') || line.startsWith('-') || line.startsWith('\\'))) {
+      hunk.lines.push(line)
+      continue
+    }
+    if (line.startsWith('@@')) {
+      flushHunk()
+      hunk = { header: line, lines: [] }
+      continue
+    }
+    // Header-ish line: belongs to the file block (also closes a hunk run).
+    if (hunk === undefined) {
+      header.push(line)
+      if (line.startsWith('new file mode')) current.status = 'A'
+      else if (line.startsWith('deleted file mode')) current.status = 'D'
+      else if (line.startsWith('rename from') || line.startsWith('rename to')) current.status = 'R'
+      else if (line.startsWith('copy from') || line.startsWith('copy to')) current.status = 'C'
+      else if (line.startsWith('Binary files') || line.startsWith('GIT binary patch')) current.binary = true
+    } else {
+      flushHunk()
+      header.push(line)
+    }
+  }
+  flushFile()
+  return files
+}
+
+/** `diff --git a/x b/y` → both sides (paths may be quoted when exotic). */
+function parseDiffHeaderPaths(line: string): { oldPath: string; newPath: string } {
+  const rest = line.slice('diff --git '.length)
+  const quoted = /^"((?:\\.|[^"\\])*)" "((?:\\.|[^"\\])*)"$/.exec(rest)
+  if (quoted !== null) {
+    return { oldPath: unquote(quoted[1] as string), newPath: unquote(quoted[2] as string) }
+  }
+  // Unquoted paths may contain spaces: split from the middle on ` b/`.
+  const split = rest.indexOf(' b/')
+  if (split > 0) return { oldPath: rest.slice(0, split).replace(/^a\//, ''), newPath: rest.slice(split + 1).replace(/^b\//, '') }
+  return { oldPath: rest, newPath: rest }
+}
+
+function unquote(value: string): string {
+  return value.replace(/\\(.)/g, (_, ch: string) => {
+    switch (ch) {
+      case 'n': return '\n'
+      case 't': return '\t'
+      case 'r': return '\r'
+      case '"': return '"'
+      case '\\': return '\\'
+      default: return ch
+    }
+  })
+}
+
+/** `@@ -a,b +c,d @@ heading` → structured hunk numbers. */
+function parseHunkHeader(line: string): Omit<UnifiedHunk, 'lines' | 'patch'> | undefined {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(line)
+  if (match === null) return undefined
+  return {
+    oldStart: Number(match[1]),
+    oldCount: match[2] === undefined ? 1 : Number(match[2]),
+    newStart: Number(match[3]),
+    newCount: match[4] === undefined ? 1 : Number(match[4]),
+    heading: (match[5] ?? '').trim(),
+  }
+}
+
+/** `git show --name-status` body → per-file rows (status letters + paths). */
+export function parseCommitFiles(stdout: string): GitCommitFile[] {
+  const files: GitCommitFile[] = []
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trimEnd()
+    if (line === '') continue
+    const tab = line.indexOf('\t')
+    if (tab < 0) continue
+    const status = line.slice(0, tab).trim()
+    const rest = line.slice(tab + 1)
+    if (!/^[A-Z]\d*$/.test(status)) continue
+    const renamed = status.startsWith('R') || status.startsWith('C')
+    if (renamed) {
+      const parts = rest.split('\t')
+      const from = parts[0] ?? ''
+      const to = parts[1] ?? from
+      files.push({ status: status[0] as string, path: to, origPath: from })
+    } else {
+      files.push({ status: status[0] as string, path: rest })
+    }
+  }
+  return files
+}
+
+/** `git remote -v` → one row per URL (fetch/push). */
+export function parseRemotes(stdout: string): GitRemote[] {
+  const remotes: GitRemote[] = []
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(line)
+    if (match === null) continue
+    remotes.push({ name: match[1] as string, url: match[2] as string, kind: match[3] as 'fetch' | 'push' })
+  }
+  return remotes
+}
+
+/** `stash list --pretty=format:'%gd%x1f%gs%x1f%ct%x1e'` → entries. */
+export function parseStashList(stdout: string): GitStash[] {
+  const list: GitStash[] = []
+  for (const record of stdout.split('\x1e')) {
+    const text = record.replace(/^\n/, '')
+    if (text.trim() === '') continue
+    const fields = text.split('\x1f')
+    if (fields.length < 3) continue
+    const [ref, message, date] = fields as [string, string, string]
+    if (!/^stash@\{\d+\}$/.test(ref.trim())) continue
+    list.push({
+      ref: ref.trim(),
+      message: message.replace(/^WIP on [^:]*:\s*/, '').trim(),
+      date: Number(date.trim()) || 0,
+    })
+  }
+  return list
+}
+
+/** `for-each-ref refs/heads refs/remotes` → branches (remote ones flagged). */
+export function parseAllBranches(stdout: string, current: string): import('./protocol.ts').GitBranch[] {
+  const branches: import('./protocol.ts').GitBranch[] = []
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const fields = line.split('\x1f')
+    if (fields.length < 5) continue
+    const [name, short, upstream, head, full] = fields as [string, string, string, string, string]
+    const trimmed = name.trim()
+    if (trimmed === '' || trimmed.endsWith('/HEAD')) continue
+    branches.push({
+      name: trimmed,
+      short: short.trim(),
+      upstream: upstream.trim(),
+      head: head.trim() === '*' || trimmed === current,
+      remote: full.trim().startsWith('refs/remotes/'),
+    })
+  }
+  branches.sort((a, b) => {
+    if (a.head !== b.head) return a.head ? -1 : 1
+    if (a.remote !== b.remote) return a.remote ? 1 : -1
+    return a.name.localeCompare(b.name)
+  })
+  return branches
+}
+
+/** Friendly text for the git failures the UI can explain better than git does. */
+export function gitErrorHint(stderr: string): string | undefined {
+  const text = stderr.trim()
+  if (text === '') return undefined
+  if (/not a git repository/i.test(text)) return 'not a git repository'
+  if (/git: (command )?not found|cannot run git/i.test(text)) return 'git is not installed on the remote host'
+  if (/Please tell me who you are|unable to auto-detect email address/i.test(text)) {
+    return 'git identity is not configured on the remote host (git config user.name / user.email)'
+  }
+  if (/could not read Username|Authentication failed|Permission denied \(publickey\)/i.test(text)) {
+    return 'remote authentication failed — no credentials available on the remote host'
+  }
+  if (/CONFLICT|Automatic merge failed/i.test(text)) return 'merge conflict — resolve the marked files, then commit'
+  if (/Your local changes.*would be overwritten/i.test(text)) return 'local changes would be overwritten — commit or stash them first'
+  if (/\[rejected\]|non-fast-forward/i.test(text)) return 'push rejected (non-fast-forward) — pull or force is required'
+  if (/no upstream branch/i.test(text)) return 'the branch has no upstream — publish it first'
+  if (/nothing to commit/i.test(text)) return 'nothing to commit'
+  return undefined
+}

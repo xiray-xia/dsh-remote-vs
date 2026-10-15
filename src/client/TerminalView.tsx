@@ -1,154 +1,290 @@
 /**
- * Terminal view: one xterm per connection, refresh-safe reattach by stored
- * server session id, explicit disconnect (kills the remote shell).
+ * Terminal view: a tab strip of independent remote shells under the host
+ * picker. Each tab owns its own WebSocket and xterm instance, so several
+ * sessions (or several hosts) can run side by side; hidden tabs stay MOUNTED,
+ * which is what keeps their scrollback and running command alive.
+ *
+ * A tab is refresh-safe: the server session id is persisted, so reloading the
+ * GUI reattaches to the still-running shell instead of spawning a new one.
  */
-import { useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
-import { Btn, Notice, Row, optionStyle, selectStyle } from './ui.tsx'
+import { optionStyle } from './ui.tsx'
+import {
+  IconButton,
+  IconClose,
+  IconPlus,
+  IconTerminal,
+  baseName,
+  confirmDialog,
+} from './vsc/kit.tsx'
 
-function sessionStoreKey(alias: string): string {
-  return `dsh-remote-vs.term.${alias}`
+const ALIAS_KEY = 'dsh-remote-vs.term.alias'
+const TABS_KEY = 'dsh-remote-vs.term.tabs'
+
+interface TermTab {
+  /** Local identity (React key + storage identity). */
+  id: string
+  alias: string
+  /** Server session id once the shell is up (enables reattach). */
+  session?: string
+  /** Bumped to force a fresh connection (connect / reconnect). */
+  nonce: number
+  connected: boolean
+  /** Human-readable reason the tab is not connected. */
+  note?: string
 }
 
-function loadStoredSession(alias: string): string | undefined {
+interface StoredTab {
+  id: string
+  alias: string
+  session?: string
+}
+
+function readAlias(): string {
   try {
-    return localStorage.getItem(sessionStoreKey(alias)) ?? undefined
+    return localStorage.getItem(ALIAS_KEY) ?? ''
   } catch {
-    return undefined
+    return ''
   }
 }
 
-function storeSession(alias: string, id: string): void {
+function readStoredTabs(): StoredTab[] {
   try {
-    localStorage.setItem(sessionStoreKey(alias), id)
+    const raw = localStorage.getItem(TABS_KEY)
+    if (raw === null) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    const out: StoredTab[] = []
+    for (const row of parsed) {
+      if (typeof row !== 'object' || row === null) continue
+      const { id, alias, session } = row as { id?: unknown; alias?: unknown; session?: unknown }
+      if (typeof id !== 'string' || typeof alias !== 'string') continue
+      out.push(session === undefined || typeof session !== 'string' ? { id, alias } : { id, alias, session })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+function persistTabs(tabs: TermTab[]): void {
+  try {
+    const rows: StoredTab[] = tabs.map(tab => (tab.session === undefined
+      ? { id: tab.id, alias: tab.alias }
+      : { id: tab.id, alias: tab.alias, session: tab.session }))
+    localStorage.setItem(TABS_KEY, JSON.stringify(rows))
   } catch {
     // Private mode: ignore.
   }
 }
 
-function clearStoredSession(alias: string): void {
-  try {
-    localStorage.removeItem(sessionStoreKey(alias))
-  } catch {
-    // Ignore.
-  }
+function newId(): string {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
-export function TerminalView(props: { t: (k: string) => string; hosts: RemoteHostSummary[]; visible: boolean }): ReactNode {
+export function TerminalView(props: {
+  t: (key: string) => string
+  hosts: RemoteHostSummary[]
+  visible: boolean
+}): ReactNode {
   const t = props.t
-  const [alias, setAlias] = useState<string>(() => {
-    try {
-      return localStorage.getItem('dsh-remote-vs.term.alias') ?? ''
-    } catch {
-      return ''
-    }
-  })
-  const [connKey, setConnKey] = useState(0)
-  const [connected, setConnected] = useState(false)
-  const [sessionId, setSessionId] = useState<string | undefined>(undefined)
-  const [exitMsg, setExitMsg] = useState<string | undefined>(undefined)
-  const [error, setError] = useState<string | undefined>(undefined)
+  const [alias, setAlias] = useState<string>(readAlias)
+  const [tabs, setTabs] = useState<TermTab[]>(() => readStoredTabs().map(row => ({
+    id: row.id,
+    alias: row.alias,
+    ...(row.session === undefined ? {} : { session: row.session }),
+    nonce: 0,
+    connected: true,
+  })))
+  const [activeId, setActiveId] = useState<string | undefined>(() => tabs[0]?.id)
 
-  const effectiveAlias = alias !== '' ? alias : (props.hosts[0]?.alias ?? '')
+  const effectiveAlias = (alias !== '' && props.hosts.some(host => host.alias === alias))
+    ? alias
+    : (props.hosts[0]?.alias ?? '')
 
-  const connect = (fresh: boolean): void => {
-    if (effectiveAlias === '') return
+  useEffect(() => {
     try {
-      localStorage.setItem('dsh-remote-vs.term.alias', effectiveAlias)
+      localStorage.setItem(ALIAS_KEY, effectiveAlias)
     } catch {
       // Ignore.
     }
-    if (fresh) {
-      const stale = loadStoredSession(effectiveAlias)
-      if (stale !== undefined) {
-        // Best-effort kill of the orphaned shell before opening a new one.
-        api.terminalClose(stale).catch(() => undefined)
+  }, [effectiveAlias])
+
+  useEffect(() => {
+    persistTabs(tabs)
+  }, [tabs])
+
+  // A restored tab whose host no longer exists cannot reattach.
+  useEffect(() => {
+    if (props.hosts.length === 0) return
+    setTabs(prev => prev.filter(tab => props.hosts.some(host => host.alias === tab.alias)))
+  }, [props.hosts])
+
+  const patchTab = useCallback((id: string, next: Partial<TermTab>): void => {
+    setTabs(prev => prev.map(tab => (tab.id === id ? { ...tab, ...next } : tab)))
+  }, [])
+
+  const openTab = useCallback((host: string): void => {
+    if (host === '') return
+    const tab: TermTab = { id: newId(), alias: host, nonce: 0, connected: true }
+    setTabs(prev => [...prev, tab])
+    setActiveId(tab.id)
+  }, [])
+
+  const closeTab = useCallback(async (tab: TermTab): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t('term.closeTitle'),
+      text: `${tab.alias}${tab.session === undefined ? '' : ` · ${tab.session.slice(0, 8)}`}`,
+      danger: true,
+      okText: t('term.close'),
+    })
+    if (!ok) return
+    if (tab.session !== undefined) {
+      api.terminalClose(tab.session).catch(() => undefined)
+    }
+    setTabs(prev => {
+      const next = prev.filter(item => item.id !== tab.id)
+      setActiveId(current => (current === tab.id ? next[next.length - 1]?.id : current))
+      return next
+    })
+  }, [t])
+
+  const reconnect = useCallback((id: string, fresh: boolean): void => {
+    setTabs(prev => prev.map(tab => {
+      if (tab.id !== id) return tab
+      if (fresh && tab.session !== undefined) api.terminalClose(tab.session).catch(() => undefined)
+      return {
+        ...tab,
+        nonce: tab.nonce + 1,
+        connected: true,
+        note: undefined,
+        ...(fresh ? { session: undefined } : {}),
       }
-      clearStoredSession(effectiveAlias)
-    }
-    setExitMsg(undefined)
-    setError(undefined)
-    setSessionId(undefined)
-    setConnKey((k) => k + 1)
-    setConnected(true)
-  }
+    }))
+  }, [])
 
-  const disconnect = (kill: boolean): void => {
-    const id = sessionId ?? (effectiveAlias !== '' ? loadStoredSession(effectiveAlias) : undefined)
-    if (kill && id !== undefined) {
-      api.terminalClose(id).then(
-        () => undefined,
-        (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
-      )
-    }
-    if (effectiveAlias !== '') clearStoredSession(effectiveAlias)
-    setConnected(false)
-    setSessionId(undefined)
-  }
+  const active = tabs.find(tab => tab.id === activeId) ?? tabs[0]
 
-  const storedId = effectiveAlias !== '' ? loadStoredSession(effectiveAlias) : undefined
-  const wsUrl = connected && effectiveAlias !== ''
-    ? api.terminalUrl({ ...(storedId !== undefined ? { session: storedId } : { alias: effectiveAlias }), cols: 80, rows: 24 })
-    : undefined
+  const labelFor = (tab: TermTab): string => {
+    const siblings = tabs.filter(item => item.alias === tab.alias)
+    const index = siblings.findIndex(item => item.id === tab.id) + 1
+    const name = baseName(tab.alias.replace(/\/+$/, '')) || tab.alias
+    return siblings.length > 1 ? `${name} #${index}` : name
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <div style={{ flex: 'none' }}>
-      <Row>
-        <span style={{ fontSize: 12, opacity: 0.75 }}>{t('term.selectHost')}</span>
+    <div className="rvs-pane grow">
+      <div className="rvs-header">
+        <span className="rvs-title">{t('tab.terminal')}</span>
         <select
+          className="rvs-select"
           value={effectiveAlias}
-          disabled={connected || props.hosts.length === 0}
           onChange={(e) => setAlias(e.target.value)}
-          style={{ ...selectStyle, flex: 1 }}
+          disabled={props.hosts.length === 0}
+          title={t('term.selectHost')}
+          style={{ flex: 1, minWidth: 90 }}
         >
-          {props.hosts.map((h) => <option key={h.alias} value={h.alias} style={optionStyle}>{h.alias} ({h.user}@{h.host})</option>)}
+          {props.hosts.map(host => (
+            <option key={host.alias} value={host.alias} style={optionStyle}>
+              {host.alias} ({host.user}@{host.host})
+            </option>
+          ))}
         </select>
-        {!connected ? (
-          <Btn kind="primary" onClick={() => connect(false)} disabled={effectiveAlias === ''}>{t('term.connect')}</Btn>
-        ) : (
-          <>
-            <Btn onClick={() => connect(true)}>{t('term.reconnect')}</Btn>
-            <Btn kind="danger" onClick={() => disconnect(true)}>{t('term.disconnect')}</Btn>
-          </>
-        )}
-      </Row>
-      {props.hosts.length === 0 && (
-        <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>{t('term.noHosts')}</div>
-      )}
-      {error !== undefined && <Notice kind="error">{error}</Notice>}
-      {exitMsg !== undefined && !connected && <Notice kind="info">{exitMsg}</Notice>}
+        <IconButton
+          title={t('term.new')}
+          onClick={() => openTab(effectiveAlias)}
+          disabled={effectiveAlias === ''}
+        >
+          <IconPlus size={15} />
+        </IconButton>
       </div>
-      <div style={{ marginTop: 8, flex: 1, minHeight: 240, border: '1px solid rgba(127,127,127,.25)', borderRadius: 6, overflow: 'hidden', background: 'rgba(0,0,0,.25)' }}>
-        {connected && wsUrl !== undefined ? (
-          <XTerm
-            key={`${effectiveAlias}:${connKey}`}
-            wsUrl={wsUrl}
-            visible={props.visible}
-            onReady={(id) => {
-              setSessionId(id)
-              storeSession(effectiveAlias, id)
-            }}
-            onExit={(code, message) => {
-              if (message === 'terminal session expired') {
-                // Stale reattach: drop the id and retry once with a fresh shell.
-                clearStoredSession(effectiveAlias)
-                setSessionId(undefined)
-                setConnKey((k) => k + 1)
-                return
-              }
-              // The shell is gone: drop the id and return to the connect UI.
-              clearStoredSession(effectiveAlias)
-              setSessionId(undefined)
-              setConnected(false)
-              setExitMsg(code === null ? (message ?? t('term.closed')) : `exit ${code}`)
-            }}
-          />
-        ) : (
-          <div style={{ padding: 12, opacity: 0.6, fontSize: 12 }}>{t('term.selectHost')}</div>
+
+      {props.hosts.length === 0 && <div className="rvs-banner warn">{t('term.noHosts')}</div>}
+
+      <div className="rvs-term-tabs" role="tablist">
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={tab.id === active?.id}
+            className={`rvs-term-tab${tab.id === active?.id ? ' active' : ''}${tab.note === undefined ? '' : ' dead'}`}
+            title={`${tab.alias}${tab.session === undefined ? '' : `\n${tab.session}`}`}
+            onClick={() => setActiveId(tab.id)}
+            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); void closeTab(tab) } }}
+          >
+            <IconTerminal size={13} />
+            <span className="rvs-term-name">{labelFor(tab)}</span>
+            <span
+              className="rvs-etab-close"
+              role="presentation"
+              title={t('term.close')}
+              onClick={(e) => { e.stopPropagation(); void closeTab(tab) }}
+            >
+              <IconClose size={11} />
+            </span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className="rvs-term-tab"
+          title={t('term.new')}
+          onClick={() => openTab(effectiveAlias)}
+          disabled={effectiveAlias === ''}
+          style={{ padding: '0 8px' }}
+        >
+          <IconPlus size={13} />
+        </button>
+      </div>
+
+      <div className="rvs-term-body">
+        {tabs.length === 0 && (
+          <div className="rvs-empty">{t('term.empty')}</div>
         )}
+        {tabs.map(tab => (
+          <div
+            key={tab.id}
+            className="rvs-term-slot"
+            style={{ display: tab.id === active?.id ? 'block' : 'none' }}
+          >
+            {tab.connected ? (
+              <XTerm
+                key={`${tab.id}:${tab.nonce}`}
+                wsUrl={api.terminalUrl({
+                  ...(tab.session === undefined ? { alias: tab.alias } : { session: tab.session }),
+                  cols: 80,
+                  rows: 24,
+                })}
+                visible={props.visible && tab.id === active?.id}
+                onReady={(id) => patchTab(tab.id, { session: id, connected: true, note: undefined })}
+                onExit={(code, message) => {
+                  if (message === 'terminal session expired') {
+                    // Stale reattach: drop the id and retry once with a fresh shell.
+                    patchTab(tab.id, { session: undefined, nonce: tab.nonce + 1, connected: true, note: undefined })
+                    return
+                  }
+                  patchTab(tab.id, {
+                    connected: false,
+                    session: undefined,
+                    note: code === null ? (message ?? t('term.closed')) : `exit ${code}`,
+                  })
+                }}
+              />
+            ) : (
+              <div className="rvs-term-dead">
+                {tab.note !== undefined && <div className="rvs-empty">{tab.note}</div>}
+                <div className="rvs-commit-row" style={{ justifyContent: 'center' }}>
+                  <button type="button" className="rvs-chip primary" onClick={() => reconnect(tab.id, true)}>
+                    {t('term.reconnect')}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   )

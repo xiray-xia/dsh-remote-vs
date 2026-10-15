@@ -48,6 +48,15 @@ export class RemoteFiles {
     return this.pool.withSftp(alias, async (sftp) => {
       const attrs = await lstatAsync(sftp, path)
       const size = attrs.size
+      // A zero-byte file has no window to read, and asking SFTP for zero bytes
+      // is NOT a no-op: ssh2's `read()` rejects `off >= buf.length` with a
+      // SYNC throw ("offset is out of bounds"), which escapes the promise
+      // callback, wedges the HTTP request (endless spinner) and leaves the
+      // SFTP session open — repeating it exhausts the server's MaxSessions and
+      // makes SSH look dead. Empty is answered from the stat alone.
+      if (size <= 0) {
+        return { size: 0, binary: false, text: '', truncated: false }
+      }
       const window = Math.min(size, READ_CAP)
       const buffer = await readWindow(sftp, path, 0, window)
       const binary = buffer.includes(0)
@@ -65,7 +74,11 @@ export class RemoteFiles {
     const data = encoding === 'base64' ? Buffer.from(content, 'base64') : Buffer.from(content, 'utf8')
     return this.pool.withSftp(alias, async (sftp) => {
       await ensureDir(sftp, posix.dirname(path))
-      await writeFileAsync(sftp, path, data)
+      // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
+      // leaves it undefined); an empty file is created by opening for
+      // truncation and closing again.
+      if (data.length === 0) await touchFile(sftp, path)
+      else await writeFileAsync(sftp, path, data)
       return { size: data.length }
     })
   }
@@ -159,6 +172,15 @@ function lstatAsync(sftp: SFTPWrapper, path: string): Promise<Stats> {
   })
 }
 
+/**
+ * Read one window of a file.
+ *
+ * Every failure path must end in a settle: the caller's `finally` (close the
+ * handle, end the session, release the pooled connection) only runs once this
+ * promise settles. A synchronous throw from the ssh2 client library therefore
+ * has to be converted into a rejection — otherwise the HTTP request hangs
+ * forever and the SFTP channel leaks.
+ */
 function readWindow(sftp: SFTPWrapper, path: string, offset: number, length: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     sftp.open(path, 'r', (openError, handle) => {
@@ -166,13 +188,34 @@ function readWindow(sftp: SFTPWrapper, path: string, offset: number, length: num
         reject(openError)
         return
       }
-      const buffer = Buffer.alloc(length)
-      sftp.read(handle, buffer, 0, length, offset, (readError, _bytes, data) => {
-        sftp.close(handle, () => {
-          if (readError !== undefined && readError !== null) reject(readError)
-          else resolve(data)
+      const settle = (error: unknown, data: Buffer | undefined): void => {
+        try {
+          sftp.close(handle, () => {
+            if (error !== undefined && error !== null) reject(error)
+            else resolve(data ?? Buffer.alloc(0))
+          })
+        } catch (closeError) {
+          reject(error ?? closeError)
+        }
+      }
+      if (length <= 0) {
+        settle(null, Buffer.alloc(0))
+        return
+      }
+      try {
+        const buffer = Buffer.alloc(length)
+        sftp.read(handle, buffer, 0, length, offset, (readError, bytesRead, data) => {
+          if (readError !== undefined && readError !== null) {
+            settle(readError, undefined)
+            return
+          }
+          const count = typeof bytesRead === 'number' ? bytesRead : length
+          const end = Math.max(0, Math.min(count, data.length))
+          settle(null, data.subarray(0, end))
         })
-      })
+      } catch (error) {
+        settle(error, undefined)
+      }
     })
   })
 }
@@ -182,6 +225,26 @@ function writeFileAsync(sftp: SFTPWrapper, path: string, data: Buffer): Promise<
     sftp.writeFile(path, data, (error) => {
       if (error !== undefined && error !== null) reject(error)
       else resolve()
+    })
+  })
+}
+
+/** Create (or truncate) an empty file without sending a zero-length WRITE. */
+function touchFile(sftp: SFTPWrapper, path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    sftp.open(path, 'w', (openError, handle) => {
+      if (openError !== undefined && openError !== null) {
+        reject(openError)
+        return
+      }
+      try {
+        sftp.close(handle, (closeError) => {
+          if (closeError !== undefined && closeError !== null) reject(closeError)
+          else resolve()
+        })
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   })
 }

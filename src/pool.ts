@@ -21,6 +21,15 @@ const READY_TIMEOUT_MS = 15_000
 /** Per-stream output cap (stdout/stderr each); overflow truncates with a marker. */
 const OUTPUT_CAP = 2 * 1024 * 1024
 
+/**
+ * Wall-clock cap for one SFTP callback body. SSH gives no request timeout of
+ * its own, so a server that never answers would hold the session (and the
+ * pooled connection's hold count) open forever — the leak that eventually
+ * exhausts the server's channel budget. The timeout rejects so the caller's
+ * `finally` still ends the session and releases the connection.
+ */
+const SFTP_OP_TIMEOUT_MS = 60_000
+
 const TRUNCATED_MARKER = '\n[... truncated: output exceeded 2 MiB ...]\n'
 
 interface Pooled {
@@ -191,7 +200,7 @@ export class RemotePool {
         })
       })
       try {
-        return await fn(sftp)
+        return await withDeadline(fn(sftp), SFTP_OP_TIMEOUT_MS, `SFTP operation timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`)
       } finally {
         try {
           sftp.end()
@@ -384,4 +393,25 @@ function appendCapped(current: string, chunk: string): string {
   const next = current + chunk
   if (next.length <= OUTPUT_CAP) return next
   return next.slice(0, OUTPUT_CAP) + TRUNCATED_MARKER
+}
+
+/**
+ * Reject when `promise` has not settled within `ms`, so a stalled remote
+ * callback cannot keep a session (and its pooled connection) alive forever.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    timer.unref?.()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
 }

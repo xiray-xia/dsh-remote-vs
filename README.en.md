@@ -4,11 +4,14 @@
 
 [中文](./README.md) | English
 
-SSH host management inside the DSH Host process + helper push pipeline + remote files/terminal/Git.
-Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed there is an extra
-standalone "Remote" tab (workspaces/files/terminal/Git), otherwise it falls back to a native
-right-Sidebar "Remote" page (same content, self-opened from the guide, per-session instances).
-Since P2, native tools inside remote workspaces transparently run remotely (see below).
+SSH host management inside the DSH Host process + helper push pipeline + a **VS Code-style remote
+workbench** (explorer / search / source control / commit graph / multi-tab editor / side-by-side diff /
+multiple terminals). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
+there is an extra standalone "Remote" tab, otherwise it falls back to a native right-Sidebar "Remote"
+page (same content, self-opened from the guide, per-session instances). The editor is ALSO mounted into
+the conversation view slot as a "远程编辑器" (remote editor) tab next to "对话 / 轨迹", so the code area is
+full width; the sidebar copy is the narrow fallback. Since P2, native tools inside remote workspaces
+transparently run remotely (see below).
 
 ```text
 ┌─ Local DSH Host ─────────────────────────┐
@@ -37,15 +40,38 @@ open Settings → Remote hosts to configure.
 
 ## Capabilities
 
+### Remote workbench (VS Code-style UI)
+
+| Capability | Notes |
+| --- | --- |
+| Explorer | Lazy tree + expand/collapse + hidden-files toggle; context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference; git status colours and folder roll-up marks |
+| Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line |
+| Source control | Changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
+| Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers; switch between "before / after", and the after side is editable and savable |
+| Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
+| Multi-tab editor | Open/save/reload, dirty marks, several files at once; image preview, Markdown/HTML preview (source vs preview) |
+| Syntax highlighting | VS Code **Dark+ / Light+** palettes; covers java/aidl/smali, c/c++, go, rust, js/ts, json, py, yaml, xml, html/css, md, sh, properties/rc/toml, diff …; a **fallback colorer** takes over when no grammar matches, so a file is never left monochrome. Honest caveat: kotlin / gradle / smali are coloured by the Java grammar (no dedicated package), which gets keywords, strings and comments right but does not split their own syntax |
+| Find | In-editor `Ctrl+F` (`Aa` / `ab_` / `.*`, `3/17` count, ↑↓, `F3`/`Shift+F3`, `Esc`); **selected text is carried into the box by `Ctrl+F`**; the widget is pinned to the top-right and does not scroll away |
+| Jump | Clicking a search hit opens the file at that line, centres it and **lights the landing line** (fades after ~2.6s); repeat jumps in the same file work |
+| Terminals | Tabbed multi-terminal (`+` to create, `✕`/middle-click to close behind a confirm), across hosts; session ids are persisted so a page refresh reattaches to the running shells |
+| Workspaces | Binding list + routing-mode dropdown + the dual-mode (local / remote) new-workspace wizard |
+
+### Hosts and transport
+
 | Capability | Notes |
 | --- | --- |
 | Host management | CRUD + connectivity test; key / password auth; config in `$DSH_HOME/dsh-remote.json` (0600), independent from `dsh-ssh.json` |
 | Key bootstrap | One click generates a dedicated keypair on password hosts and deploys `authorized_keys`, key auth from then on |
 | Push pipeline | Remote arch/OS probe → version compare → skip-if-same / else push; the executable channel pushes a self-built helper |
-| Remote files | SFTP browse / read / write / create / delete / rename + CodeMirror multi-open editing + draggable splitter |
+| Remote files | SFTP browse / read / write / create / delete / rename (0-byte files and large trees hardened — see "Known limits") |
 | Remote terminal | ssh2 PTY + WebSocket, xterm rendering (copy-paste/theme-follow/reconnect-on-refresh) |
 | Git graph | Remote repo status + branches + SVG commit graph + commit details (exec + frontend parsing, zero Host additions) |
 | Import | One-click import from `~/.ssh/config` and from an existing `dsh-ssh.json` (read once, no coupling) |
+
+### Agent capabilities
+
+| Capability | Notes |
+| --- | --- |
 | Agent tools | `remote_hosts` / `remote_exec` / `remote_read` / `remote_write` / `remote_ls` |
 | **P2 transparent remote execution** | Native `read/write/edit/bash/glob/grep/jobs` inside remote workspaces run directly on the far end |
 | **P3 remote @ references** | `@` in remote sessions completes remote files (fileReferences router: scoped live listings / bare queries via a remote rg index) |
@@ -70,6 +96,9 @@ dsh_remote_vs/
 │   ├── tools.ts            # the 5 Agent tool definitions
 │   ├── http.ts / loopback.ts # JSON body IO + loopback trust fence
 │   ├── git-format.ts       # git command builders + pure frontend parsing (zero Host additions)
+│   ├── git-ops.ts          # the full remote git surface: status/diff/branch/remote/stash/commit/hunk patch builders + parsers
+│   ├── fs-ops.ts           # remote file-operation command builders (copy/move/remove/stat)
+│   ├── search-ops.ts       # remote content search (grep builder + NUL-separated parser + match splitting)
 │   ├── p2/                 # ── P2 transparent routing ──
 │   │   ├── worlds.ts       # world decisions (cwd key/alias/tombstones) + remote RPC/FS/proc contexts
 │   │   ├── helper-rpc.ts   # helper wire protocol over an ssh2 exec channel (handshake/heartbeat)
@@ -84,12 +113,33 @@ dsh_remote_vs/
 │   │   └── bridge-refs.ts  # standalone refs bridge (local-refs needs workingDirectory: must split)
 │   └── client/             # ── browser half (React, bundled into lib/client.js) ──
 │       ├── index.tsx       # surface decision (better-first/settle-boost/native fallback) + settings + directoryFlow takeover
-│       ├── RemoteRoot.tsx    # shared root for both surfaces (workspaces/files/terminal/git)
+│       ├── store.tsx       # module-level state shared by both surfaces (useSyncExternalStore; open files/terminals/view live here)
+│       ├── RemoteRoot.tsx  # sidebar surface: VS Code activity rail (explorer/search/SCM/history/editor/terminal/workspaces)
+│       ├── RemoteEditorView.tsx # conversation-view surface (the "remote editor" tab next to 对话/轨迹, full width)
+│       ├── RemoteExplorer.tsx   # explorer: tree + context menu + file ops + @ references + status marks
+│       ├── SearchView.tsx       # search panel: name / content modes + Aa/ab_/.* + grouped hits + jump
+│       ├── EditorPane.tsx       # editor pane: tabs + info bar (build stamp / tok count) + image/MD/HTML preview
+│       ├── CodeEditor.tsx       # CodeMirror wrapper: grammar table/theme/find widget/jump/fallback wiring
+│       ├── scm/            # ── source control ──
+│       │   ├── ScmPanel.tsx     # changes/staged/untracked + per-file and per-hunk actions + commit box
+│       │   ├── DiffView.tsx     # side-by-side diff (top scrollbar/hunk buttons/editable after side)
+│       │   ├── HistoryPanel.tsx # SVG commit graph + commit details + expanded changed files
+│       │   ├── actions.ts       # remote git action layer (over the exec channel)
+│       │   ├── diff-model.ts    # unified diff → side-by-side row projection (pure)
+│       │   └── status-map.ts    # status bucketing + tree marks (pure)
+│       ├── vsc/            # ── VS Code skin and controls (zero new runtime deps) ──
+│       │   ├── kit.tsx / vsc.css    # icons/dialogs/context menu/segmented control + all styles (scoped to .rvs-root)
+│       │   ├── editor-palette.ts    # Dark+/Light+ palette + fixed class names (rvs-ck-*)
+│       │   ├── editor-theme.ts      # editor chrome theme (live light/dark swap)
+│       │   ├── editor-langs.ts      # file extension → CodeMirror grammar
+│       │   ├── fallback-highlight.ts# coloring used when no grammar matched (via tokenize.ts)
+│       │   ├── FindWidget.tsx       # Ctrl+F find widget (pinned top-right)
+│       │   ├── reveal-line.ts       # jump + landing-line highlight
+│       │   ├── tokenize.ts / markdown.tsx # read-only pane tokenizer / dependency-free markdown renderer
 │       ├── NativeExplorer.tsx# native page type definition + seat body (no-sidebar fallback)
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # remote @refs/selection-to-chat
 │       ├── api.ts          # typed fetch wrapper over /api/dsh-remote
-│       ├── HostsView / WorkspacesView / WorkspaceWizard / FilesView
-│       ├── CodeEditor / TerminalView / XTerm / GitView / Dialog
+│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / Dialog
 │       ├── SettingsHosts.tsx        # settings occupants (host mgmt/binding list, self-fetching)
 │       ├── DirectoryFlow.tsx        # native entry occupant (local dual-mode/remote wizard)
 │       ├── RemoteDirectoryPicker.tsx# remote directory browser dialog
@@ -107,8 +157,35 @@ dsh_remote_vs/
 When a new helper is built, swap the 4-piece set (tarball + sha256 + helper.json + patch notes)
 into vendor and commit — see `docs/MAINTENANCE.md` §4.
 
-`.spike/` (gitignored) holds live-host verification scripts: `p2-router.ts` main regression (real remote +
-real Cordis + real router classes) + probes like `grep-probe.mjs`; build with `tsconfig.scratch.json`.
+`.spike/` (gitignored) holds live-host verification scripts plus the local self-checks:
+`p2-router.ts` main regression (real remote + real Cordis + real router classes) and probes like
+`grep-probe.mjs` (build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
+`fallback-check.mjs` which need no host at all (see "Development").
+
+## Remote workbench (VS Code style)
+
+Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page** (a standalone tab when
+`dsh-better-sidebar` is installed, otherwise the native right-Sidebar page) and **the conversation-view
+"remote editor" tab** (next to 对话/轨迹, giving the code area full width).
+
+- **Activity rail**: explorer / search / source control / commit graph / editor / terminal / workspaces.
+  A panel stays mounted after its first visit, so switching back neither refetches nor flashes.
+- **Editor**: tabs plus an info bar (path, language, **build stamp**, `tok N` coloured-token count,
+  saved state, reload/save). Those three marks exist for troubleshooting: the stamp answers "is the
+  browser running the bundle I just built?", `tok 0` answers "did a grammar match this extension?".
+- **Find and jump**: `Ctrl+F` opens a widget pinned to the editor's top-right corner
+  (`position: fixed` anchored to the editor's rect, so no ancestor scroller can carry it away);
+  a selection is carried into it by `Ctrl+F`; a jump from the search results centres the line and
+  lights it up.
+- **Terminals**: tabbed sessions with the session id persisted one by one, so a page refresh reattaches
+  to the shells that are still running.
+- **Known limits (stated honestly)**:
+  - There is **no public API to select the "remote editor" view**; the plugin can only click the shell's
+    own tab by its label and toasts a hint when that fails (`revealEditor()`).
+  - Untracked directories arrive as a **single `dir/` row**; clicking it only toasts instead of expanding
+    (a deliberate performance trade-off).
+  - Opening a file is capped at 8MiB (official helper constant); beyond that it is shown read-only.
+  - The find widget floats above the code (like VS Code) and takes no layout space.
 
 ## P2 transparent remote execution (Windows native)
 
@@ -160,8 +237,26 @@ pnpm run build
 dsh plugin --profile web add link:<absolute path of this directory>
 ```
 
-Hard-refresh the browser after client changes; Host-side changes need a `dsh web` restart.
-Before touching anything for a new DSH release, read `docs/MAINTENANCE.md`.
+**Restart `dsh web` after every change — the client half included.** The Host reads plugin bundles into
+memory at startup (`initialBundleSnapshot`; the served URL carries a `rev` and is `immutable` for a
+year), so a browser refresh — `Ctrl+Shift+R` included — only re-fetches the bytes captured at startup.
+How to tell:
+
+1. Each build injects a stamp (`MMDD-HHmm`) into `lib/client.js`, shown at the right of the editor info bar;
+2. Restart `dsh web` → refresh the page: **the stamp must change** for the change to be live;
+3. For colour issues, read `tok N`: `0` means no grammar matched the extension AND the fallback colorer
+   did not take over (the console line next to it names the file).
+
+Self-checks (no host, no DSH, a few seconds each):
+
+```sh
+node .spike/model-check.mjs      # 48 checks: real git/grep output → parsers, diff model, class↔CSS contract
+node .spike/reveal-check.mjs     # 5 checks: jump target, landing highlight, repeat jump in one editor
+node .spike/fallback-check.mjs   # 12 checks: the fallback colorer colours java/cpp/shell in a real DOM
+```
+
+The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
+Before touching anything for a new DSH release, read `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist).
 
 ## License
 

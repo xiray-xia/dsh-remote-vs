@@ -323,12 +323,15 @@ export function sameLocalDir(left: string, right: string): boolean {
  * no-op, never an absolute mention.
  */
 export function insertRemoteReference(
-  ctx: Context,
+  ctx: Context | undefined,
   sessionId: string,
   remoteRoot: string,
   absPath: string,
   isDir: boolean,
 ): boolean {
+  // The shared explorer store boots asynchronously: before its context lands
+  // the insertion is a no-op rather than a crash.
+  if (ctx === undefined) return false
   try {
     const relative = remoteRelativePath(remoteRoot, absPath)
     if (relative === undefined) {
