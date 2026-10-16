@@ -31,11 +31,13 @@ transparently run remotely (see below).
 ## Install
 
 ```sh
-dsh plugin add github:xiray-xia/dsh-remote-vs
+dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
 ```
 
-Requires DSH `0.2.1-alpha.4`. On first install, allow the printed build scripts
-in the profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
+Requires DSH `0.2.1-alpha.4`. `--profile web` selects which profile to install into —
+this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
+the common name; use your own profile's name). On first install, allow the printed build
+scripts in that profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
 open Settings → Remote hosts to configure.
 
 ## Capabilities
