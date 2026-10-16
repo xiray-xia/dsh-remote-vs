@@ -506,6 +506,8 @@ export class LineTokenCache {
    * wrong state.
    */
   private lines: { text: string; tokens: Token[]; entry: string | undefined; exit: string | undefined }[] = []
+  /** The `tokens` getter's result, dropped by `refresh` (see the getter). */
+  private tokensCache: Token[][] | undefined = undefined
   private source: unknown = undefined
   private readonly lang: LangId | undefined
 
@@ -517,9 +519,19 @@ export class LineTokenCache {
     this.lang = lang
   }
 
-  /** Tokenized lines, aligned with the document's lines. */
+  /**
+   * Tokenized lines, aligned with the document's lines.
+   *
+   * Cached, because this is read on the PAINT path: the fallback highlighter
+   * asks for it on every viewport change, and `.map()` over every line
+   * allocated a fresh N-element array (N = the whole document's line count) per
+   * access — one whole-document array per scrolled frame. The cache is dropped
+   * whenever `refresh` replaces `lines` (below), and the per-line token arrays
+   * it collects are the same objects that are reused across refreshes.
+   */
   get tokens(): readonly Token[][] {
-    return this.lines.map(line => line.tokens)
+    if (this.tokensCache === undefined) this.tokensCache = this.lines.map(line => line.tokens)
+    return this.tokensCache
   }
 
   /** Lines actually re-tokenized by the last refresh (tests and diagnostics). */
@@ -550,6 +562,7 @@ export class LineTokenCache {
       tokenized += 1
     }
     this.lines = next
+    this.tokensCache = undefined
     this.source = doc
     this.lastTokenizedCount = tokenized
   }

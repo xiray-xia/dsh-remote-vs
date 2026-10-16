@@ -14,6 +14,18 @@ export function isDarkScheme(): boolean {
 }
 
 /**
+ * The subscribers of the ONE scheme observer, plus that observer.
+ *
+ * It used to be created per subscription, and both consumers subscribe per
+ * INSTANCE: every terminal tab (`XTerm`) and every code editor
+ * (`editor-theme.ts`) added its own MutationObserver on the same body element.
+ * A flip therefore ran N callbacks against N observers — and each xterm callback
+ * repaints the whole terminal. Subscribing is now set membership.
+ */
+const schemeCallbacks = new Set<() => void>()
+let schemeObserver: MutationObserver | undefined
+
+/**
  * Subscribe to color-scheme flips (the presenter toggles the body
  * attribute). The callback fires after the attribute changed; re-read the
  * scheme inside it.
@@ -21,11 +33,22 @@ export function isDarkScheme(): boolean {
  */
 export function subscribeColorScheme(callback: () => void): () => void {
   if (typeof document === 'undefined') return () => {}
-  const observer = new MutationObserver(() => {
-    callback()
-  })
-  observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+  if (schemeObserver === undefined) {
+    schemeObserver = new MutationObserver(() => {
+      // Iterate a copy: a callback may unsubscribe (or a sibling may subscribe)
+      // while this runs, and mutating a Set mid-iteration is easy to get wrong.
+      for (const listener of [...schemeCallbacks]) listener()
+    })
+    schemeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+  }
+  schemeCallbacks.add(callback)
   return () => {
-    observer.disconnect()
+    schemeCallbacks.delete(callback)
+    // Last one out takes the observer off `document.body`, so a plugin whose
+    // panes are all gone leaves nothing behind.
+    if (schemeCallbacks.size === 0 && schemeObserver !== undefined) {
+      schemeObserver.disconnect()
+      schemeObserver = undefined
+    }
   }
 }

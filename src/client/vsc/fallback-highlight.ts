@@ -30,6 +30,20 @@ function markFor(kind: string): Decoration {
 }
 
 /**
+ * Minimum interval between two "is the primary highlighter coloring yet?"
+ * probes, in ms.
+ *
+ * The probe (`CodeEditor` passes `host.querySelector('[class*="rvs-ck-"]')`) is
+ * a linear walk of the editor's DOM, and the state it is asked about is
+ * precisely the state where it MISSES — an attribute substring selector takes
+ * no class fast path, so it visits every node to find nothing. It used to run
+ * on every view update, i.e. once per scrolled frame. 12 probes a second still
+ * notices the primary highlighter taking over within a frame or two of one of
+ * them, and scrolling stops paying for it 60 times a second.
+ */
+const PROBE_INTERVAL_MS = 80
+
+/**
  * Token colors for one editor.
  *
  * @param path - the file path (its extension selects the tokenizer language).
@@ -52,6 +66,18 @@ export function fallbackHighlight(path: string, isPrimaryColoring: () => boolean
      */
     private readonly cache = new LineTokenCache(lang)
     private readonly view: EditorView
+    /**
+     * Last probe result, and once it is TRUE the probe is never made again.
+     *
+     * `primary` flipping true is a one-way door: the grammar that has produced
+     * spans does not stop producing them, so there is nothing left to watch
+     * for. That is what bounds the per-frame `querySelector` to a handful per
+     * second and then to zero — while the fallback is engaged, the interesting
+     * transitions are "the primary highlighter turned on" (probe) and "the
+     * document changed" (rebuild), and only the first one needs the DOM.
+     */
+    private primary = false
+    private probedAt = 0
 
     constructor(view: EditorView) {
       this.view = view
@@ -59,18 +85,27 @@ export function fallbackHighlight(path: string, isPrimaryColoring: () => boolean
     }
 
     update(update: { docChanged: boolean; viewportChanged: boolean }): void {
-      if (isPrimaryColoring()) {
-        if (this.decorations !== Decoration.none) this.decorations = Decoration.none
-        return
+      if (this.primary) return
+      // The probe decides whether ANY work happens, so it is gated first and
+      // gated in time: a document change is worth an immediate check (the
+      // grammar re-parses on edits), a viewport change is not — the handoff
+      // arrives with the idle parse, which no amount of scrolling brings
+      // closer.
+      const now = Date.now()
+      const probe = update.docChanged || now - this.probedAt >= PROBE_INTERVAL_MS
+      if (probe) {
+        this.probedAt = now
+        this.primary = isPrimaryColoring()
+        if (this.primary) {
+          if (this.decorations !== Decoration.none) this.decorations = Decoration.none
+          return
+        }
       }
       if (update.docChanged || update.viewportChanged) this.rebuild()
     }
 
+    /** Repaint the visible lines. Callers have already ruled out `primary`. */
     private rebuild(): void {
-      if (isPrimaryColoring()) {
-        this.decorations = Decoration.none
-        return
-      }
       const doc = this.view.state.doc
       this.cache.refresh(doc)
       const cache = this.cache.tokens

@@ -250,7 +250,6 @@ export interface ExplorerValue {
   refreshAll: () => void
   refreshGit: () => Promise<void>
   afterWrite: () => Promise<void>
-  bumpRevision: () => void
   openFile: (fullPath: string, options?: { line?: number }) => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
   openCommitFile: (hash: string, rel: string) => void
@@ -337,7 +336,6 @@ function build(): ExplorerValue {
     refreshAll,
     refreshGit,
     afterWrite,
-    bumpRevision,
     openFile,
     openDiff,
     openCommitFile,
@@ -576,11 +574,6 @@ export async function afterWrite(): Promise<void> {
   patch({ revision: state.revision + 1 })
 }
 
-/** Ask the tree to re-list its open directories. */
-export function bumpRevision(): void {
-  patch({ revision: state.revision + 1 })
-}
-
 // -------------------------------------------------------------- tab model
 
 function computeRel(fullPath: string): string {
@@ -602,6 +595,12 @@ function upsertTab(tab: EditorTab): void {
 }
 
 /**
+ * Pending reveal retry. Module level on purpose: `revealEditor` is called from
+ * store actions, so no component lifecycle could ever cancel it.
+ */
+let revealRetry: ReturnType<typeof setTimeout> | undefined
+
+/**
  * Bring the editor into view. On the 'center' surface the shell renders only
  * the selected conversation view, so a file opened from the sidebar must also
  * select that tab — otherwise the click looks like a no-op. When the tab
@@ -611,10 +610,19 @@ function upsertTab(tab: EditorTab): void {
 function revealEditor(): void {
   if (state.editorSurface !== 'center') return
   const label = t('view.editor')
+  // A newer open supersedes the pending retry: arming a second one left the
+  // timers piling up one per opened file (each doing its own full-document tab
+  // scan 80ms later), and an older retry could pop its "opened in …" toast on
+  // top of the newer open.
+  if (revealRetry !== undefined) {
+    clearTimeout(revealRetry)
+    revealRetry = undefined
+  }
   // The tab only exists once the shell has painted it; one deferred retry
   // covers the frame in which a freshly registered view is being added.
   if (revealViewTab(label)) return
-  setTimeout(() => {
+  revealRetry = setTimeout(() => {
+    revealRetry = undefined
     if (!revealViewTab(label)) toast(`${t('editor.openedIn')}「${label}」`, false)
   }, 80)
 }

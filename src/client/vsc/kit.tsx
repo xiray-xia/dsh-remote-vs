@@ -614,15 +614,27 @@ export function ContextMenu(props: {
     setPos({ left, top })
   }, [props.x, props.y])
 
+  /**
+   * The menu's four window listeners are installed ONCE and read the close
+   * handler through a ref. They used to depend on `[props]`, and `props` is a
+   * fresh object every render, so any re-render while the menu was open tore
+   * down and re-added all four — and a caller passing an inline arrow would
+   * have churned them even with a narrower dep list.
+   */
+  const onCloseRef = useRef(props.onClose)
+  useEffect(() => {
+    onCloseRef.current = props.onClose
+  })
+
   useEffect(() => {
     const onDown = (e: MouseEvent): void => {
       if (boxRef.current?.contains(e.target as Node) === true) return
-      props.onClose()
+      onCloseRef.current()
     }
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') props.onClose()
+      if (e.key === 'Escape') onCloseRef.current()
     }
-    const onScroll = (): void => props.onClose()
+    const onScroll = (): void => onCloseRef.current()
     window.addEventListener('mousedown', onDown, true)
     window.addEventListener('keydown', onKey)
     window.addEventListener('scroll', onScroll, true)
@@ -633,7 +645,7 @@ export function ContextMenu(props: {
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', onScroll)
     }
-  }, [props])
+  }, [])
 
   if (typeof document === 'undefined') return null
   return createPortal(
