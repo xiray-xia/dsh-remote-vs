@@ -22,9 +22,10 @@ import type {
   RemoteWorkspaceBinding,
 } from '../protocol.ts'
 import { api, RemoteApiError } from './api.ts'
+import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
-import { loadCommitFileDiff, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, type DiffPayload } from './scm/actions.ts'
+import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
@@ -86,6 +87,8 @@ interface State {
   status: GitStatusDetail | undefined
   head: HeadInfo | undefined
   repoRoot: string | undefined
+  /** Workspace-relative directory git runs in ('' = the workspace root). */
+  repoSubdir: string
   repoMissing: boolean
   gitBusy: boolean
   gitError: string | undefined
@@ -116,12 +119,43 @@ export interface SearchRequest {
 
 const WS_KEY = 'dsh-remote-vs.files.ws'
 const VIEW_KEY = 'dsh-remote-vs.view'
+/** Per-workspace repository sub-directory, keyed by workspace id. */
+const REPO_SUBDIR_KEY = 'dsh-remote-vs.repo.subdir'
 
 function readWorkspaceId(): string {
   try {
     return localStorage.getItem(WS_KEY) ?? ''
   } catch {
     return ''
+  }
+}
+
+/** Stored repository sub-directory for one binding ('' = the workspace root). */
+export function readRepoSubdir(workspaceId: string): string {
+  try {
+    const raw = localStorage.getItem(REPO_SUBDIR_KEY)
+    if (raw === null) return ''
+    const saved: unknown = JSON.parse(raw)
+    if (typeof saved !== 'object' || saved === null) return ''
+    const value = (saved as Record<string, unknown>)[workspaceId]
+    return typeof value === 'string' ? normalizeRepoSubdir(value) : ''
+  } catch {
+    return ''
+  }
+}
+
+function writeRepoSubdir(workspaceId: string, subdir: string): void {
+  try {
+    const raw = localStorage.getItem(REPO_SUBDIR_KEY)
+    const saved: unknown = raw === null ? {} : JSON.parse(raw)
+    const map: Record<string, string> = (typeof saved === 'object' && saved !== null)
+      ? { ...(saved as Record<string, string>) }
+      : {}
+    if (subdir === '') delete map[workspaceId]
+    else map[workspaceId] = subdir
+    localStorage.setItem(REPO_SUBDIR_KEY, JSON.stringify(map))
+  } catch {
+    // Private mode: the choice simply does not survive a reload.
   }
 }
 
@@ -154,6 +188,7 @@ const state: State = {
   status: undefined,
   head: undefined,
   repoRoot: undefined,
+  repoSubdir: '',
   repoMissing: false,
   gitBusy: false,
   gitError: undefined,
@@ -184,6 +219,10 @@ export interface ExplorerValue {
   root: string
   /** Enclosing git repository root, when the binding is inside one. */
   repoRoot: string | undefined
+  /** Workspace-relative directory git runs in ('' = the workspace root). */
+  repoSubdir: string
+  /** Absolute directory git runs in (workspace root + repoSubdir). */
+  repoWorkdir: string
   repoMissing: boolean
   status: GitStatusDetail | undefined
   buckets: StatusBuckets
@@ -203,6 +242,11 @@ export interface ExplorerValue {
       "find in folder" entry point. */
   requestSearch: (request: { mode: 'name' | 'content'; query?: string; scope: string }) => void
   selectWorkspace: (id: string) => void
+  /** Point git at a directory inside the workspace (repositories often live in
+      a subdirectory of the binding rather than at its root). */
+  setRepoSubdir: (subdir: string) => Promise<void>
+  /** Repositories found under the workspace root, as workspace-relative dirs. */
+  discoverRepos: () => Promise<string[]>
   refreshAll: () => void
   refreshGit: () => Promise<void>
   afterWrite: () => Promise<void>
@@ -240,6 +284,8 @@ function build(): ExplorerValue {
     alias: workspace?.alias ?? '',
     root: workspace?.remotePath ?? '',
     repoRoot: state.repoRoot,
+    repoSubdir: state.repoSubdir,
+    repoWorkdir: repoWorkdir(workspace?.remotePath ?? '', state.repoSubdir),
     repoMissing: state.repoMissing,
     status: state.status,
     buckets: bucketStatus(status),
@@ -257,6 +303,8 @@ function build(): ExplorerValue {
     setView,
     requestSearch,
     selectWorkspace,
+    setRepoSubdir,
+    discoverRepos,
     refreshAll,
     refreshGit,
     afterWrite,
@@ -339,6 +387,9 @@ export function refreshAll(): void {
         hosts,
         workspaces: payload.workspaces,
         routing: { mode: payload.mode, aliasPaths: payload.aliasPaths, tombstones: payload.tombstones },
+        // The stored sub-directory belongs to whichever binding is selected
+        // (including the one auto-selected on a fresh browser profile).
+        repoSubdir: readRepoSubdir(state.workspaceId),
         ready: true,
         error: undefined,
       })
@@ -378,7 +429,15 @@ export function requestSearch(request: { mode: 'name' | 'content'; query?: strin
 /** Select the binding every view works against. */
 export function selectWorkspace(id: string): void {
   if (state.workspaceId === id) return
-  patch({ workspaceId: id, tabs: [], activeTabId: undefined, status: undefined, head: undefined, repoRoot: undefined })
+  patch({
+    workspaceId: id,
+    tabs: [],
+    activeTabId: undefined,
+    status: undefined,
+    head: undefined,
+    repoRoot: undefined,
+    repoSubdir: readRepoSubdir(id),
+  })
   try {
     localStorage.setItem(WS_KEY, id)
   } catch {
@@ -389,13 +448,38 @@ export function selectWorkspace(id: string): void {
 
 let searchSeq = 0
 
+/**
+ * Point git at a directory inside the workspace. Repositories often live in a
+ * sub-directory of the binding (`/srv/app` holding `/srv/app/web/.git`), and
+ * git only answers for the directory it is run in, so the choice is persisted
+ * per binding and re-resolved on every refresh.
+ */
+export async function setRepoSubdir(subdir: string): Promise<void> {
+  const workspace = currentWorkspace()
+  const clean = normalizeRepoSubdir(subdir)
+  if (workspace !== undefined) writeRepoSubdir(workspace.id, clean)
+  patch({ repoSubdir: clean, repoRoot: undefined, gitError: undefined })
+  await refreshGit()
+}
+
+/** Repositories found under the workspace root (workspace-relative, root first). */
+export async function discoverRepos(): Promise<string[]> {
+  const workspace = currentWorkspace()
+  if (workspace === undefined) return []
+  const found = await findRepos(workspace.alias, workspace.remotePath)
+  return found
+    .map(dir => repoSubdirOf(workspace.remotePath, dir))
+    .filter((dir): dir is string => dir !== undefined)
+}
+
 /** Re-read git status for the current binding. */
 export async function refreshGit(): Promise<void> {
   const workspace = currentWorkspace()
   if (workspace === undefined) return
   patch({ gitBusy: true })
   try {
-    const root = await resolveRepoRoot(workspace.alias, workspace.remotePath)
+    const workdir = repoWorkdir(workspace.remotePath, state.repoSubdir)
+    const root = await resolveRepoRoot(workspace.alias, workdir)
     if (root === undefined) {
       patch({ repoRoot: undefined, repoMissing: true, status: EMPTY_STATUS, head: undefined, gitBusy: false, gitError: undefined })
       return
@@ -404,7 +488,11 @@ export async function refreshGit(): Promise<void> {
       withDeadline(loadStatusDetail(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
       withDeadline(loadHead(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
     ])
-    patch({ repoRoot: root, repoMissing: false, status: detail, head, gitBusy: false, gitError: undefined })
+    // A directory INSIDE a repository settles on that repository's root, so the
+    // stored choice is what git actually uses (and what the picker shows).
+    const settled = repoSubdirOf(workspace.remotePath, root) ?? state.repoSubdir
+    if (settled !== state.repoSubdir) writeRepoSubdir(workspace.id, settled)
+    patch({ repoRoot: root, repoSubdir: settled, repoMissing: false, status: detail, head, gitBusy: false, gitError: undefined })
   } catch (error) {
     patch({
       status: EMPTY_STATUS,

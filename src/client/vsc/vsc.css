@@ -2088,3 +2088,189 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
   font-size: 10px;
   color: var(--rvs-fg3);
 }
+
+/* --- SCM: repository directory row (git runs in THIS directory) ------------- */
+
+.rvs-repo-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 10px;
+  border-bottom: 1px solid var(--rvs-border);
+  background: var(--rvs-bg2, var(--dsw-alias-bg-layer-1, #1b1b1b));
+  font-size: 11px;
+  flex: none;
+}
+
+.rvs-repo-bar-label {
+  color: var(--rvs-fg3);
+  white-space: nowrap;
+}
+
+.rvs-repo-bar-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+  padding: 2px 6px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 4px;
+  background: var(--rvs-bg3, rgba(255, 255, 255, .04));
+  color: var(--rvs-fg);
+  font-family: var(--rvs-mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rvs-repo-bar-path:hover {
+  border-color: var(--rvs-brand);
+  color: var(--rvs-brand-fg, var(--rvs-fg));
+}
+
+.rvs-repo-bar-fix {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+}
+
+/* --- SCM: repository directory picker -------------------------------------- */
+
+.rvs-repopick {
+  width: min(560px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rvs-repopick .rvs-modal-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rvs-repopick-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-height: 22px;
+  font-family: var(--rvs-mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+}
+
+.rvs-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-crumb {
+  border: none;
+  background: none;
+  padding: 1px 3px;
+  border-radius: 3px;
+  color: var(--rvs-brand-fg, var(--rvs-fg));
+  font: inherit;
+  cursor: pointer;
+}
+
+.rvs-crumb:hover {
+  background: var(--rvs-row-hover, rgba(255, 255, 255, .07));
+}
+
+.rvs-repopick-probe {
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  border: 1px solid var(--rvs-border2);
+  background: var(--rvs-bg3, rgba(255, 255, 255, .04));
+  color: var(--rvs-fg2);
+}
+
+.rvs-repopick-probe.root {
+  border-color: var(--rvs-ok, #2ea043);
+  color: var(--rvs-ok, #2ea043);
+}
+
+.rvs-repopick-probe.inside {
+  border-color: var(--rvs-brand);
+  color: var(--rvs-brand-fg, var(--rvs-fg));
+}
+
+.rvs-repopick-found {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
+.rvs-repopick-found-label {
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-repopick-list {
+  flex: 1 1 auto;
+  min-height: 150px;
+  max-height: 42vh;
+  overflow: auto;
+  border: 1px solid var(--rvs-border);
+  border-radius: 5px;
+  background: var(--rvs-bg-layer, rgba(0, 0, 0, .18));
+  padding: 2px;
+}
+
+.rvs-repopick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-repopick-row:hover {
+  background: var(--rvs-row-hover, rgba(255, 255, 255, .07));
+}
+
+.rvs-repopick-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-repopick-dim {
+  color: var(--rvs-fg3);
+  font-size: 11.5px;
+  padding: 6px;
+}
+
+.rvs-repopick-type {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.rvs-repopick-type .rvs-input {
+  flex: 1 1 auto;
+}
+
+.rvs-repopick-error {
+  color: var(--rvs-error, #f85149);
+  font-size: 11.5px;
+}

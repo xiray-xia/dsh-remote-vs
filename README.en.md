@@ -46,7 +46,7 @@ open Settings → Remote hosts to configure.
 | --- | --- |
 | Explorer | Lazy tree + expand/collapse + hidden-files toggle; context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference; git status colours and folder roll-up marks |
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line |
-| Source control | Changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
+| Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
 | Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers; switch between "before / after", and the after side is editable and savable |
 | Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
 | Multi-tab editor | Open/save/reload, dirty marks, several files at once; image preview, Markdown/HTML preview (source vs preview) |
