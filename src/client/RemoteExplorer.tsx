@@ -53,6 +53,53 @@ function dirKey(alias: string, dir: string): string {
   return `${alias}:${dir}`
 }
 
+/** How many directory listings stay cached; each one is a whole directory. */
+const LISTING_CACHE_KEEP = 50
+
+/**
+ * Insert one listing as the newest, so "the first key is the oldest" stays
+ * true and `trimListings` can evict from the front.
+ */
+function withListing(
+  prev: Record<string, RemoteFileEntry[]>,
+  key: string,
+  entries: RemoteFileEntry[],
+): Record<string, RemoteFileEntry[]> {
+  const next: Record<string, RemoteFileEntry[]> = {}
+  for (const [existing, value] of Object.entries(prev)) {
+    if (existing !== key) next[existing] = value
+  }
+  next[key] = entries
+  return next
+}
+
+/**
+ * Drop the oldest listings past `LISTING_CACHE_KEEP`, never one that belongs to
+ * an OPEN directory.
+ *
+ * Open ones are exempt on purpose: an evicted open directory has no rows to
+ * draw from and nothing would ask for them again, so it would render as an
+ * empty folder. `expanded` shrinks when a directory is collapsed (and is reset
+ * on a binding change), which is exactly when its listing becomes evictable —
+ * and a closed directory that comes back is simply re-listed.
+ */
+function trimListings(
+  prev: Record<string, RemoteFileEntry[]>,
+  keep: Set<string>,
+): Record<string, RemoteFileEntry[]> {
+  const keys = Object.keys(prev)
+  const oldest = keys.length - LISTING_CACHE_KEEP
+  if (oldest <= 0) return prev
+  let next: Record<string, RemoteFileEntry[]> | undefined
+  for (let i = 0; i < oldest; i++) {
+    const key = keys[i] as string
+    if (keep.has(key)) continue
+    if (next === undefined) next = { ...prev }
+    delete next[key]
+  }
+  return next ?? prev
+}
+
 export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () => void; visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, alias, root, repoRoot, marks } = store
@@ -93,7 +140,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     })
     try {
       const entries = await api.fileOp.list(alias, dir)
-      setListings(prev => ({ ...prev, [key]: entries }))
+      setListings(prev => withListing(prev, key, entries))
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), true)
     } finally {
@@ -137,6 +184,20 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     // itself, so re-listing the whole tree per expand would put the bug back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revision, root, alias, props.visible, loadDir])
+
+  /**
+   * Keep the listing cache bounded. It holds one whole directory per path and
+   * nothing ever dropped one: the panel is mounted for the life of the page, so
+   * browsing for a day kept every directory ever listed — including a
+   * `node_modules` — in memory for good. Collapsing a directory (and a binding
+   * change, which clears `expanded` outright) is what makes its listing
+   * evictable; `withListing` keeps the recency order this trims from the front.
+   */
+  useEffect(() => {
+    const keep = new Set<string>()
+    for (const dir of expanded) keep.add(dirKey(alias, dir))
+    setListings(prev => trimListings(prev, keep))
+  }, [expanded, alias, listings])
 
   const rowsOf = useCallback((dir: string): RemoteFileEntry[] | undefined => {
     const rows = listings[dirKey(alias, dir)]

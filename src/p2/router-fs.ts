@@ -17,6 +17,7 @@ import type {
   FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import { aliasRoot } from '../paths.ts'
 import type { RemoteWorlds, WorldRoute } from './worlds.ts'
 
 export default class TransparentFileSystem extends FileSystem {
@@ -45,6 +46,34 @@ export default class TransparentFileSystem extends FileSystem {
       return { kind: 'local' }
     }
     return route
+  }
+
+  /**
+   * True when the path sits under the alias root — the only place a remote
+   * binding or a tombstone can live (every alias dir is `join(aliasRoot(), id)`,
+   * and `store.removeWorkspace` tombstones the same way), so it is exactly the
+   * input set whose route is not trivially local.
+   */
+  private underAliasRoot(path: string | undefined): boolean {
+    return path !== undefined && this.remote.underAlias(aliasRoot(), path)
+  }
+
+  /**
+   * Mode-gated route for one call. `off` discards the route anyway (see
+   * `effective`), so computing it first — the argument-first idiom this used to
+   * have — was pure waste on the root fs path. Only an alias-root cwd or path
+   * can name a remote world, or a tombstoned one, and a tombstone must keep
+   * failing closed (`worlds.routePath` throws), so that case still resolves;
+   * everything else is local without touching the store. `enforce`/`shadow`
+   * take the exact path they took before.
+   */
+  private routeFor(path: string, cwd: string | undefined, what: string): WorldRoute {
+    // `off` with nothing that could name a remote world: answer local here, so
+    // the store is never consulted (the decision would be thrown away anyway).
+    if (this.remote.mode === 'off' && !this.underAliasRoot(path) && !this.underAliasRoot(cwd)) {
+      return { kind: 'local' }
+    }
+    return this.effective(this.remote.routePath(path, cwd), what)
   }
 
   private async backendOf(target: FsTarget): Promise<{ fs: FileSystem; world: WorldRoute }> {
@@ -93,7 +122,7 @@ export default class TransparentFileSystem extends FileSystem {
   }
 
   async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
-    const route = this.effective(this.remote.routePath(path, opts?.cwd), `resolve ${path}`)
+    const route = this.routeFor(path, opts?.cwd, `resolve ${path}`)
     const fs = route.kind === 'local' ? this.localFs : await this.remote.fsFor(route.alias)
     const target = await fs.resolve(this.routePathFor(route, path), this.routeOpts(route, opts))
     this.worlds.set(target, route)
@@ -153,7 +182,7 @@ export default class TransparentFileSystem extends FileSystem {
   }
 
   async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
-    const route = this.effective(this.remote.routePath(path, opts?.cwd), `lstat ${path}`)
+    const route = this.routeFor(path, opts?.cwd, `lstat ${path}`)
     const fs = route.kind === 'local' ? this.localFs : await this.remote.fsFor(route.alias)
     const routed = route.kind === 'local' ? opts : this.routeOpts(route, opts) as { cwd?: string } | undefined
     return fs.lstat(this.routePathFor(route, path), routed, signal)

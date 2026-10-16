@@ -2,7 +2,7 @@
  * Durable store for dsh-remote-vs: hosts + workspace bindings in
  * $DSH_HOME/dsh-remote.json (0600, atomic tmp+rename writes).
  */
-import { existsSync, openSync, readFileSync, renameSync, writeSync, closeSync } from 'node:fs'
+import { existsSync, statSync, openSync, readFileSync, renameSync, writeSync, closeSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { aliasRoot, keysDir, storePath } from './paths.ts'
@@ -25,6 +25,15 @@ interface StoreDoc {
 /** Empty document. */
 function emptyDoc(): StoreDoc {
   return { version: 1, hosts: [], workspaces: [], tombstones: [] }
+}
+
+/** Identity of the store file at one point in time; `null` = the file is absent. */
+type FileStamp = { mtimeMs: number; size: number } | null
+
+/** Same file identity (both absent counts as same). */
+function sameStamp(left: FileStamp, right: FileStamp): boolean {
+  if (left === null || right === null) return left === right
+  return left.mtimeMs === right.mtimeMs && left.size === right.size
 }
 
 /** Alias grammar: 1-64 chars of letters/digits/._- */
@@ -56,15 +65,49 @@ export interface WorkspacePayload {
 export class RemoteStore {
   private readonly file: string
   private doc: StoreDoc
+  /** File identity when `doc` was read from disk (undefined = `doc` is not known fresh). */
+  private stamp: FileStamp | undefined
 
   constructor(file?: string) {
     this.file = file ?? storePath()
-    this.doc = this.loadDoc()
+    // `doc` starts empty and `reload()` fills it: `stamp` is undefined, so the
+    // first read always takes the real path (missing file -> empty doc).
+    this.doc = emptyDoc()
+    this.reload()
   }
 
-  /** Reload from disk (picks up external edits). */
+  /**
+   * Reload from disk (picks up external edits).
+   *
+   * Re-reading on every access is deliberate: the root fs router asks this store
+   * 2-4 times per routed file operation, and an edit made by another process
+   * must be visible without a restart. A stat is orders of magnitude cheaper
+   * than read + parse, so the file's identity (mtime + size) decides instead —
+   * unchanged means the cached doc is already the file's content. The stamp is
+   * taken BEFORE the read: a write landing in between leaves the older stamp
+   * behind, so the next access re-reads rather than trusting a stale doc. The
+   * one edit this cannot see is a same-length rewrite inside the filesystem's
+   * mtime granularity (sub-ms on NTFS/ext4).
+   */
   reload(): void {
+    const stamp = this.stampOf()
+    if (stamp !== undefined && this.stamp !== undefined && sameStamp(stamp, this.stamp)) return
     this.doc = this.loadDoc()
+    this.stamp = stamp
+  }
+
+  /**
+   * File identity right now: `null` when the file is absent, `undefined` when it
+   * cannot be statted at all. Both cases fall through to a full load, so the
+   * missing-file and unreadable-file paths behave exactly as they did before.
+   */
+  private stampOf(): FileStamp | undefined {
+    try {
+      const stat = statSync(this.file, { throwIfNoEntry: false })
+      return stat === undefined ? null : { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+      return undefined
+    }
   }
 
   private loadDoc(): StoreDoc {
@@ -90,6 +133,11 @@ export class RemoteStore {
   }
 
   private save(): void {
+    // The caller already mutated `doc`, so in-memory state is ahead of the file:
+    // invalidate the stamp. A failed write must not pin the dirty doc in place
+    // (the next read goes back to the file, as it always did), and a successful
+    // one is picked up by that same re-read, which re-arms the fast path.
+    this.stamp = undefined
     const payload = JSON.stringify(this.doc, null, 2)
     const tmp = `${this.file}.${process.pid}.tmp`
     // 0600 from creation (Windows: best effort, mode is advisory there).
@@ -103,8 +151,9 @@ export class RemoteStore {
   }
 
   // ------------------------------------------------------------- hosts
-  // NOTE: reads reload from disk first (the file is tiny; routers + routes +
-  // GUI always see fresh state without a watcher).
+  // NOTE: reads revalidate the file first (one stat; the file is tiny and a
+  // read + parse only happens when its identity changed), so routers + routes +
+  // GUI still see fresh state without a watcher.
 
   list(): RemoteHostEntry[] {
     this.reload()

@@ -483,6 +483,13 @@ export class RemoteWorlds {
     // Any host-record write after the failure (a host edit, or a manual deploy
     // through the Settings button) may have fixed the cause, so it releases the
     // cooldown instead of swallowing the user's fix.
+    //
+    // INVARIANT: for a failure recorded during one attempt, `updatedAt` must
+    // stay OLDER than `lastFailureAt`. `setDeploy` writes the host record too,
+    // and its stamp lands between the failed deploy and the dial failure that
+    // follows, so the ordering holds. Recording the dial failure BEFORE the
+    // deploy write would make every failure release its own cooldown and turn
+    // this gate into a no-op.
     if (this.deps.store.require(alias).updatedAt > state.lastFailureAt) {
       this.dialFailures.delete(alias)
       return

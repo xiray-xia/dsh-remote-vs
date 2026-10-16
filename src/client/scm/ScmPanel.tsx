@@ -270,8 +270,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     title: string,
     count: string | number | undefined,
     actions: ReactNode,
-    body: ReactNode,
-    options?: { hideWhenEmpty?: boolean; empty?: ReactNode },
+    body: () => ReactNode,
   ): ReactNode => {
     const collapsed = folded[id] === true
     return (
@@ -282,7 +281,15 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
           <span className="rvs-scm-head-actions" onClick={(e) => e.stopPropagation()}>{actions}</span>
           {count !== undefined && count !== '' && count !== 0 && <span className="rvs-count">{count}</span>}
         </div>
-        {options?.hideWhenEmpty === true && body === null ? null : body}
+        {/*
+          `body` is a thunk, and neither a folded nor a parked section calls it.
+          As a plain argument the whole change list — up to the 4000 entries
+          `git-ops.ts` stops at, ~8 elements each, a `fileIcon` service call per
+          row — was constructed before `section` was even entered, so collapsing
+          only hid it with CSS while React kept rebuilding every row on every
+          publish (the panel is keep-alive and subscribes to the whole store).
+        */}
+        {collapsed || props.visible === false ? null : body()}
       </div>
     )
   }
@@ -402,7 +409,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               >
                 <IconPlus size={13} />
               </IconButton>,
-              <div>{conflicts.map(entry => changeRow(entry, false))}</div>,
+              () => <div>{conflicts.map(entry => changeRow(entry, false))}</div>,
             )}
 
             <div className="rvs-commit-box">
@@ -485,9 +492,9 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   </IconButton>
                 )}
               </>,
-              changes.length === 0
+              () => (changes.length === 0
                 ? <div className="rvs-empty">{t('scm.noChanges')}</div>
-                : <div>{changes.map(entry => changeRow(entry, false))}</div>,
+                : <div>{changes.map(entry => changeRow(entry, false))}</div>),
             )}
 
             {staged.length > 0 && section(
@@ -501,7 +508,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               >
                 <IconClose size={12} />
               </IconButton>,
-              <div>{staged.map(entry => changeRow(entry, true))}</div>,
+              () => <div>{staged.map(entry => changeRow(entry, true))}</div>,
             )}
 
             {section(
@@ -516,7 +523,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   <IconRefresh size={13} />
                 </IconButton>
               </>,
-              stashes.length === 0
+              () => (stashes.length === 0
                 ? <div className="rvs-empty">{t('scm.noStash')}</div>
                 : (
                   <div>
@@ -555,7 +562,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                       </div>
                     ))}
                   </div>
-                ),
+                )),
             )}
 
             {section(
@@ -570,7 +577,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   <IconSync size={14} />
                 </IconButton>
               </>,
-              <div style={{ paddingBottom: 8 }}>
+              () => <div style={{ paddingBottom: 8 }}>
                 <div className="rvs-repo-item" style={{ cursor: 'default' }}>
                   <span className="rvs-node-icon" style={{ color: 'var(--rvs-brand)' }}><IconBranch size={14} /></span>
                   <span className="rvs-repo-name" style={{ direction: 'rtl', unicodeBidi: 'plaintext', textAlign: 'left' }} title={repoRoot}>{baseName(repoRoot)}</span>
@@ -748,7 +755,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               t('scm.more'),
               undefined,
               undefined,
-              <div style={{ padding: '4px 10px 10px' }}>
+              () => <div style={{ padding: '4px 10px 10px' }}>
                 <button type="button" className="rvs-chip" onClick={() => props.onOpenHistory()}>{t('tab.history')} →</button>
               </div>,
             )}
