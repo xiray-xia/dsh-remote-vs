@@ -9,7 +9,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
-import { EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
+import { EditorSelection, EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
 import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { bracketMatching, ensureSyntaxTree, indentOnInput } from '@codemirror/language'
@@ -38,10 +38,33 @@ import { appendToDraft, buildRemoteSelectionInsert } from './composer.ts'
 import { useSelectionPopup } from './selection-popup.ts'
 import { initialEditorTheme, watchEditorScheme } from './vsc/editor-theme.ts'
 
+/**
+ * The bits of an editor's view state that must survive an unmount.
+ *
+ * Switching file tabs remounts `CodeEditor` (its `key` is the tab id, so an
+ * identity change gets a fresh buffer rather than inheriting the previous
+ * file's undo history). Without carrying this across, every tab switch threw
+ * the reader back to line 1 with the caret at the start.
+ */
+export interface CodeEditorViewState {
+  /** Scroll offset of the code scroller, in pixels. */
+  scrollTop: number
+  /** Scroll offset of the code scroller, in pixels. */
+  scrollLeft: number
+  /** Caret position as a document offset. */
+  cursor: number
+  /** All selection ranges (multi-cursor survives a tab switch too). */
+  ranges: { anchor: number; head: number }[]
+}
+
 export interface CodeEditorHandle {
   getContent: () => string
   isDirty: () => boolean
   markSaved: () => void
+  /** Snapshot scroll + selection, for restoring after a remount. */
+  getViewState: () => CodeEditorViewState | undefined
+  /** Scroll back and put the caret where it was. */
+  applyViewState: (state: CodeEditorViewState) => void
 }
 
 /** Compartment holding the fallback highlighter (armed only when needed). */
@@ -82,6 +105,14 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   revealNonce?: number
   /** Reports how many token spans the grammar produced (diagnostics). */
   onTokens?: (count: number) => void
+  /**
+   * Scroll + caret to restore after this instance mounts.
+   *
+   * Read ONCE on mount (through a ref, so a later change to the prop cannot
+   * re-scroll a live editor out from under the reader). Used to come back to
+   * where a file was when its tab is re-selected.
+   */
+  viewState?: CodeEditorViewState
   onSave: () => void
   onDirty: (dirty: boolean) => void
 }>(function CodeEditor(props, ref) {
@@ -99,6 +130,9 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   targetRef.current = { sessionId: props.sessionId, remoteRoot: props.remoteRoot, chatEnabled: props.chatEnabled, path: props.path }
   const ctxRef = useRef(props.ctx)
   ctxRef.current = props.ctx
+  // Captured on the first render only: after that the prop is irrelevant,
+  // because the editor is live and the reader may have scrolled elsewhere.
+  const pendingViewStateRef = useRef<CodeEditorViewState | undefined>(props.viewState)
 
   /**
    * The floating "add to conversation" popup (viewport-anchored; null =
@@ -212,6 +246,40 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       }
       dirtyRef.current = false
       propsRef.current.onDirty(false)
+    },
+    getViewState: () => {
+      const view = viewRef.current
+      if (view === undefined) return undefined
+      const scroller = view.scrollDOM
+      return {
+        scrollTop: scroller.scrollTop,
+        scrollLeft: scroller.scrollLeft,
+        cursor: view.state.selection.main.head,
+        ranges: view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
+      }
+    },
+    applyViewState: (state) => {
+      const view = viewRef.current
+      if (view === undefined) return
+      // Clamp to the current document: the file may be shorter than it was
+      // when the state was captured (a reload, or an edit made elsewhere).
+      const max = view.state.doc.length
+      const clamp = (value: number): number => Math.max(0, Math.min(value, max))
+      const ranges = state.ranges
+        .map(range => ({ anchor: clamp(range.anchor), head: clamp(range.head) }))
+        .filter(range => range.anchor >= 0)
+      if (ranges.length > 0) {
+        try {
+          view.dispatch({ selection: EditorSelection.create(ranges.map(range => EditorSelection.range(range.anchor, range.head))) })
+        } catch {
+          // A malformed capture must never break the editor: fall through to a
+          // plain caret placement.
+          view.dispatch({ selection: { anchor: clamp(state.cursor) } })
+        }
+      }
+      const scroller = view.scrollDOM
+      scroller.scrollTop = state.scrollTop
+      scroller.scrollLeft = state.scrollLeft
     },
   }), [])
 
@@ -367,6 +435,40 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     savedDocRef.current = view.state.doc
     setView(view)
     /**
+     * Come back to where this file was left.
+     *
+     * Restoring in an animation frame, not synchronously: the scroller's
+     * scrollable height is only known once CodeMirror has measured the
+     * viewport (it runs that on a frame/measure cycle), and a `scrollTop`
+     * write before then is clamped away to 0. The selection half is applied
+     * immediately so the caret is already right when the first paint lands.
+     */
+    const restore = pendingViewStateRef.current
+    let restoreFrame: number | undefined
+    if (restore !== undefined) {
+      pendingViewStateRef.current = undefined
+      const max = view.state.doc.length
+      const clamp = (value: number): number => Math.max(0, Math.min(value, max))
+      const ranges = restore.ranges
+        .map(range => EditorSelection.range(clamp(range.anchor), clamp(range.head)))
+        .filter(range => range.anchor <= max)
+      try {
+        const selection = ranges.length > 0
+          ? EditorSelection.create(ranges, Math.min(ranges.length - 1, 0))
+          : EditorSelection.single(clamp(restore.cursor))
+        view.dispatch({ selection })
+      } catch {
+        // A malformed capture must never break the editor.
+      }
+      const frame = window.requestAnimationFrame(() => {
+        const scroller = viewRef.current?.scrollDOM
+        if (scroller === undefined) return
+        scroller.scrollTop = restore.scrollTop
+        scroller.scrollLeft = restore.scrollLeft
+      })
+      restoreFrame = frame
+    }
+    /**
      * Self-verifying coloring.
      *
      * The primary highlighter needs a grammar, an idle-time parse and a
@@ -422,6 +524,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     // undo history and the cursor survive the swap).
     const unwatchTheme = watchEditorScheme(view)
     return () => {
+      if (restoreFrame !== undefined) window.cancelAnimationFrame(restoreFrame)
       window.clearTimeout(armTimer)
       window.clearTimeout(warmTimer)
       popupRef.current.hide()

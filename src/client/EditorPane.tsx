@@ -9,7 +9,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
-import { CodeEditor, type CodeEditorHandle } from './CodeEditor.tsx'
+import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { sameLocalDir } from './composer.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, type EditorTab } from './store.tsx'
@@ -118,6 +118,28 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   // The editor owns the live buffer; the save path pulls it imperatively
   // instead of mirroring every keystroke into React state.
   const editorRef = useRef<CodeEditorHandle>(null)
+
+  /**
+   * Scroll + caret per tab, so re-selecting a tab returns to where it was.
+   *
+   * `CodeEditor` is keyed by tab id, so switching files remounts it — a fresh
+   * buffer rather than the previous file's undo stack, which is what we want,
+   * but it also reset the scroll and the caret. The state is captured while
+   * the tab is still on screen (below) rather than inside the switch handler,
+   * because `CodeEditor` owns the view and the snapshot has to be taken before
+   * React unmounts it.
+   */
+  const viewStates = useRef(new Map<string, CodeEditorViewState>())
+  const previousTabId = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    const leaving = previousTabId.current
+    if (leaving !== undefined && leaving !== store.activeTabId) {
+      const state = editorRef.current?.getViewState()
+      if (state !== undefined) viewStates.current.set(leaving, state)
+    }
+    previousTabId.current = store.activeTabId
+  }, [store.activeTabId])
 
   /**
    * True only while the CodeMirror instance for the active tab is mounted.
@@ -300,6 +322,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       addLabel={t('files.addToConversation')}
                       {...(activeTab.line === undefined ? {} : { revealLine: activeTab.line })}
                       {...(activeTab.lineNonce === undefined ? {} : { revealNonce: activeTab.lineNonce })}
+                      {...(viewStates.current.get(activeTab.id) === undefined
+                        ? {}
+                        : { viewState: viewStates.current.get(activeTab.id) })}
                       onTokens={setTokenCount}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}

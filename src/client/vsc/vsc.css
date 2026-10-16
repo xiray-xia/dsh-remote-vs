@@ -716,6 +716,32 @@ body[data-ds-dark-theme] .rvs-root {
   color: CanvasText;
 }
 
+/* ------------------------------------------------- conversation-view mount */
+
+/**
+ * The center surface (RemoteEditorView) had NO rule at all, so it fell back to
+ * `display: block; height: auto` inside an unknown host slot. `.rvs-root`'s
+ * `height: 100%` then resolved against an auto-height parent: `.rvs-column`
+ * grew past the viewport, the host's slot became the scroll container, and
+ * scrolling the code carried the tab strip and the file info bar off the top.
+ * Pinning the height here makes the only scroll container the editor itself
+ * (`.cm-scroller`), which is what keeps the two header rows in place.
+ *
+ * `height: 100%` is deliberate rather than `flex: 1`: this element is the
+ * outermost node in *someone else's* slot, so it must work whether the host
+ * wraps it in a flex column or a plain block. `min-height: 0` allows shrinking
+ * below the content when the host does make it a flex item.
+ */
+.rvs-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
 /* ---------------------------------------------------------------- editor */
 
 .rvs-etabs {
@@ -1331,6 +1357,50 @@ body:not([data-ds-dark-theme]) .rvs-ck-invalid { color: #cd3131; }
 
 .rvs-edge .cm-activeLineGutter {
   background-color: rgba(127, 127, 127, .12);
+}
+
+/**
+ * The code editor's own scrollbars.
+ *
+ * These had NO rule at all: CodeMirror's scroller is `.cm-scroller`, which is
+ * none of `.rvs-scroll` / `.rvs-diff-grid` / `.rvs-hbar`, so the editor fell
+ * back to the browser default — too thin to hit with a mouse.
+ *
+ * Both notations are needed and must stay in step: Chromium honours
+ * `scrollbar-width` over `::-webkit-scrollbar` when both apply, so setting
+ * only the webkit half would silently have no effect. Keep the numbers equal.
+ */
+.rvs-edge .cm-scroller {
+  scrollbar-width: auto;
+}
+
+.rvs-edge .cm-scroller::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+.rvs-edge .cm-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rvs-edge .cm-scroller::-webkit-scrollbar-thumb {
+  /* Opaque, not a translucent token: a thin wash over code is exactly the
+     low-contrast target that is hard to grab. */
+  background: rgba(121, 121, 121, .8);
+  border: 3px solid transparent;
+  border-radius: 7px;
+  background-clip: padding-box;
+  min-height: 36px;
+}
+
+.rvs-edge .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, .95);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.rvs-edge .cm-scroller::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ------------------------------------------------------------ find widget */
