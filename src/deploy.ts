@@ -19,6 +19,7 @@ import { helpersDir } from './paths.ts'
 import type {
   HelperAvailability,
   HelperKind,
+  RemoteDeployState,
   RemoteManifest,
   RemoteProbe,
 } from './protocol.ts'
@@ -28,6 +29,59 @@ export const REMOTE_ROOT = '~/.dsh-helpers'
 
 /** P0 artifact identity pushed by the pipeline. */
 export const PROBE_ARTIFACT = 'probe-bundle/0.1.0'
+
+/**
+ * Local retry ledger carried on the stored deploy record. `RemoteDeployState`
+ * (protocol.ts) is the wire type the browser sees, so the ledger rides along
+ * as extra optional fields instead of widening that contract. It has to be
+ * part of every failure write: `store.setDeploy` replaces the whole record, so
+ * a write that only listed status/artifact/detail/at would reset the counter
+ * and make the backoff in `worlds.createRpc` unreachable after one retry.
+ */
+export interface DeployFailureLedger {
+  /** When the latest attempt failed (ms). Absent while the last attempt succeeded. */
+  failedAt?: number | undefined
+  /** Consecutive failed attempts since the last successful deploy. */
+  attempts?: number | undefined
+}
+
+/** A stored deploy record: the wire fields plus the local retry ledger. */
+export type StoredDeployState = RemoteDeployState & DeployFailureLedger
+
+/** Retry backoff after a failed deploy: doubling from 5s, capped at 5 minutes. */
+const DEPLOY_RETRY_BASE_MS = 5_000
+const DEPLOY_RETRY_CAP_MS = 300_000
+
+/** The failure ledger of one stored record, with the remaining automatic wait. */
+export interface DeployFailure {
+  attempts: number
+  /** Milliseconds left before the next automatic attempt (0 = retry now). */
+  retryInMs: number
+}
+
+/**
+ * Read the retry ledger off a stored record. `undefined` means nothing is
+ * known to have failed — a host that was never deployed, or whose last attempt
+ * succeeded — so callers can tell that apart from "deployed and failed"; only
+ * the latter has to wait. The `status` check keeps a ledger that survived a
+ * hand-edited or legacy record from gating a record that no longer says failed.
+ */
+export function deployFailure(state: RemoteDeployState | undefined): DeployFailure | undefined {
+  const ledger = state as StoredDeployState | undefined
+  if (ledger?.status !== 'failed' || ledger.failedAt === undefined) return undefined
+  const attempts = ledger.attempts ?? 1
+  const retryAt = ledger.failedAt + Math.min(DEPLOY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 8), DEPLOY_RETRY_CAP_MS)
+  return { attempts, retryInMs: Math.max(0, retryAt - Date.now()) }
+}
+
+/** The failure record for one alias: wire fields plus the incremented ledger. */
+function failedState(store: RemoteStore, alias: string, artifact: string, detail: string): StoredDeployState {
+  // The ledger fields are read back through the intersection type: protocol.ts
+  // owns the wire shape and deliberately does not carry them.
+  const previous = store.require(alias).deploy as StoredDeployState | undefined
+  const now = Date.now()
+  return { status: 'failed', artifact, detail, at: now, failedAt: now, attempts: (previous?.attempts ?? 0) + 1 }
+}
 
 /** Map uname output to a helper platform name. */
 export function mapPlatform(unameS: string, unameM: string): string {
@@ -295,20 +349,20 @@ export async function pushPipeline(
   const probed = await probe(pool, alias)
   if (!probed.ok) {
     const detail = `probe failed: ${probed.error ?? 'unknown'}`
-    store.setDeploy(alias, { status: 'failed', artifact: PROBE_ARTIFACT, detail, at: Date.now() })
+    store.setDeploy(alias, failedState(store, alias, PROBE_ARTIFACT, detail))
     return { alias, probe: probed, action: 'failed', previous: null, installed: null, detail }
   }
   const home = (probed.home ?? '').trim()
   if (home === '') {
     const detail = 'probe did not report $HOME'
-    store.setDeploy(alias, { status: 'failed', artifact: PROBE_ARTIFACT, detail, at: Date.now() })
+    store.setDeploy(alias, failedState(store, alias, PROBE_ARTIFACT, detail))
     return { alias, probe: probed, action: 'failed', previous: null, installed: null, detail }
   }
   const helper = pickCached(probed.platform, opts.version)
   if (helper === undefined) {
     if (opts.version !== undefined && opts.version !== '') {
       const detail = `no cached helper ${opts.version}/${probed.platform} in $DSH_HOME/dsh-remote-helpers/`
-      store.setDeploy(alias, { status: 'failed', artifact: PROBE_ARTIFACT, detail, at: Date.now() })
+      store.setDeploy(alias, failedState(store, alias, PROBE_ARTIFACT, detail))
       return { alias, probe: probed, action: 'failed', previous: null, installed: null, detail }
     }
     return pushProbeBundle(pool, store, alias, probed, home, started)
@@ -343,7 +397,7 @@ async function pushProbeBundle(
     return { alias, probe: probed, action: 'pushed', previous, installed: manifest, detail }
   } catch (error) {
     const detail = `push failed: ${error instanceof Error ? error.message : String(error)}`
-    store.setDeploy(alias, { status: 'failed', artifact: PROBE_ARTIFACT, detail, at: Date.now() })
+    store.setDeploy(alias, failedState(store, alias, PROBE_ARTIFACT, detail))
     return { alias, probe: probed, action: 'failed', previous, installed: null, detail }
   }
 }
@@ -414,7 +468,7 @@ async function pushHelper(
     return { alias, probe: probed, action: 'pushed', previous, installed: manifest, detail }
   } catch (error) {
     const detail = `push failed: ${error instanceof Error ? error.message : String(error)}`
-    store.setDeploy(alias, { status: 'failed', artifact, detail, at: Date.now() })
+    store.setDeploy(alias, failedState(store, alias, artifact, detail))
     await pool.exec(alias, `rm -f ${shRoot(tmpFile)}; rm -rf ${shRoot(verDir + '.new')}`, { timeoutMs: 15_000 }).catch(() => undefined)
     return { alias, probe: probed, action: 'failed', previous, installed: null, detail }
   }

@@ -7,12 +7,21 @@
  * can legally be applied: a worktree diff can be staged or reverted, an
  * already-staged diff can only be un-staged. 变更后 switches to a real
  * CodeMirror buffer so the file can be edited in place.
+ *
+ * The row count is the WHOLE file, so the split mode is windowed (see
+ * `useRowWindow`): before that, a 3000-line file put 9000 line containers and
+ * ~2N tokenized lines in the DOM at once, and every store publish rebuilt all
+ * of them. Note which element scrolls: the two panes only own their HORIZONTAL
+ * scroll (`.rvs-diff-col`), while vertical scrolling belongs to `.rvs-diff-grid`
+ * outside them — so ONE window serves all three columns and no column can
+ * drift out of lockstep with another.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { EditorTab } from '../store.tsx'
 import { useExplorer } from '../store.tsx'
 import { applyHunk, GitOpError } from './actions.ts'
 import { diffCounts } from './diff-model.ts'
+import type { DiffRow } from '../../protocol.ts'
 import { api } from '../api.ts'
 import { CodeEditor, type CodeEditorHandle } from '../CodeEditor.tsx'
 import { sameLocalDir } from '../composer.ts'
@@ -29,6 +38,179 @@ import {
 } from '../vsc/kit.tsx'
 
 type ViewMode = 'split' | 'before' | 'after'
+
+/**
+ * Height of one diff row, in px. Must track `.rvs-dline`'s declared height
+ * (`vsc.css`), because the window below converts scroll offsets to row indices
+ * with it: if the CSS box is not exactly this tall the rendered slice drifts
+ * from the spacer that stands in for the rest of the file.
+ */
+const ROW_HEIGHT = 18
+
+/** Rows rendered above and below the viewport, so a wheel step is already ready. */
+const OVERSCAN_ROWS = 8
+
+/** Rows assumed to fit before the grid has been measured (one frame at most). */
+const FALLBACK_VISIBLE_ROWS = 30
+
+/** The half-open row range the diff columns paint, plus what they leave blank. */
+interface RowWindow {
+  /** First rendered row index into `model.rows`. */
+  from: number
+  /** One past the last rendered row index. */
+  to: number
+  /** Height of the rows above `from` / below `to`, in px. */
+  before: number
+  after: number
+}
+
+/** What one render pass gets from `useRowWindow`. */
+interface RowWindowing {
+  /** Goes on the element that owns the vertical scroll (`.rvs-diff-grid`). */
+  scrollRef: React.RefObject<HTMLDivElement>
+  onScroll: (event: React.UIEvent<HTMLDivElement>) => void
+  /** The rows to paint, already sliced and clamped. */
+  rows: DiffRow[]
+  /** The range that slice came from, for effects that must re-measure with it. */
+  range: RowWindow
+  /** Height of the rows above / below the slice, in px. */
+  before: number
+  after: number
+}
+
+/**
+ * The rows to render for one scroll position.
+ *
+ * Memoised against the row LIST, not just the numbers: a reload hands over a
+ * new `model.rows` while `scrollTop` looks unchanged, and a window remembered
+ * from the previous file would render the new file from the old offset. Handing
+ * back the settled object in every other case is what lets a scroll event that
+ * stays inside one row cost nothing.
+ */
+function computeRowWindow(
+  rows: DiffRow[],
+  scrollTop: number,
+  height: number,
+  last: React.MutableRefObject<{ rows: DiffRow[]; window: RowWindow }>,
+): RowWindow {
+  const visibleRows = Math.ceil(height / ROW_HEIGHT)
+  /**
+   * The offset is clamped to the last row, not merely guarded against
+   * negatives: a reload can replace a 3000-line model with a 40-line one while
+   * the browser still holds the old offset (it re-clamps the scroller only once
+   * the new spacer height is in the DOM). An unclamped slice would ask for rows
+   * that no longer exist, `from` would exceed the model, and the two spacers
+   * would then add up to less than the file — the bottom of the new file would
+   * be unreachable. Clamping keeps `before + slice + after` exactly equal to
+   * `rows.length * ROW_HEIGHT`, which is what the scroller's range was before
+   * this window existed.
+   */
+  const scrolledRows = Math.max(0, Math.min(Math.floor(scrollTop / ROW_HEIGHT), Math.max(0, rows.length - 1)))
+  const from = Math.max(0, scrolledRows - OVERSCAN_ROWS)
+  const to = Math.min(rows.length, Math.max(from + 1, scrolledRows + visibleRows + OVERSCAN_ROWS))
+  const settled = last.current
+  if (settled.rows === rows && settled.window.from === from && settled.window.to === to) return settled.window
+  const window = { from, to, before: from * ROW_HEIGHT, after: Math.max(0, (rows.length - to) * ROW_HEIGHT) }
+  last.current = { rows, window }
+  return window
+}
+
+/**
+ * Fixed-height windowing for the side-by-side columns.
+ *
+ * `.rvs-diff-grid` is the only vertical scroller in the diff view, and
+ * `.rvs-dline` is a hard 18px, so the visible slice is arithmetic rather than
+ * measurement: offset → first row, viewport height → row count. What is NOT
+ * rendered is covered by a spacer of the right height, so the scroll range
+ * covers the whole file and the scrollbar behaves exactly as it did when every
+ * row was mounted.
+ *
+ * Scroll geometry is read through refs instead of React state: a `scrollTop`
+ * per wheel event would re-render on every pixel, while only crossing a row
+ * boundary changes anything on screen. The state here is just a revision
+ * counter, and the arithmetic above is what decides whether it moves.
+ *
+ * Nothing is pinned outside the window: an off-screen hunk button is reached by
+ * scrolling to its row, the same gesture as before.
+ */
+function useRowWindow(rows: DiffRow[], visible: boolean, gridMounted: boolean): RowWindowing {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const scrollTopRef = useRef(0)
+  const heightRef = useRef(FALLBACK_VISIBLE_ROWS * ROW_HEIGHT)
+  const lastWindowRef = useRef<{ rows: DiffRow[]; window: RowWindow }>({
+    rows: [],
+    window: { from: -1, to: -1, before: 0, after: 0 },
+  })
+  const [, bumpWindow] = useState(0)
+
+  /**
+   * `useLayoutEffect`, not `useEffect`: the first painted frame must already
+   * carry the right slice, otherwise a tall file flashes its opening rows at
+   * scrollTop 0 and then jumps to where the scroll actually is.
+   */
+  useLayoutEffect(() => {
+    if (!visible) return undefined
+    const grid = scrollRef.current
+    if (grid === null) return undefined
+    scrollTopRef.current = grid.scrollTop
+    if (grid.clientHeight > 0) heightRef.current = grid.clientHeight
+
+    /**
+     * The pane can also be resized without the window following: a sidebar
+     * split, a window resize, or the editor header appearing. A 0-height
+     * reading is the grid being hidden, not a collapsed viewport, so the last
+     * real height is kept.
+     */
+    const observer = new ResizeObserver((entries) => {
+      const box = entries[0]?.borderBoxSize[0]
+      const measured = box === undefined ? grid.clientHeight : box.blockSize
+      if (measured > 0 && measured !== heightRef.current) {
+        heightRef.current = measured
+        bumpWindow(step => step + 1)
+      }
+    })
+    observer.observe(grid)
+    // No teardown of `scrollRef`: the grid is unmounted with the mode it lives
+    // in, and React clears the ref itself, so writing `null` here would only
+    // fight that (and a readonly `RefObject` forbids it anyway).
+    return () => { observer.disconnect() }
+    // `gridMounted` belongs in the deps: the grid exists only in `split`, so a
+    // view that opens straight into 变更前/变更后 leaves the ref null and this
+    // effect would never run again — the height would stay at the fallback and
+    // the bottom of the viewport would sit blank until the first scroll.
+  }, [visible, gridMounted])
+
+  const range = computeRowWindow(rows, scrollTopRef.current, heightRef.current, lastWindowRef)
+  /**
+   * Recomputed on every scroll event and handed to React as the same object
+   * whenever the slice did not move (`computeRowWindow`), so a wheel storm that
+   * stays inside one row re-renders nothing. The measured `clientHeight` comes
+   * along because it tracks a pane resize the window itself cannot see.
+   */
+  const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>): void => {
+    const grid = event.currentTarget
+    scrollTopRef.current = grid.scrollTop
+    if (grid.clientHeight > 0) heightRef.current = grid.clientHeight
+    // Only a slice change is worth a render. `computeRowWindow` hands back the
+    // very object the last render used while the wheel stays inside the same
+    // rows, so comparing against the window that was current BEFORE the call is
+    // the whole test — without it every scroll event re-rendered the diff,
+    // which is the cost the windowing exists to remove.
+    const previous = lastWindowRef.current.window
+    if (computeRowWindow(rows, grid.scrollTop, heightRef.current, lastWindowRef) !== previous) {
+      bumpWindow(step => step + 1)
+    }
+  }, [rows])
+
+  return {
+    scrollRef,
+    onScroll,
+    rows: rows.slice(range.from, range.to),
+    range,
+    before: range.before,
+    after: range.after,
+  }
+}
 
 /** Render one tokenized line. */
 function Line(props: { tokens: Token[]; empty?: boolean }): ReactNode {
@@ -85,11 +267,13 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
   const rightRef = useRef<HTMLDivElement>(null)
   const hbarRef = useRef<HTMLDivElement>(null)
   const [barWidth, setBarWidth] = useState(0)
+  const rowsInView = useRowWindow(tab.model?.rows ?? [], props.visible, mode === 'split')
 
   /**
    * Measure the widest pane and size the top bar's spacer to it. Runs after
-   * every model change and on container resizes (a pane that is empty until
-   * its fonts settle would otherwise leave the bar too short).
+   * every model change, on container resizes (a pane that is empty until
+   * its fonts settle would otherwise leave the bar too short) and whenever
+   * the window slides, since the widest line on screen changes with it.
    */
   useLayoutEffect(() => {
     if (mode !== 'split') return
@@ -104,7 +288,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
       window.clearTimeout(timer)
       window.removeEventListener('resize', measure)
     }
-  }, [mode, tab.id, tab.diff])
+  }, [mode, tab.id, tab.diff, rowsInView.range])
 
   /** Bar → both panes. */
   const syncFromBar = useCallback((left: number): void => {
@@ -249,12 +433,18 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
       {mode === 'split' && (
         <>
           <HScrollBar barRef={hbarRef} width={barWidth} onScroll={syncFromBar} />
-          <div className="rvs-diff-grid">
+          {/* The grid owns the vertical scroll for all three columns, so the
+              window below is shared and the panes cannot drift apart. */}
+          <div className="rvs-diff-grid" ref={rowsInView.scrollRef} onScroll={rowsInView.onScroll}>
             <div className="rvs-diff-cols">
               {/* Left pane: fixed 50% (see .rvs-diff-col) with its own hidden
                   horizontal scroll, driven from the bar above. */}
               <div className="rvs-diff-col" ref={leftRef} onScroll={syncFromPane}>
-                {model.rows.map(row => (
+                {/* The rows scrolled past. Height, not transform: the spacer has
+                    to leave a real scroll range behind or the file's own rows
+                    below the window would be unreachable. */}
+                <div className="rvs-drows-blank" style={{ height: rowsInView.before }} />
+                {rowsInView.rows.map(row => (
                   <div key={row.id} className={`rvs-dline${row.oldDel ? ' rvs-row-del' : ''}`}>
                     <span className="rvs-dline-num">{row.oldNum ?? ''}</span>
                     <span className="rvs-dline-text">
@@ -264,10 +454,15 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
                     </span>
                   </div>
                 ))}
+                <div className="rvs-drows-blank" style={{ height: rowsInView.after }} />
               </div>
               <div className="rvs-gutter-col">
-                {model.rows.map(row => {
-                  const hunk = row.hunk >= 0 ? model.hunks.find(item => item.index === row.hunk) : undefined
+                <div className="rvs-drows-blank" style={{ height: rowsInView.before }} />
+                {rowsInView.rows.map(row => {
+                  // `hunk.index` IS the position in `model.hunks`
+                  // (`diff-model.ts` builds it with `.entries()`), so the row's
+                  // index is the lookup — the linear `find` was one scan per row.
+                  const hunk = row.hunk >= 0 ? model.hunks[row.hunk] : undefined
                   const startOfHunk = hunk !== undefined && hunk.startRow === row.id
                   return (
                     <div key={row.id} className="rvs-gutter-line">
@@ -305,9 +500,11 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
                     </div>
                   )
                 })}
+                <div className="rvs-drows-blank" style={{ height: rowsInView.after }} />
               </div>
               <div className="rvs-diff-col" ref={rightRef} onScroll={syncFromPane}>
-                {model.rows.map(row => (
+                <div className="rvs-drows-blank" style={{ height: rowsInView.before }} />
+                {rowsInView.rows.map(row => (
                   <div key={row.id} className={`rvs-dline${row.newAdd ? ' rvs-row-add' : ''}`}>
                     <span className="rvs-dline-num">{row.newNum ?? ''}</span>
                     <span className="rvs-dline-text">
@@ -317,6 +514,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
                     </span>
                   </div>
                 ))}
+                <div className="rvs-drows-blank" style={{ height: rowsInView.after }} />
               </div>
             </div>
           </div>

@@ -8,7 +8,7 @@
  * and every successful write refreshes the shared status so the tree markers
  * and the change list never disagree.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash } from '../../protocol.ts'
 import { useExplorer } from '../store.tsx'
 import {
@@ -58,9 +58,9 @@ function messageOf(error: unknown): string {
   return error instanceof GitOpError || error instanceof Error ? error.message : String(error)
 }
 
-export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
+export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean }): ReactNode {
   const store = useExplorer()
-  const { t, lang, buckets, head, status, alias, repoRoot } = store
+  const { t, lang, buckets, head, alias, repoRoot } = store
   const [folded, setFolded] = useState<Record<string, boolean>>({})
   const [message, setMessage] = useState<string>(() => {
     try {
@@ -110,9 +110,25 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
     }
   }, [alias, repoRoot, head?.branch])
 
+  /**
+   * What the extras are keyed by: the three values `loadExtras` is built from.
+   * Keying this effect on `status` instead re-ran all three remote git commands
+   * on EVERY write made through the plugin — a successful refresh always mints
+   * a fresh status object, so saving in the editor reloaded the stash / branch /
+   * remote lists. The panel's own verbs still refresh them explicitly
+   * (`refreshAll`).
+   */
+  const extrasKey = JSON.stringify([alias, repoRoot ?? '', head?.branch ?? ''])
+  const listedExtras = useRef('')
   useEffect(() => {
+    // A parked panel stays MOUNTED behind `display:none`: it may not spend three
+    // remote git commands getting ready for a view it is not in. It catches up
+    // on the way back — the key is only recorded while it IS on screen, so a
+    // change made while parked still reads as pending.
+    if (props.visible === false || listedExtras.current === extrasKey) return
+    listedExtras.current = extrasKey
     void loadExtras()
-  }, [loadExtras, status])
+  }, [extrasKey, loadExtras, props.visible])
 
   const refreshAll = useCallback(async (): Promise<void> => {
     await store.afterWrite()

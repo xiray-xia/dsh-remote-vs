@@ -52,14 +52,32 @@ export class RemoteFileSearch {
   private settled: FileReferenceCandidate[] | undefined
   private pending: Promise<FileReferenceCandidate[]> | undefined
   private pendingAbort: AbortController | undefined
+  /** Invalidation generation the pending scan belongs to (-1: none). */
+  private pendingGeneration = -1
   private disposed = false
+  /** Monotonic invalidation counter; a scan started below it is stale. */
+  private invalidations = 0
 
   constructor(private readonly deps: RemoteFileSearchDeps) {
     this.excluded = new Set(REMOTE_FILE_SEARCH_EXCLUDED_DIRECTORIES)
   }
 
-  /** Drop the cached index (tool activity); the next bare query rebuilds. */
+  /**
+   * Drop the cached index (tool activity); the next bare query rebuilds.
+   *
+   * Dropping — rather than keeping the entries and revalidating behind the
+   * caret the way the stock local service does — is deliberate: nothing local
+   * can tell whether a remote tree moved, so an index that could predate a
+   * change must cost a rebuild instead of answering. For the same reason a
+   * minimum rebuild interval is not used to coalesce a burst; the burst is
+   * damped where it is generated, by invalidating for write-capable tools in
+   * router-refs.ts.
+   *
+   * Aborting an in-flight scan is part of that: its result can no longer be
+   * published, and a query arriving after this call must not join it.
+   */
   invalidate(): void {
+    this.invalidations += 1
     this.settled = undefined
     if (this.pendingAbort !== undefined) {
       try {
@@ -125,8 +143,18 @@ export class RemoteFileSearch {
   /** Cached full listing; concurrent callers share one in-flight build. */
   private async indexFor(signal: AbortSignal): Promise<FileReferenceCandidate[]> {
     if (this.settled !== undefined) return this.settled
-    if (this.pending === undefined) {
+    // Join a scan only while it is still the current one. An invalidated scan
+    // can no longer be published, so waiting on it would answer a fresh query
+    // from data that predates the change.
+    if (this.pending === undefined || this.pendingGeneration !== this.invalidations) {
       const controller = new AbortController()
+      // Publishing is gated on this snapshot too, so a scan that finished in
+      // the instant before an invalidation landed cannot put a pre-invalidation
+      // index back into the cache (the abort in invalidate() closes the wider
+      // window; a scan that already resolved is past the point where aborting
+      // helps).
+      const startedAt = this.invalidations
+      this.pendingGeneration = startedAt
       this.pendingAbort = controller
       this.pending = this.buildIndex(controller.signal).then(
         (entries) => {
@@ -134,7 +162,7 @@ export class RemoteFileSearch {
             this.pending = undefined
             this.pendingAbort = undefined
           }
-          if (!this.disposed) this.settled = entries
+          if (!this.disposed && this.invalidations === startedAt) this.settled = entries
           return entries
         },
         (error: unknown) => {

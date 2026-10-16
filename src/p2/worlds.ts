@@ -18,7 +18,7 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { RemoteStore } from '../store.ts'
 import type { RemotePool } from '../pool.ts'
-import { probe, pushPipeline } from '../deploy.ts'
+import { deployFailure, probe, pushPipeline } from '../deploy.ts'
 import { aliasRoot } from '../paths.ts'
 import type { RemoteHostEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RpcConnection } from './helper-rpc.ts'
@@ -53,6 +53,8 @@ export interface WorldsDeps {
 interface FsView {
   child: Context
   fs: FileSystem
+  /** Connection the view's `ssh` provider is bound to (cache-hit liveness gate). */
+  conn: RpcConnection
 }
 
 /** Untyped provide: 'ssh' has no Context key in compositions without official dsh-ssh. */
@@ -65,11 +67,17 @@ function isWindowsAbsolute(path: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
 }
 
+/** Dial cooldown after consecutive helper-connection failures: 1s, 2s, 4s … capped. */
+const DIAL_BACKOFF_BASE_MS = 1_000
+const DIAL_BACKOFF_CAP_MS = 30_000
+
 export class RemoteWorlds {
   private readonly rpcs = new Map<string, Promise<RpcConnection>>()
   private readonly fsViews = new Map<string, Promise<FsView>>()
-  private readonly fsReady = new Map<string, FileSystem>()
+  private readonly fsReady = new Map<string, FsView>()
   private readonly procs = new Map<string, SshProcRuntime>()
+  /** Consecutive dial failures per alias; while the cooldown is set, no dial is attempted. */
+  private readonly dialFailures = new Map<string, { failures: number; retryAt: number; lastFailureAt: number; reason: string }>()
 
   constructor(
     private readonly ctx: Context,
@@ -285,6 +293,9 @@ export class RemoteWorlds {
   /** Drop one host's RPC + fs view + proc runtime (call after host update/delete). */
   async dropHost(alias: string): Promise<void> {
     this.fsReady.delete(alias)
+    // Host edit/delete: what failed before says nothing about the new
+    // coordinates, so the dial cooldown starts over too.
+    this.dialFailures.delete(alias)
     const proc = this.procs.get(alias)
     this.procs.delete(alias)
     if (proc !== undefined) await proc.dispose().catch(() => undefined)
@@ -317,7 +328,16 @@ export class RemoteWorlds {
   /** Remote fs view for one host alias (official fs-ssh on our RPC). */
   async fsFor(alias: string): Promise<FileSystem> {
     const ready = this.fsReady.get(alias)
-    if (ready !== undefined) return ready
+    if (ready !== undefined) {
+      // The view's ssh provider is bound to the connection that existed when
+      // the view was built, and nothing in the RPC layer redials on
+      // invalidation — so a warm view whose connection died stays broken for
+      // the rest of the process (`dropHost`, on host edit/delete, is the only
+      // other eviction point). Verify liveness on every hit; a dead view drops
+      // out of the cache and re-enters the single-flight path below.
+      if (ready.conn.alive) return ready.fs
+      this.evictFsView(alias)
+    }
     let pending = this.fsViews.get(alias)
     if (pending === undefined) {
       pending = this.createFsView(alias)
@@ -327,13 +347,28 @@ export class RemoteWorlds {
       })
     }
     const view = await pending
-    this.fsReady.set(alias, view.fs)
+    this.fsReady.set(alias, view)
     return view.fs
+  }
+
+  /**
+   * Drop one alias's cached fs view. `fsViews` keeps the resolved promise, so
+   * leaving that entry in place would hand the next caller the same dead
+   * closure. The child fiber owns the fs-ssh instance, so it is torn down
+   * best-effort: the connection is already dead, nothing in flight through it
+   * can succeed, and a failed teardown must not block the rebuild.
+   */
+  private evictFsView(alias: string): void {
+    this.fsReady.delete(alias)
+    const view = this.fsViews.get(alias)
+    this.fsViews.delete(alias)
+    if (view === undefined) return
+    void view.then(resolved => resolved.child.fiber.dispose()).catch(() => undefined)
   }
 
   /** Sync accessor for already-warm views (sync seams only, never creates). */
   cachedFs(alias: string): FileSystem | undefined {
-    return this.fsReady.get(alias)
+    return this.fsReady.get(alias)?.fs
   }
 
   /** Shared ssh process runtime for one host alias. */
@@ -397,7 +432,7 @@ export class RemoteWorlds {
       await child.plugin(SshFileSystem)
       const fs = (child as unknown as Record<string, FileSystem>).fs
       if (fs === undefined) throw new Error('fs-ssh did not provide ctx.fs')
-      return { child, fs }
+      return { child, fs, conn: rpc }
     } catch (error) {
       try {
         await child.fiber.dispose()
@@ -410,26 +445,82 @@ export class RemoteWorlds {
 
   /** Shared helper RPC connection for one host alias (auto-deploys). */
   async rpcFor(alias: string): Promise<RpcConnection> {
+    this.assertDialAllowed(alias)
     let pending = this.rpcs.get(alias)
     if (pending === undefined) {
       pending = this.createRpc(alias)
       this.rpcs.set(alias, pending)
-      void pending.catch(() => {
-        if (this.rpcs.get(alias) === pending) this.rpcs.delete(alias)
-      })
+      void pending.then(
+        () => {
+          this.dialFailures.delete(alias)
+        },
+        (error: unknown) => {
+          if (this.rpcs.get(alias) === pending) this.rpcs.delete(alias)
+          this.noteDialFailure(alias, error)
+        },
+      )
     }
     const conn = await pending
     if (!conn.alive) {
+      // Dialed, then closed before the caller could use it (a helper that exits
+      // right after hello). This branch used to delete and redial with no delay,
+      // so that case recursed through one full SSH dial per iteration; counting
+      // the failure here is what makes the recursive call fail fast through the
+      // cooldown instead.
       this.rpcs.delete(alias)
+      this.noteDialFailure(alias, new Error('helper connection closed right after dialing'))
       return this.rpcFor(alias)
     }
     return conn
+  }
+
+  /** Fail fast while an alias is inside its cooldown; the cooldown never dials. */
+  private assertDialAllowed(alias: string): void {
+    const state = this.dialFailures.get(alias)
+    if (state === undefined) return
+    const remaining = state.retryAt - Date.now()
+    if (remaining <= 0) return
+    // Any host-record write after the failure (a host edit, or a manual deploy
+    // through the Settings button) may have fixed the cause, so it releases the
+    // cooldown instead of swallowing the user's fix.
+    if (this.deps.store.require(alias).updatedAt > state.lastFailureAt) {
+      this.dialFailures.delete(alias)
+      return
+    }
+    throw new Error(
+      `helper RPC for ${alias} is cooling down for ${Math.ceil(remaining / 1000)}s after `
+      + `${state.failures} consecutive failure(s): ${state.reason}`,
+    )
+  }
+
+  private noteDialFailure(alias: string, error: unknown): void {
+    const failures = (this.dialFailures.get(alias)?.failures ?? 0) + 1
+    const now = Date.now()
+    this.dialFailures.set(alias, {
+      failures,
+      retryAt: now + Math.min(DIAL_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 5), DIAL_BACKOFF_CAP_MS),
+      lastFailureAt: now,
+      reason: error instanceof Error ? error.message : String(error),
+    })
   }
 
   private async createRpc(alias: string): Promise<RpcConnection> {
     const entry: RemoteHostEntry = this.deps.store.require(alias)
     let deploy = entry.deploy
     if (deploy?.artifact === undefined || !deploy.artifact.startsWith('dsh-ssh-helper/') || deploy.helper === undefined) {
+      // A failed deploy never writes `helper`, so this predicate stays true
+      // forever and every remote file operation re-ran the whole pipeline
+      // (probe + up to 45MB upload + install). `deployFailure` separates
+      // "never deployed" (no ledger on the record) from "deployed and failed",
+      // and reports the remaining backoff for the latter. The Settings deploy
+      // button calls pushPipeline directly, so it still retries immediately.
+      const failure = deployFailure(deploy)
+      if (failure !== undefined && failure.retryInMs > 0) {
+        throw new Error(
+          `helper deploy for ${alias} failed ${failure.attempts} time(s); next automatic attempt in `
+          + `${Math.ceil(failure.retryInMs / 1000)}s (deploy it again from Settings to force one now)`,
+        )
+      }
       // First contact (or legacy marker): auto-deploy, VSCode-style.
       const report = await pushPipeline(this.deps.pool, this.deps.store, alias)
       if (report.action === 'failed') {
