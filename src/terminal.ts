@@ -15,7 +15,43 @@ interface Session {
   alive: boolean
   exitCode: number | null
   sockets: Set<WebSocket>
+  /** Bytes handed to sockets that have not flushed yet (see broadcast). */
+  pending: number
+  /** True while the channel is paused because a socket fell behind. */
+  paused: boolean
+  /** Fires once the last socket has been gone for EMPTY_SOCKET_TTL_MS. */
+  reap: ReturnType<typeof setTimeout> | undefined
 }
+
+/**
+ * A session with no attached socket is kept this long so that a page reload
+ * can reattach by id. Past it the session closes and the remote shell dies.
+ *
+ * Without this sweep nothing ever released the session: its `pool.hold` never
+ * returned to zero, so the connection could not idle out, and the remote sshd
+ * session slot stayed taken for the life of the host process. Ten minutes is
+ * far longer than a reload needs and far shorter than "until you restart DSH".
+ */
+const EMPTY_SOCKET_TTL_MS = 10 * 60_000
+
+/**
+ * Terminal output is a live stream with no natural end, so it needs a bound.
+ * When a socket falls this far behind, pause the channel — that pushes the
+ * brake all the way back to the remote command, instead of growing the host
+ * process. Resume once the socket has drained.
+ *
+ * The pause is real backpressure, not a local buffer: ssh2 only sends a window
+ * adjustment while the stream is flowing, so a paused channel lets the peer's
+ * send window drain to zero and the remote command blocks on its own write.
+ * The retained ceiling is therefore this mark plus ssh2's window (2 MiB) plus
+ * whatever is in flight — bounded, but not exactly 4 MiB.
+ *
+ * The counter is per session, not per socket: one lagging socket pauses the
+ * channel for every socket attached to that shell. That is deliberate — the
+ * alternative is letting the slowest consumer grow the host process.
+ */
+const OUT_HIGH_WATER = 4 * 1024 * 1024
+const OUT_LOW_WATER = 1 * 1024 * 1024
 
 export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>()
@@ -37,7 +73,17 @@ export class TerminalSessionRegistry {
       }
       throw error
     }
-    const session: Session = { id, alias, channel, alive: true, exitCode: null, sockets: new Set() }
+    const session: Session = {
+      id,
+      alias,
+      channel,
+      alive: true,
+      exitCode: null,
+      sockets: new Set(),
+      pending: 0,
+      paused: false,
+      reap: undefined,
+    }
     this.sessions.set(id, session)
     channel.on('data', (chunk: Buffer) => {
       this.broadcast(session, { t: 'out', d: chunk.toString('utf8') })
@@ -81,6 +127,7 @@ export class TerminalSessionRegistry {
     const session = this.sessions.get(id)
     if (session === undefined) return false
     this.sessions.delete(id)
+    this.cancelReap(session)
     try {
       session.channel.close()
     } catch {
@@ -107,6 +154,8 @@ export class TerminalSessionRegistry {
   }
 
   private hookSocket(session: Session, ws: WebSocket): void {
+    // A socket is back: the session is in use, so cancel any pending reap.
+    this.cancelReap(session)
     session.sockets.add(ws)
     ws.on('message', (raw) => {
       let frame: TerminalClientFrame
@@ -130,12 +179,49 @@ export class TerminalSessionRegistry {
         }
       }
     })
-    ws.on('close', () => {
+    const detach = (): void => {
       session.sockets.delete(ws)
-    })
-    ws.on('error', () => {
-      session.sockets.delete(ws)
-    })
+      if (session.sockets.size > 0) return
+      // Nobody is watching any more. Release the brake first — a paused channel
+      // would otherwise stay paused with no socket left to resume it — then
+      // start the clock that ends the session (and with it the remote shell).
+      session.pending = 0
+      this.setPaused(session, false)
+      this.armReap(session)
+    }
+    ws.on('close', detach)
+    ws.on('error', detach)
+  }
+
+  /** Keep the shell for a while (reload can reattach), then close it for good. */
+  private armReap(session: Session): void {
+    this.cancelReap(session)
+    const timer = setTimeout(() => {
+      session.reap = undefined
+      // A late detach can arm a timer for a session that close() already
+      // removed; never act on an entry that is no longer the registered one.
+      if (this.sessions.get(session.id) !== session) return
+      if (session.sockets.size === 0) this.close(session.id)
+    }, EMPTY_SOCKET_TTL_MS)
+    timer.unref?.()
+    session.reap = timer
+  }
+
+  private cancelReap(session: Session): void {
+    if (session.reap === undefined) return
+    clearTimeout(session.reap)
+    session.reap = undefined
+  }
+
+  private setPaused(session: Session, paused: boolean): void {
+    if (session.paused === paused) return
+    session.paused = paused
+    try {
+      if (paused) session.channel.pause()
+      else session.channel.resume()
+    } catch {
+      // The channel may already be gone; the flag still records the intent.
+    }
   }
 
   private send(ws: WebSocket, frame: TerminalServerFrame): void {
@@ -148,12 +234,27 @@ export class TerminalSessionRegistry {
 
   private broadcast(session: Session, frame: TerminalServerFrame): void {
     const text = JSON.stringify(frame)
+    // Bytes, not UTF-16 code units: CJK and emoji output would otherwise be
+    // undercounted by up to 3x and the brake would come on too late.
+    const size = Buffer.byteLength(text, 'utf8')
     for (const socket of session.sockets) {
+      let settled = false
+      // The send callback fires once the frame is on the wire. It is the only
+      // public signal for "this socket has caught up", and it avoids relying on
+      // ws internals (bufferedAmount does not report the socket write queue).
+      const done = (): void => {
+        if (settled) return
+        settled = true
+        session.pending = Math.max(0, session.pending - size)
+        if (session.pending <= OUT_LOW_WATER) this.setPaused(session, false)
+      }
+      session.pending += size
       try {
-        socket.send(text)
+        socket.send(text, done)
       } catch {
-        // Drop dead sockets lazily on close.
+        done()
       }
     }
+    if (session.pending > OUT_HIGH_WATER) this.setPaused(session, true)
   }
 }
