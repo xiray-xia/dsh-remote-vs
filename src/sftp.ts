@@ -10,6 +10,27 @@ import type { RemoteFileEntry, RemoteRead } from './protocol.ts'
 /** Single-read cap (matches the fs-ssh 8 MiB window). */
 export const READ_CAP = 8 * 1024 * 1024
 
+/**
+ * Hard cap for one directory listing. A pathological directory (a spool, a
+ * build cache, someone's 100k-file dump) would otherwise build a single
+ * 15-20 MB JSON response in this process — and `JSON.stringify` doubles that
+ * peak while it serialises. High enough that no real directory is affected,
+ * low enough that one cannot take the host down. The cap keeps explorer order
+ * (directories first, then by name), so which entries survive is deterministic.
+ */
+export const LIST_ENTRY_CAP = 20000
+
+/**
+ * Cap for both per-path memory sets below (levels confirmed to exist, listings
+ * already reported as truncated). Each only ever saves round trips or a repeat
+ * log line, so a small window is enough and a miss costs nothing but the work
+ * the code did before them.
+ */
+const MEMO_CAP = 512
+
+/** SFTP status code for "no such file or directory" (ssh2 sets `error.code`). */
+const SFTP_NO_SUCH_FILE = 2
+
 const S_IFMT = 0o170000
 const S_IFLNK = 0o120000
 const S_IFDIR = 0o040000
@@ -23,15 +44,37 @@ export function remotePath(path: string): string {
 }
 
 export class RemoteFiles {
+  /**
+   * `alias + level` pairs confirmed to exist on the remote (insertion order,
+   * oldest evicted first). Only an optimisation: see ensureDir().
+   */
+  private readonly knownDirs = new Set<string>()
+  /** Listings already reported as truncated; the log line stays one per path. */
+  private readonly capWarned = new Set<string>()
+
   constructor(private readonly pool: RemotePool) {}
 
   async list(alias: string, dir: string): Promise<RemoteFileEntry[]> {
     const path = remotePath(dir)
     return this.pool.withSftp(alias, async (sftp) => {
       const rows = await readdirAsync(sftp, path)
-      return rows
+      const entries = rows
         .map((row) => toEntry(path, row.filename, row.attrs))
         .sort(compareEntries)
+      // The wire shape has no "truncated" flag (adding one would change the
+      // protocol), so a capped listing is silent to the caller — which is why
+      // the host log has to say it, once per directory rather than once per
+      // listing (the explorer re-lists a directory on every write).
+      if (entries.length > LIST_ENTRY_CAP) {
+        const key = `${alias}\u0000${path}`
+        if (!this.capWarned.has(key)) {
+          this.remember(this.capWarned, key)
+          // eslint-disable-next-line no-console
+          console.warn(`[dsh-remote-vs] listing ${path} on ${alias} shows ${LIST_ENTRY_CAP} of ${entries.length} entries`)
+        }
+        return entries.slice(0, LIST_ENTRY_CAP)
+      }
+      return entries
     })
   }
 
@@ -71,14 +114,17 @@ export class RemoteFiles {
 
   async write(alias: string, file: string, content: string, encoding: 'utf8' | 'base64' = 'utf8'): Promise<{ size: number }> {
     const path = remotePath(file)
+    const dir = posix.dirname(path)
     const data = encoding === 'base64' ? Buffer.from(content, 'base64') : Buffer.from(content, 'utf8')
     return this.pool.withSftp(alias, async (sftp) => {
-      await ensureDir(sftp, posix.dirname(path))
-      // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
-      // leaves it undefined); an empty file is created by opening for
-      // truncation and closing again.
-      if (data.length === 0) await touchFile(sftp, path)
-      else await writeFileAsync(sftp, path, data)
+      await this.withDirRetry(alias, dir, async () => {
+        await this.ensureDir(sftp, alias, dir)
+        // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
+        // leaves it undefined); an empty file is created by opening for
+        // truncation and closing again.
+        if (data.length === 0) await touchFile(sftp, path)
+        else await writeFileAsync(sftp, path, data)
+      })
       return { size: data.length }
     })
   }
@@ -86,7 +132,14 @@ export class RemoteFiles {
   async mkdir(alias: string, dir: string): Promise<void> {
     const path = remotePath(dir)
     await this.pool.withSftp(alias, async (sftp) => {
-      await ensureDir(sftp, path)
+      // Parents may be answered from the memo, but the directory the caller
+      // asked for is always really created: "created it" is a promise a stale
+      // memo could silently break (the level can be removed outside this
+      // plugin), while a redundant mkdir only costs the EEXIST tolerance this
+      // walk already had.
+      await this.ensureDir(sftp, alias, posix.dirname(path))
+      await this.mkdirLevel(sftp, path)
+      this.remember(this.knownDirs, dirKey(alias, path))
     })
   }
 
@@ -105,19 +158,118 @@ export class RemoteFiles {
       }
       await removeTree(sftp, path)
     })
+    // Whatever was remembered about this tree is now wrong, and the next mkdir
+    // of the same path must not be answered from that memory.
+    this.forgetDirs(alias, path)
   }
 
   async rename(alias: string, oldPath: string, newPath: string): Promise<void> {
     const from = remotePath(oldPath)
     const to = remotePath(newPath)
+    const dir = posix.dirname(to)
     await this.pool.withSftp(alias, async (sftp) => {
-      await ensureDir(sftp, posix.dirname(to))
-      await renameAsync(sftp, from, to)
+      await this.withDirRetry(alias, dir, async () => {
+        await this.ensureDir(sftp, alias, dir)
+        await renameAsync(sftp, from, to)
+      })
+      // `from` may have been a directory the memo still believes in.
+      this.forgetDirs(alias, from)
     })
+  }
+
+  // ------------------------------------------------------------- internals
+
+  /**
+   * Create every missing level of `dir`.
+   *
+   * Each level is remembered once it is confirmed (or created): without that, a
+   * save walks the whole path with `mkdir` again — typically 4-6 round trips
+   * whose answers can only be EEXIST — on every single write. The memo is safe
+   * because every caller that could be broken by a stale entry either creates
+   * its target for real (mkdir) or retries once after forgetting the prefix
+   * (withDirRetry); the operations that make entries stale (remove, rename)
+   * forget them outright.
+   */
+  private async ensureDir(sftp: SFTPWrapper, alias: string, dir: string): Promise<void> {
+    if (dir === '/' || dir === '.') return
+    const parts = dir.split('/').filter(part => part !== '')
+    let current = ''
+    for (const part of parts) {
+      current += '/' + part
+      const key = dirKey(alias, current)
+      if (this.knownDirs.has(key)) continue
+      await this.mkdirLevel(sftp, current)
+      this.remember(this.knownDirs, key)
+    }
+  }
+
+  /** Create one level, tolerating "already exists" (and verifying the rest). */
+  private async mkdirLevel(sftp: SFTPWrapper, path: string): Promise<void> {
+    try {
+      await mkdirAsync(sftp, path)
+    } catch (error) {
+      // EEXIST (code 4, "Failure") means the level is already there.
+      const code = (error as { code?: number }).code
+      if (code !== 4 && code !== undefined) throw error
+      if (code === undefined) {
+        // Unknown failure: verify by stat before ignoring.
+        try {
+          await lstatAsync(sftp, path)
+        } catch {
+          throw error
+        }
+      }
+    }
+  }
+
+  /**
+   * Run one directory-creating operation, and if it fails because a level the
+   * memo vouched for is gone (the user deleted the tree, a cleanup removed the
+   * deploy root), forget that path and run it once more so the walk recreates
+   * what is missing. Only "no such file" is retried: any other failure is the
+   * caller's to see, and a retried operation is safe because it never got past
+   * the directory walk.
+   */
+  private async withDirRetry<T>(alias: string, dir: string, op: () => Promise<T>): Promise<T> {
+    try {
+      return await op()
+    } catch (error) {
+      if ((error as { code?: number }).code !== SFTP_NO_SUCH_FILE) throw error
+      this.forgetDirs(alias, dir)
+      return await op()
+    }
+  }
+
+  /** Add one key to a bounded set, evicting the oldest entry when full. */
+  private remember(memo: Set<string>, key: string): void {
+    if (memo.size >= MEMO_CAP) {
+      const oldest = memo.values().next().value
+      if (oldest !== undefined) memo.delete(oldest)
+    }
+    memo.add(key)
+  }
+
+  /** Forget `dir`, its parents and everything remembered under it. */
+  private forgetDirs(alias: string, dir: string): void {
+    const parts = dir.split('/').filter(part => part !== '')
+    let current = ''
+    for (const part of parts) {
+      current += '/' + part
+      this.knownDirs.delete(dirKey(alias, current))
+    }
+    const prefix = `${dirKey(alias, dir)}/`
+    for (const key of [...this.knownDirs]) {
+      if (key.startsWith(prefix)) this.knownDirs.delete(key)
+    }
   }
 }
 
 // ------------------------------------------------------------- helpers
+
+/** One memo key: an alias and an absolute remote path, in one string. */
+function dirKey(alias: string, path: string): string {
+  return `${alias}\u0000${path}`
+}
 
 function isSymlink(mode: number): boolean {
   return (mode & S_IFMT) === S_IFLNK
@@ -256,30 +408,6 @@ function mkdirAsync(sftp: SFTPWrapper, path: string): Promise<void> {
       else resolve()
     })
   })
-}
-
-async function ensureDir(sftp: SFTPWrapper, dir: string): Promise<void> {
-  if (dir === '/' || dir === '.') return
-  const parts = dir.split('/').filter(part => part !== '')
-  let current = ''
-  for (const part of parts) {
-    current += '/' + part
-    try {
-      await mkdirAsync(sftp, current)
-    } catch (error) {
-      // EEXIST (code 4, "Failure") means the level is already there.
-      const code = (error as { code?: number }).code
-      if (code !== 4 && code !== undefined) throw error
-      if (code === undefined) {
-        // Unknown failure: verify by stat before ignoring.
-        try {
-          await lstatAsync(sftp, current)
-        } catch {
-          throw error
-        }
-      }
-    }
-  }
 }
 
 function unlinkAsync(sftp: SFTPWrapper, path: string): Promise<void> {

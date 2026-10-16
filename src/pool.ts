@@ -58,6 +58,23 @@ const CONTROL_TIMEOUT_MS = 15_000
  */
 const GROUP_KILL_GRACE_MS = 3_000
 
+/**
+ * Concurrent channels the pool opens per alias. The server's own `MaxSessions`
+ * (10 on the hosts this was measured against) is the real ceiling, and running
+ * past it fails the extra channels hard — "open failed / administratively
+ * prohibited" — with nobody retrying. Six is chosen to leave room for what is
+ * deliberately NOT counted here: PTY terminals, the processes the subprocess
+ * runtime owns, and the helper's channel.
+ */
+const CHANNEL_LIMIT = 6
+
+/**
+ * How long an operation waits for a channel slot before failing. Bounded on
+ * purpose: queueing forever behind a peer that never finishes is worse than a
+ * readable error that tells the user to retry.
+ */
+const CHANNEL_WAIT_MS = 30_000
+
 interface Pooled {
   conn: Client
   timer: ReturnType<typeof setTimeout> | undefined
@@ -83,12 +100,41 @@ export interface ShellOptions {
   rows?: number
 }
 
+export interface SftpOptions {
+  /**
+   * Wall-clock cap for the callback body. `0` disables it for an operation that
+   * is bounded by progress instead (a bulk upload: see putFile); a fixed wall
+   * clock there only turns a healthy transfer on a slow link into a timeout.
+   * Omitted means the per-operation default. The session-open deadline applies
+   * either way, so a server that never answers cannot pin the connection.
+   */
+  timeoutMs?: number
+}
+
+/** One queued operation waiting for a channel slot. */
+interface SlotWaiter {
+  /** Claimed by whichever acts first, the handover or the timeout. */
+  granted: boolean
+  resolve: () => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
+interface Slots {
+  /** Slots handed out and not yet given back. */
+  active: number
+  /** FIFO of operations waiting for one. */
+  queue: SlotWaiter[]
+}
+
 export class RemotePool {
   private readonly conns = new Map<string, Pooled>()
   /** TOFU fingerprints observed this process (alias -> sha256). */
   private readonly hostKeys = new Map<string, string>()
   /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
   private readonly setsidProbes = new Map<string, Promise<boolean>>()
+  /** Per-alias channel slots and the queue waiting for one (see acquireSlot). */
+  private readonly slots = new Map<string, Slots>()
 
   constructor(private readonly store: RemoteStore) {}
 
@@ -127,8 +173,35 @@ export class RemotePool {
     }
   }
 
-  /** Run one non-interactive command. */
+  /**
+   * Run one non-interactive command.
+   *
+   * The command needs a channel slot: a burst of SCM or search calls is exactly
+   * how a host runs past `MaxSessions`, where the surplus channels fail instead
+   * of queueing. The pool's own housekeeping (`bare`: the setsid probe and the
+   * group kill) is exempt — a kill that waits behind user traffic would be a
+   * worse bug than the one it fixes.
+   */
   async exec(alias: string, command: string, opts: ExecOptions = {}): Promise<RemoteExecResult> {
+    if (opts.bare === true) return this.runExec(alias, command, opts)
+    const started = Date.now()
+    try {
+      await this.acquireSlot(alias)
+    } catch (error) {
+      return {
+        success: false, exitCode: null, timedOut: false, stdout: '', stderr: '',
+        durationMs: Date.now() - started, error: error instanceof Error ? error.message : String(error),
+      }
+    }
+    try {
+      return await this.runExec(alias, command, opts)
+    } finally {
+      this.releaseSlot(alias)
+    }
+  }
+
+  /** The exec body, run while the caller already holds a channel slot. */
+  private async runExec(alias: string, command: string, opts: ExecOptions = {}): Promise<RemoteExecResult> {
     const started = Date.now()
     const timeoutMs = opts.timeoutMs ?? 60_000
     // Run the line in its own session, or the timeout below has nothing to kill
@@ -303,8 +376,17 @@ export class RemotePool {
   }
 
   /** Run one callback with a fresh SFTP session (closed afterwards). */
-  async withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
-    const conn = await this.acquire(alias)
+  async withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts: SftpOptions = {}): Promise<T> {
+    // An SFTP session IS a channel, so it takes a slot too: the burst that put
+    // a host at its channel ceiling before was concurrent SFTP listings.
+    await this.acquireSlot(alias)
+    let conn: Client
+    try {
+      conn = await this.acquire(alias)
+    } catch (error) {
+      this.releaseSlot(alias)
+      throw error
+    }
     // Hold BEFORE the first await: holding after it leaves a window where the
     // connection has no hold count and is not yet recorded as in use, so the
     // idle timer armed by a concurrent release() could evict it mid-call.
@@ -326,7 +408,9 @@ export class RemotePool {
         `SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`,
       )
       try {
-        return await withDeadline(fn(sftp), SFTP_OP_TIMEOUT_MS, `SFTP operation timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`)
+        const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
+        if (limit <= 0) return await fn(sftp)
+        return await withDeadline(fn(sftp), limit, `SFTP operation timed out after ${limit / 1000}s`)
       } finally {
         try {
           sftp.end()
@@ -336,16 +420,19 @@ export class RemotePool {
       }
     } finally {
       this.release(alias)
+      this.releaseSlot(alias)
     }
   }
 
   /** Upload one local file to an absolute remote path (parallel fastPut). */
   async putFile(alias: string, localPath: string, remotePath: string): Promise<void> {
-    // A bulk upload must NOT run under the per-operation deadline above: the
-    // helper tarball is ~45 MB, so a fixed 60 s wall clock aborts a healthy
-    // transfer on a slow link and reports it as a timeout. Progress is
-    // therefore bounded instead — any chunk resets the clock, and a stream
-    // that stops moving for UPLOAD_IDLE_MS is the actual failure.
+    // A bulk upload must NOT run under the per-operation deadline: the helper
+    // tarball is ~45 MB, so a fixed 60 s wall clock aborts a healthy transfer on
+    // a slow link and reports it as a timeout. That was the intent all along —
+    // but `withSftp` wrapped this callback in its own 60 s deadline anyway, so
+    // the opt-out below is what makes it true. Progress is the bound instead:
+    // any chunk resets the clock, and a stream that stops moving for
+    // UPLOAD_IDLE_MS is the actual failure.
     await this.withSftp(alias, async (sftp) => {
       await new Promise<void>((resolve, reject) => {
         let settled = false
@@ -374,10 +461,65 @@ export class RemotePool {
           finish(error === undefined || error === null ? undefined : new Error(error.message))
         })
       })
-    })
+      // `timeoutMs: 0` = no wall clock; the idle timer above is the bound.
+    }, { timeoutMs: 0 })
   }
 
   // ------------------------------------------------------------ internals
+
+  /**
+   * Take one channel slot for `alias`, waiting FIFO when the limit is reached.
+   * The wait is bounded: waiting forever behind a peer that never finishes is
+   * worse than a readable error naming the cause and what to do about it.
+   */
+  private async acquireSlot(alias: string): Promise<void> {
+    const state = this.slotState(alias)
+    if (state.active < CHANNEL_LIMIT) {
+      state.active += 1
+      return
+    }
+    await new Promise<void>((resolve, reject) => {
+      const waiter: SlotWaiter = { granted: false, resolve, reject, timer: undefined }
+      waiter.timer = setTimeout(() => {
+        // Whoever gets here first wins: a handover that already ran has taken
+        // this waiter out of the queue and granted it, so the timeout must not
+        // reject a slot its caller is about to use.
+        if (waiter.granted) return
+        waiter.granted = true
+        const index = state.queue.indexOf(waiter)
+        if (index >= 0) state.queue.splice(index, 1)
+        reject(new Error(
+          `remote host ${alias} is busy: ${CHANNEL_LIMIT} operations already hold channels `
+          + `(this one waited ${CHANNEL_WAIT_MS / 1000}s — retry once the earlier work finishes)`,
+        ))
+      }, CHANNEL_WAIT_MS)
+      waiter.timer.unref?.()
+      state.queue.push(waiter)
+    })
+  }
+
+  /** Give a slot back, handing it straight to the longest-waiting operation. */
+  private releaseSlot(alias: string): void {
+    const state = this.slots.get(alias)
+    if (state === undefined) return
+    const waiter = state.queue.shift()
+    if (waiter !== undefined) {
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+      waiter.granted = true
+      waiter.resolve()
+      return
+    }
+    if (state.active > 0) state.active -= 1
+    if (state.active === 0) this.slots.delete(alias)
+  }
+
+  private slotState(alias: string): Slots {
+    const existing = this.slots.get(alias)
+    if (existing !== undefined) return existing
+    const created: Slots = { active: 0, queue: [] }
+    this.slots.set(alias, created)
+    return created
+  }
 
   /**
    * Whether this alias offers a util-linux-style `setsid --wait` — the only
@@ -389,8 +531,16 @@ export class RemotePool {
    *
    * Probed once per alias: the probe is a whole extra channel, and exec is the
    * hot path (SCM polling, search, agent tools). A remote without a compatible
-   * setsid is remembered as such — it keeps the pre-existing behaviour, where a
-   * timeout can only close the channel, and says so in the log.
+   * setsid keeps the pre-existing behaviour, where a timeout can only close the
+   * channel, and says so in the log.
+   *
+   * Only SUCCESS is remembered. A failed probe means "this host has no
+   * setsid OR this one call did not get through", and folding the second case
+   * into the first would be permanent: a single transient blip — a dropped
+   * connection, a 15 s probe timeout on a slow link — would silently switch the
+   * alias to the unwrapped path for the rest of the process, i.e. quietly
+   * disable the kill this wrapper exists to perform. Every other backoff in
+   * this codebase retries rather than blacklisting; so does this one now.
    */
   private supportsSetsid(alias: string): Promise<boolean> {
     const cached = this.setsidProbes.get(alias)
@@ -398,6 +548,11 @@ export class RemotePool {
     const probe = this.exec(alias, SETSID_PROBE, { timeoutMs: CONTROL_TIMEOUT_MS, bare: true })
       .then(result => result.stdout.includes(SETSID_PROBE_MARK), () => false)
     this.setsidProbes.set(alias, probe)
+    void probe.then((supported) => {
+      // Forget a negative answer so the next exec probes again; a positive one
+      // is a property of the host and stays until the connection is dropped.
+      if (!supported && this.setsidProbes.get(alias) === probe) this.setsidProbes.delete(alias)
+    })
     return probe
   }
 

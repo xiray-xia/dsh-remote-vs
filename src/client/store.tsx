@@ -263,12 +263,41 @@ export interface ExplorerValue {
   fail: (text: string) => void
 }
 
+/** Stable action identities — `build()` runs on every publish. */
+const info = (text: string): void => toast(text, false)
+const fail = (text: string): void => toast(text, true)
+
 const listeners = new Set<() => void>()
 let snapshot: ExplorerValue = build()
+
+/**
+ * The derived git views for one status value, memoised on that value's identity.
+ *
+ * `build()` runs on EVERY publish — including the ones that only flip a UI bit
+ * (`gitBusy`, the active tab, a preview toggle, a panel switch). Bucketing and
+ * marking the whole change list twice per publish was pure waste, and handing
+ * out fresh objects each time also defeated every `useMemo` downstream that
+ * keys on `buckets`/`marks`, because their identities never survived a render.
+ *
+ * The status object is replaced only when git actually answers, so caching on
+ * its identity is exactly the right key: same status in, same two objects out.
+ */
+let derivedStatus: GitStatusDetail | undefined
+let derivedViews: { buckets: StatusBuckets; marks: TreeMarks } | undefined
+
+function deriveViews(status: GitStatusDetail): { buckets: StatusBuckets; marks: TreeMarks } {
+  if (derivedViews === undefined || derivedStatus !== status) {
+    const buckets = bucketStatus(status)
+    derivedStatus = status
+    derivedViews = { buckets, marks: buildTreeMarks(status, buckets) }
+  }
+  return derivedViews
+}
 
 function build(): ExplorerValue {
   const workspace = state.workspaces.find(item => item.id === state.workspaceId) ?? state.workspaces[0]
   const status = state.status ?? EMPTY_STATUS
+  const views = deriveViews(status)
   return {
     ctx: state.ctx,
     t,
@@ -288,8 +317,8 @@ function build(): ExplorerValue {
     repoWorkdir: repoWorkdir(workspace?.remotePath ?? '', state.repoSubdir),
     repoMissing: state.repoMissing,
     status: state.status,
-    buckets: bucketStatus(status),
-    marks: buildTreeMarks(status),
+    buckets: views.buckets,
+    marks: views.marks,
     head: state.head,
     gitBusy: state.gitBusy,
     gitError: state.gitError,
@@ -317,8 +346,8 @@ function build(): ExplorerValue {
     updateTab,
     saveTab,
     reloadTab,
-    info: (text: string) => toast(text, false),
-    fail: (text: string) => toast(text, true),
+    info,
+    fail,
   }
 }
 

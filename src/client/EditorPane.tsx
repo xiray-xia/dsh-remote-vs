@@ -51,6 +51,44 @@ function tabIcon(tab: { kind: string; image: boolean }): ReactNode {
   return <span>▪</span>
 }
 
+/** How many decoded images stay cached; each entry is a whole file. */
+const IMAGE_CACHE_KEEP = 4
+/**
+ * One image larger than this is displayed but never retained: the read route
+ * allows 8 MiB, which is ~11 MB of base64 parked in the page, and a picture
+ * that big is not worth the second that re-reading it costs.
+ */
+const IMAGE_CACHE_MAX_URL = 2 * 1024 * 1024
+
+/**
+ * Insert one entry as the newest, then drop the oldest past the cap.
+ *
+ * The image tables were the only thing in this pane that grew with the number
+ * of pictures looked at and never gave anything back: the pane stays mounted
+ * for the life of the page, so every image ever previewed kept its data URL.
+ */
+function rememberRecent(prev: Record<string, string>, path: string, value: string): Record<string, string> {
+  const next: Record<string, string> = {}
+  // Re-inserting has to MOVE an existing key to the end: object key order is
+  // insertion order, and the keys the cap drops are the first ones.
+  for (const [key, item] of Object.entries(prev)) {
+    if (key !== path) next[key] = item
+  }
+  next[path] = value
+  const keys = Object.keys(next)
+  for (const key of keys.slice(0, Math.max(0, keys.length - IMAGE_CACHE_KEEP))) delete next[key]
+  return next
+}
+
+/** Drop every oversized entry except the image that is on screen right now. */
+function dropOversized(prev: Record<string, string>, keep: string | undefined): Record<string, string> {
+  const dropped = Object.keys(prev).filter(key => key !== keep && prev[key].length > IMAGE_CACHE_MAX_URL)
+  if (dropped.length === 0) return prev
+  const next = { ...prev }
+  for (const key of dropped) delete next[key]
+  return next
+}
+
 export function EditorPane(props: { visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, tabs, activeTab, alias } = store
@@ -61,7 +99,8 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     && viewedAliasPath !== undefined
     && sameLocalDir(chat.sessionWorkspacePath, viewedAliasPath)
 
-  // Image data URL cache, keyed by path (remote reads are not free).
+  // Image data URL cache, keyed by path (remote reads are not free). Bounded —
+  // see `rememberRecent` / `dropOversized`.
   const [images, setImages] = useState<Record<string, string>>({})
   const [imageError, setImageError] = useState<Record<string, string>>({})
   /**
@@ -76,6 +115,12 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   }, [activeTab?.id])
   useEffect(() => {
     const tab = activeTab
+    // A hidden pane may not spend a remote read on a picture nobody can see.
+    // The effect re-runs when `visible` flips back, which is where the read
+    // then happens — this is the ONE thing `visible` buys an editor pane that
+    // is parked behind `display:none`; the body itself has to stay mounted
+    // (see the editor host below), so it cannot be gated wholesale.
+    if (props.visible === false) return
     if (tab === undefined || !tab.image || alias === '') return
     if (images[tab.fullPath] !== undefined || imageError[tab.fullPath] !== undefined) return
     let cancelled = false
@@ -84,18 +129,27 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
         const read = await api.fileOp.read(alias, tab.fullPath)
         if (cancelled) return
         if (read.base64 === undefined) {
-          setImageError(prev => ({ ...prev, [tab.fullPath]: t('editor.imageFailed') }))
+          setImageError(prev => rememberRecent(prev, tab.fullPath, t('editor.imageFailed')))
           return
         }
-        setImages(prev => ({ ...prev, [tab.fullPath]: `data:${mimeFor(tab.fullPath)};base64,${read.base64}` }))
+        setImages(prev => rememberRecent(prev, tab.fullPath, `data:${mimeFor(tab.fullPath)};base64,${read.base64}`))
       } catch (error) {
         if (!cancelled) {
-          setImageError(prev => ({ ...prev, [tab.fullPath]: error instanceof Error ? error.message : String(error) }))
+          setImageError(prev => rememberRecent(prev, tab.fullPath, error instanceof Error ? error.message : String(error)))
         }
       }
     })()
     return () => { cancelled = true }
-  }, [activeTab, alias, images, imageError, t])
+  }, [activeTab, alias, images, imageError, t, props.visible])
+
+  /**
+   * An oversized image is shown but not cached, so it may only live as long as
+   * its tab is the one on screen: leaving that tab hands its megabytes back
+   * instead of parking them until the page is reloaded.
+   */
+  useEffect(() => {
+    setImages(prev => dropOversized(prev, activeTab?.fullPath))
+  }, [activeTab?.fullPath])
 
   const closeWithGuard = async (tab: EditorTab): Promise<void> => {
     if (tab.dirty) {
@@ -160,6 +214,19 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const rememberViewState = useCallback((tabId: string, state: CodeEditorViewState): void => {
     viewStates.current.set(tabId, state)
   }, [])
+
+  /**
+   * Closed tabs may not keep their scroll + caret. This map is keyed by tab id
+   * and was only ever written, and the pane is mounted for the life of the
+   * page: a session that opened a few hundred files held a state object for
+   * every one of them, long after the tab was gone.
+   */
+  useEffect(() => {
+    const live = new Set(tabs.map(tab => tab.id))
+    for (const id of [...viewStates.current.keys()]) {
+      if (!live.has(id)) viewStates.current.delete(id)
+    }
+  }, [tabs])
 
   /**
    * True only while the CodeMirror instance for the active tab is mounted.

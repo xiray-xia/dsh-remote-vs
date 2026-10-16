@@ -37,7 +37,7 @@ export function RepoPicker(props: {
   onClose: () => void
 }): ReactNode {
   const store = useExplorer()
-  const { t } = store
+  const { t, discoverRepos } = store
   const [cwd, setCwd] = useState<string>(() => repoWorkdir(props.root, props.current))
   const [dirs, setDirs] = useState<{ name: string; path: string }[]>([])
   const [listing, setListing] = useState(false)
@@ -91,15 +91,20 @@ export function RepoPicker(props: {
   const find = useCallback(async (): Promise<void> => {
     setFinding(true)
     try {
-      setCandidates(await store.discoverRepos())
+      setCandidates(await discoverRepos())
     } finally {
       setFinding(false)
     }
-  }, [store])
+  }, [discoverRepos])
 
-  // Discovery runs once when the dialog opens: it is the shortest path for the
-  // "my repository is in a subdirectory somewhere" case.
-  useEffect(() => { void find() }, [find])
+  // Discovery runs once when the dialog opens, and again only when the dialog
+  // is re-pointed at another binding: it is the shortest path for the "my
+  // repository is in a subdirectory somewhere" case. The dependency used to be
+  // the whole `store`, whose snapshot is a NEW object on every publish — so
+  // every background git refresh under an open dialog re-ran a remote
+  // `git rev-parse` (plus a `find -maxdepth 3` when the root is not a repo).
+  // It does not depend on `cwd`: the scan starts at the workspace root.
+  useEffect(() => { void find() }, [find, props.alias, props.root])
 
   const parent = useMemo(() => {
     if (!insideRoot) return undefined

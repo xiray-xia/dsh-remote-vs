@@ -127,9 +127,14 @@ function normalize(path: string): string {
   return path.replace(/^\.\//, '').replace(/\/+$/, '')
 }
 
-/** Build tree marks from the detailed status. */
-export function buildTreeMarks(detail: GitStatusDetail): TreeMarks {
-  const buckets = bucketStatus(detail)
+/**
+ * Build tree marks from the detailed status.
+ *
+ * `buckets` may be supplied when the caller has already bucketed the same
+ * status. The marks need the same four lists, and recomputing them meant every
+ * store publish walked the whole change list twice.
+ */
+export function buildTreeMarks(detail: GitStatusDetail, buckets: StatusBuckets = bucketStatus(detail)): TreeMarks {
   const files = new Map<string, string>()
   const dirs = new Map<string, string>()
   const stagedLetters = new Map<string, string>()
