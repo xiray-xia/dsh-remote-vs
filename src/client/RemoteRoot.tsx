@@ -87,6 +87,22 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     if (store.workspaces.length === 0 && view !== 'workspaces') go('workspaces')
   }, [store.workspaces.length, view, go])
 
+  /**
+   * The mount surface owns the editor, so a persisted `view === 'editor'` is
+   * only reachable where the sidebar still holds the editor.
+   *
+   * `view` is restored from localStorage (where 'editor' is an allowed value)
+   * and `editorSurface` starts as 'sidebar' before index.tsx flips it once the
+   * conversation-view slot registers. A profile that last used the fallback
+   * layout therefore came back with `view === 'editor'` while the rail button
+   * that owns it was gone AND the centre tab mounted a second EditorPane on
+   * the same store tab — two live buffers with independent undo state, the one
+   * state this file declares must never happen.
+   */
+  useEffect(() => {
+    if (store.editorSurface !== 'sidebar' && view === 'editor') go('explorer')
+  }, [store.editorSurface, view, go])
+
   useEffect(() => {
     try {
       localStorage.setItem(HIDDEN_KEY, showHidden ? '1' : '0')

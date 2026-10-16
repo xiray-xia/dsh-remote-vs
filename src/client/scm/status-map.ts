@@ -101,7 +101,12 @@ export function bucketStatus(detail: GitStatusDetail): StatusBuckets {
     staged,
     untracked,
     ignored: detail.ignored,
-    total: staged.length + merged.length + untracked.length,
+    // `untracked` is a SUBSET view of `changes` (an untracked row is pushed to
+    // both, see above), so adding it double-counted every untracked file: one
+    // untracked file made the rail badge read 2 while the list showed 1. The
+    // badge counts entries, and every entry is either staged, changed or
+    // conflicted — exactly the three sections the panel renders.
+    total: staged.length + merged.length + conflicts.length,
   }
 }
 
