@@ -246,7 +246,16 @@ node .spike/i18n-check.mjs       # 中英词典一致性：无缺失键、无孤
 node .spike/ref-check.mjs        # 32 项：assertRef 接受合法修订后缀、拒绝一切注入面
 node .spike/status-check.mjs     # 真 shell 里跑生成的 git 命令，验证退出码不再被管道掩盖
 node .spike/cache-check.mjs      # 增量分词缓存 vs 整篇分词，9 种语言 × 8 种编辑形态逐字节比对
+node .spike/layout-check.mjs     # 高度链与滚动条契约：标签栏固定不被顶走、编辑器滚动条够宽可点
+node .spike/viewstate-check.mjs  # 滚动+光标跨重挂的往返（有状态 scrollTop，能区分"恢复"与"被重置"）
+node .spike/tabswitch-check.mjs  # 真 React 驱动三种接线：两种读 ref 的必须失败，上报式必须成功
+node .spike/letter-check.mjs     # 状态字母：未跟踪 ? 与冲突 U 不再撞车，其它映射与两处渲染点
 ```
+
+`.spike/layout-fixture.html`（由 `build-fixture.mjs` 生成）是浏览器里量布局用的夹具：
+它把**宿主真实的插槽 CSS** 和**线上 vsc.css** 机械内联进去，改完 CSS 重跑
+`node .spike/build-fixture.mjs` 即可在真浏览器里量高度链、滚动容器与滚动条宽度——
+纯 CSS 的问题 tsc、打包、jsdom 都看不见，这个夹具是唯一能复现它们的地方。
 
 `markdown-check.ts` 需要先编译（它 import `.tsx`，Node 不能直跑）：
 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/markdown-check.js`。
