@@ -134,6 +134,13 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    * INCOMING tab's editor (always scrollTop 0), and a `useLayoutEffect` cleanup
    * found `editorRef.current === null`. `.spike/tabswitch-check.mjs` reproduces
    * both failures and pins the working wiring.
+   *
+   * Keyed by tab id alone, which is safe because only ONE `EditorPane` is ever
+   * mounted: the centre surface when the host has a `conversation.view` slot,
+   * otherwise the sidebar fallback. With two live editors for the same tab the
+   * hidden one would report its untouched scrollTop 0 and overwrite the visible
+   * one's, snapping every switch back to the top — so `RemoteRoot` gates both
+   * mounts on `editorSurface` and must keep doing so.
    */
   const viewStates = useRef(new Map<string, CodeEditorViewState>())
   const activeTabId = activeTab?.id
