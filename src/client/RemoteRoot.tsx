@@ -184,15 +184,20 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
 
   const panel = (
     <div className="rvs-pane grow">
-      {[...mounted]
-        // With the sidebar split active the editor renders below the divider,
-        // never in the stack (two live buffers for one tab would fight).
-        .filter(id => !(showEditorWithView && id === 'editor'))
-        .map(id => (
-          <div key={id} className="rvs-viewslot" style={{ display: view === id ? 'flex' : 'none' }}>
-            {panelFor(id)}
-          </div>
-        ))}
+      {[...mounted].map(id => (
+        <div
+          key={id}
+          className="rvs-viewslot"
+          // The editor slot stays MOUNTED even while the split renders the
+          // divider copy below: removing it from this list unmounted the
+          // panel, so leaving the split and re-entering it rebuilt the editor
+          // and dropped its local undo/scroll state. Hidden, not removed —
+          // that is also what keeps two live buffers from fighting.
+          style={{ display: view === id && !(showEditorWithView && id === 'editor') ? 'flex' : 'none' }}
+        >
+          {panelFor(id)}
+        </div>
+      ))}
     </div>
   )
 
@@ -245,25 +250,37 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           {store.gitBusy && <MiniSpinner />}
         </div>
         {store.error !== undefined && <div className="rvs-banner error">{store.error}</div>}
-        {showEditorWithView
-          ? (
-            <>
-              <div className="rvs-pane" style={{ height: `${Math.round(split * 1000) / 10}%`, flex: 'none' }}>{panel}</div>
-              <div
-                className="rvs-vsplit-handle"
-                data-dragging={dragging ? 'true' : 'false'}
-                onPointerDown={onDividerDown}
-                onPointerMove={onDividerMove}
-                onPointerUp={onDividerEnd}
-                onPointerCancel={onDividerEnd}
-                title={t('editor.resizeHint')}
-              />
-              <div className="rvs-pane grow">
-                <EditorPane visible={props.visible} />
-              </div>
-            </>
-          )
-          : <div className="rvs-pane grow">{panel}</div>}
+        {/* The split must not change the TYPE of the element at this position.
+            It used to swap a Fragment for a `div` here, and React reconciles
+            by type — so every flip deleted and remounted the whole subtree,
+            which is the kept-alive panel stack (`panel` below). Consequences
+            were exactly what the keep-alive design exists to prevent: the
+            explorer re-listed over SFTP and lost its expansion, and every
+            xterm was torn down and rebuilt, closing its WebSocket and
+            orphaning a tab whose session id had not arrived yet. Same element,
+            different props, always. */}
+        <div
+          className="rvs-pane"
+          style={showEditorWithView ? { height: `${Math.round(split * 1000) / 10}%`, flex: 'none', minHeight: 0 } : { flex: 1, minHeight: 0 }}
+        >
+          {panel}
+        </div>
+        {showEditorWithView && (
+          <>
+            <div
+              className="rvs-vsplit-handle"
+              data-dragging={dragging ? 'true' : 'false'}
+              onPointerDown={onDividerDown}
+              onPointerMove={onDividerMove}
+              onPointerUp={onDividerEnd}
+              onPointerCancel={onDividerEnd}
+              title={t('editor.resizeHint')}
+            />
+            <div className="rvs-pane grow">
+              <EditorPane visible={props.visible} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

@@ -15,7 +15,7 @@
  */
 import { RangeSetBuilder, type Extension } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin } from '@codemirror/view'
-import { langFromPath, tokenizeDocument, type Token } from './tokenize.ts'
+import { LineTokenCache, langFromPath } from './tokenize.ts'
 
 /** Marks are cached per kind: decorations are immutable and reusable. */
 const markCache = new Map<string, Decoration>()
@@ -41,9 +41,16 @@ export function fallbackHighlight(path: string, isPrimaryColoring: () => boolean
 
   class FallbackHighlighter {
     decorations = Decoration.none
-    /** Per-line tokens for the current document (rebuilt on edit). */
-    private lines: Token[][] = []
-    private sourceDoc: unknown = undefined
+    /**
+     * Incremental line cache (`tokenize.ts`).
+     *
+     * This used to be `tokenizeDocument(doc.toString())` on every keystroke:
+     * a whole-document string plus one array per line, allocated again for
+     * every key, on exactly the large files the fallback exists for (it is
+     * armed when the grammar failed to paint, which is where files are big
+     * and slow). The cache re-tokenizes only the edited region.
+     */
+    private readonly cache = new LineTokenCache(lang)
     private readonly view: EditorView
 
     constructor(view: EditorView) {
@@ -65,12 +72,9 @@ export function fallbackHighlight(path: string, isPrimaryColoring: () => boolean
         return
       }
       const doc = this.view.state.doc
-      if (doc !== this.sourceDoc) {
-        // Re-tokenize only when the text changed; viewport moves reuse this.
-        this.sourceDoc = doc
-        this.lines = tokenizeDocument(doc.toString(), lang)
-      }
-      if (this.lines.length === 0) {
+      this.cache.refresh(doc)
+      const cache = this.cache.tokens
+      if (cache.length === 0) {
         this.decorations = Decoration.none
         return
       }
@@ -78,9 +82,9 @@ export function fallbackHighlight(path: string, isPrimaryColoring: () => boolean
       for (const range of this.view.visibleRanges) {
         const first = doc.lineAt(range.from).number
         const last = doc.lineAt(range.to).number
-        for (let number = first; number <= last && number <= this.lines.length; number += 1) {
+        for (let number = first; number <= last && number <= cache.length; number += 1) {
           const line = doc.line(number)
-          const tokens = this.lines[number - 1] ?? []
+          const tokens = cache[number - 1] ?? []
           let offset = line.from
           for (const token of tokens) {
             const length = token.text.length

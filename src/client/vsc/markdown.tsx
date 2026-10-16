@@ -8,6 +8,18 @@
  */
 import { createElement, type ReactNode } from 'react'
 
+/**
+ * Schemes a remote document's link may use.
+ *
+ * The preview renders UNTRUSTED content: any repository the user browses (or
+ * a file an agent wrote) can contain `[x](javascript:...)`, which matches the
+ * inline pattern below unchanged. React 18 only warns about a `javascript:`
+ * href — it does not strip the attribute — and such a URL executes in the
+ * current document regardless of `target`, i.e. in the DSH GUI's own origin.
+ * Anything not matching is rendered as plain text instead of a link.
+ */
+const SAFE_HREF = /^(?:https?:|mailto:|#|\/(?!\/)|\.{1,2}\/)/i
+
 /** Inline formatting: code spans, links, bold, italic, strike. */
 function inline(text: string, keyBase: string): ReactNode[] {
   const nodes: ReactNode[] = []
@@ -28,7 +40,14 @@ function inline(text: string, keyBase: string): ReactNode[] {
       const split = token.indexOf('](')
       const label = token.slice(1, split)
       const href = token.slice(split + 2, -1)
-      nodes.push(createElement('a', { key, href, target: '_blank', rel: 'noreferrer noopener' }, label))
+      if (SAFE_HREF.test(href)) {
+        nodes.push(createElement('a', { key, href, target: '_blank', rel: 'noreferrer noopener' }, label))
+      } else {
+        // Unsafe scheme (javascript:, data:, vbscript:, …): keep the text, drop
+        // the link. Skipping the token inside a single createElement pair keeps
+        // the label readable but inert.
+        nodes.push(createElement('span', { key, title: href }, label))
+      }
     } else {
       nodes.push(createElement('em', { key }, token.slice(1, -1)))
     }

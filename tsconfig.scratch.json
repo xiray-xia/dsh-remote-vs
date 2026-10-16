@@ -11,5 +11,5 @@
     "noImplicitAny": false,
     "verbatimModuleSyntax": false
   },
-  "include": ["src", ".spike/p2-router.ts"]
+  "include": ["src", ".spike/p2-router.ts", ".spike/markdown-check.ts"]
 }

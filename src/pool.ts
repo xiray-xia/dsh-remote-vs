@@ -30,6 +30,14 @@ const OUTPUT_CAP = 2 * 1024 * 1024
  */
 const SFTP_OP_TIMEOUT_MS = 60_000
 
+/**
+ * No-progress budget for a bulk upload. Deliberately an *idle* timeout rather
+ * than a wall clock: the point is to catch a stream that stopped moving, not
+ * to give up on a large file that is transferring fine on a slow link.
+ * `fastPut` resets it on every chunk via its `step` callback.
+ */
+const UPLOAD_IDLE_MS = 60_000
+
 const TRUNCATED_MARKER = '\n[... truncated: output exceeded 2 MiB ...]\n'
 
 interface Pooled {
@@ -191,14 +199,26 @@ export class RemotePool {
   /** Run one callback with a fresh SFTP session (closed afterwards). */
   async withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
     const conn = await this.acquire(alias)
+    // Hold BEFORE the first await: holding after it leaves a window where the
+    // connection has no hold count and is not yet recorded as in use, so the
+    // idle timer armed by a concurrent release() could evict it mid-call.
     this.hold(alias)
     try {
-      const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
-        conn.sftp((error, session) => {
-          if (error !== undefined && error !== null) reject(error)
-          else resolve(session)
-        })
-      })
+      // The session open needs its own deadline. It used to sit outside the
+      // `withDeadline` below, and ssh2 has no channel-open timeout — a server
+      // that never answers leaves this promise pending forever, which pins
+      // `held` above zero and therefore blocks idle re-arming (the "SSH looks
+      // dead" symptom) while the HTTP request hangs.
+      const sftp = await withDeadline(
+        new Promise<SFTPWrapper>((resolve, reject) => {
+          conn.sftp((error, session) => {
+            if (error !== undefined && error !== null) reject(error)
+            else resolve(session)
+          })
+        }),
+        SFTP_OP_TIMEOUT_MS,
+        `SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`,
+      )
       try {
         return await withDeadline(fn(sftp), SFTP_OP_TIMEOUT_MS, `SFTP operation timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`)
       } finally {
@@ -215,11 +235,37 @@ export class RemotePool {
 
   /** Upload one local file to an absolute remote path (parallel fastPut). */
   async putFile(alias: string, localPath: string, remotePath: string): Promise<void> {
+    // A bulk upload must NOT run under the per-operation deadline above: the
+    // helper tarball is ~45 MB, so a fixed 60 s wall clock aborts a healthy
+    // transfer on a slow link and reports it as a timeout. Progress is
+    // therefore bounded instead — any chunk resets the clock, and a stream
+    // that stops moving for UPLOAD_IDLE_MS is the actual failure.
     await this.withSftp(alias, async (sftp) => {
       await new Promise<void>((resolve, reject) => {
-        sftp.fastPut(localPath, remotePath, (error) => {
-          if (error !== undefined && error !== null) reject(error)
-          else resolve()
+        let settled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const finish = (error?: Error): void => {
+          if (settled) return
+          settled = true
+          if (timer !== undefined) clearTimeout(timer)
+          if (error === undefined) resolve()
+          else reject(error)
+        }
+        const arm = (): void => {
+          if (timer !== undefined) clearTimeout(timer)
+          timer = setTimeout(() => {
+            try {
+              sftp.end()
+            } catch {
+              // Ignore close errors; finish() still rejects.
+            }
+            finish(new Error(`SFTP upload stalled: no progress for ${UPLOAD_IDLE_MS / 1000}s`))
+          }, UPLOAD_IDLE_MS)
+          timer.unref?.()
+        }
+        arm()
+        sftp.fastPut(localPath, remotePath, { step: () => { arm() } }, (error) => {
+          finish(error === undefined || error === null ? undefined : new Error(error.message))
         })
       })
     })

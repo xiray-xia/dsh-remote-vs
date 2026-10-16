@@ -51,9 +51,6 @@
     "dsh": ">=0.2.1-alpha.3 <0.3.0"
   },
   "dsh": {
-    "engines": {
-      "dsh": ">=0.2.0-rc.2"
-    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -172,8 +169,8 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
-    "prepare": "node -e \"const fs=require('node:fs');process.exit(['lib/index.js','lib/client.js'].every(f=>fs.existsSync(f))?0:1)\" || pnpm run build",
-    "verify:lib": "node -e \"const fs=require('node:fs');const need=['index.js','client.js','p2-bridge.js','p2-bridge-refs.js','p2-router-fs.js','p2-router-subprocess.js','p2-router-spill.js','p2-router-refs.js','p2-shell-bash.js'];const miss=need.filter(f=>!fs.existsSync('lib/'+f));console.log(miss.length?'lib/ INCOMPLETE, missing: '+miss.join(', '):'lib/ complete: '+need.length+' entries');process.exit(miss.length?1:0)\"",
+    "prepare": "node scripts/verify-lib.mjs --quiet || pnpm run build",
+    "verify:lib": "node scripts/verify-lib.mjs",
     "bundle": "tsdown",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"

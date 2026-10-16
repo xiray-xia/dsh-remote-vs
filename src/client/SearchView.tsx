@@ -125,6 +125,12 @@ export function SearchView(): ReactNode {
   const run = useCallback(async (text: string, activeMode: Mode, dir: string, opts: ContentOptions): Promise<void> => {
     const trimmed = text.trim()
     if (trimmed === '' || alias === '' || dir === '') {
+      // Invalidate any in-flight request BEFORE bailing out: otherwise the
+      // sequence counter keeps its old value, a late response still matches
+      // its own ticket, and results for a query the user already cleared (or
+      // for the previous workspace) get rendered into the empty panel.
+      seq.current += 1
+      setBusy(false)
       setNameHits([])
       setContentHits([])
       setRan(false)
@@ -312,7 +318,7 @@ export function SearchView(): ReactNode {
                 type="button"
                 className="rvs-hit"
                 title={hit.path}
-                onClick={() => openHit(`${root.replace(/\/+$/, '')}/${hit.path}`)}
+                onClick={() => openHit(`${(effectiveScope === '' ? root : effectiveScope).replace(/\/+$/, '')}/${hit.path}`)}
               >
                 <span className="rvs-node-icon">
                   {hit.isDir ? <span style={{ color: 'var(--rvs-fg3)' }}>▸</span> : <FileIcon path={hit.path} size={14} />}
