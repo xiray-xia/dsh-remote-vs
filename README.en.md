@@ -162,7 +162,8 @@ into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4
 `.spike/` (gitignored) holds live-host verification scripts plus the local self-checks:
 `p2-router.ts` main regression (real remote + real Cordis + real router classes) and probes like
 `grep-probe.mjs` (build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
-`fallback-check.mjs` / `client-load-check.mjs` which need no host at all (see "Development").
+`fallback-check.mjs` / `client-load-check.mjs` / `tool-schema-check.mjs` which need no host at all
+(see "Development").
 
 ## Remote workbench (VS Code style)
 
@@ -265,6 +266,7 @@ Self-checks (no host, no DSH, a few seconds each):
 
 ```sh
 node .spike/client-load-check.mjs # really evaluates the client modules: load-time errors tsc/bundler/other harnesses miss
+node .spike/tool-schema-check.mjs # all 5 agent tools: run execute, then validate the result with the RUNTIME's own validator
 node .spike/model-check.mjs      # 55 checks: real git output → parsers, diff model, hunk patches, class↔CSS contract
 node .spike/reveal-check.mjs     # 5 checks: jump target, landing highlight, repeat jump in one editor
 node .spike/fallback-check.mjs   # 12 checks: the fallback colorer colours java/cpp/shell in a real DOM

@@ -207,6 +207,14 @@ export function remoteLsTool(deps: RemoteToolsDeps): ReturnType<typeof defineToo
                 isDir: { type: 'boolean', required: true },
                 size: { type: 'integer', required: true },
                 mtime: { type: 'integer', required: true },
+                // `mode` is part of `RemoteFileEntry` and the implementation has
+                // always returned it, but this schema did not declare it — and
+                // the schema sets `additionalProperties: false`, so the tool
+                // failed validation on EVERY call since the first release:
+                //   "value.entries[0].mode" is not a declared property
+                // A declared output schema has to describe what the tool really
+                // returns; `.spike/tool-schema-check.mjs` now enforces that.
+                mode: { type: 'integer', required: true },
                 isSymlink: { type: 'boolean', required: true },
               },
             },
