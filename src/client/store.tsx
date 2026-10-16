@@ -266,9 +266,6 @@ export interface ExplorerValue {
 const info = (text: string): void => toast(text, false)
 const fail = (text: string): void => toast(text, true)
 
-const listeners = new Set<() => void>()
-let snapshot: ExplorerValue = build()
-
 /**
  * The derived git views for one status value, memoised on that value's identity.
  *
@@ -280,6 +277,12 @@ let snapshot: ExplorerValue = build()
  *
  * The status object is replaced only when git actually answers, so caching on
  * its identity is exactly the right key: same status in, same two objects out.
+ *
+ * DECLARATION ORDER IS LOAD-BEARING: this block must stay ABOVE the
+ * `snapshot = build()` line below. `build()` is invoked during module
+ * evaluation, so a `let` declared after that call is still in its temporal dead
+ * zone and the module throws "Cannot access 'derivedViews' before
+ * initialization" — which neither `tsc` nor the bundler can see.
  */
 let derivedStatus: GitStatusDetail | undefined
 let derivedViews: { buckets: StatusBuckets; marks: TreeMarks } | undefined
@@ -292,6 +295,9 @@ function deriveViews(status: GitStatusDetail): { buckets: StatusBuckets; marks: 
   }
   return derivedViews
 }
+
+const listeners = new Set<() => void>()
+let snapshot: ExplorerValue = build()
 
 function build(): ExplorerValue {
   const workspace = state.workspaces.find(item => item.id === state.workspaceId) ?? state.workspaces[0]
