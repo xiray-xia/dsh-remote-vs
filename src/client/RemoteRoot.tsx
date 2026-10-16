@@ -188,7 +188,14 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           </div>
         )
       case 'editor':
-        return <EditorPane visible={props.visible && view === 'editor'} />
+        // The sidebar editor is the FALLBACK surface, used only when the host
+        // has no `conversation.view` slot to mount the editor in (index.tsx
+        // stays on 'sidebar' then). It must not render while the centre surface
+        // owns the editor: both read the same store, so two live editors for one
+        // tab fight over the scroll position and the hidden one — sitting at
+        // scrollTop 0 — wins, which is exactly why a tab switch kept snapping
+        // back to the top of the file.
+        return editorInSidebar ? <EditorPane visible={props.visible && view === 'editor'} /> : null
       default:
         return <RemoteExplorer showHidden={showHidden} onToggleHidden={() => setShowHidden(v => !v)} />
     }
