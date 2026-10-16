@@ -738,11 +738,6 @@ export function IconButton(props: {
   )
 }
 
-/** Inline style helper for token-run spans. */
-export function tokenClass(kind: string): string {
-  return `rvs-t-${kind}`
-}
-
 /** Spinner used in busy buttons. */
 export function MiniSpinner(): ReactNode {
   return (
@@ -754,6 +749,3 @@ export function MiniSpinner(): ReactNode {
     </svg>
   )
 }
-
-/** Shared inline style for a code-ish row. */
-export const monoStyle: CSSProperties = { fontFamily: 'var(--rvs-mono)' }

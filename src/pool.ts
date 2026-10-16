@@ -137,6 +137,18 @@ export class RemotePool {
             finish({ success: false, exitCode: null, timedOut: false, stdout: '', stderr: '', error: execError.message })
             return
           }
+          // The timeout may already have fired while the channel was opening
+          // (ssh2 offers no channel-open timeout). `stream` was still undefined
+          // then, so nothing closed this channel and it kept a session slot on
+          // the server until the command finished on its own.
+          if (settled) {
+            try {
+              channel.close()
+            } catch {
+              // Already gone.
+            }
+            return
+          }
           stream = channel
           channel.on('close', (code: number | null) => {
             finish({ success: code === 0, exitCode: code, timedOut: false, stdout: out, stderr: err })

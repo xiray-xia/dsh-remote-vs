@@ -190,11 +190,3 @@ export function buildTreeMarks(detail: GitStatusDetail): TreeMarks {
 
   return { files, dirs, ignored, ignoredDirs }
 }
-
-/** Relative path of `full` under `root` ('' when outside). */
-export function relativeTo(root: string, full: string): string {
-  const base = root.replace(/\/+$/, '')
-  if (full === base) return ''
-  if (full.startsWith(`${base}/`)) return full.slice(base.length + 1)
-  return ''
-}

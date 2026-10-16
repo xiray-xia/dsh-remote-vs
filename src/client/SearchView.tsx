@@ -167,7 +167,13 @@ export function SearchView(): ReactNode {
           setLinesClipped(false)
           setError(result.stderr.trim())
         } else {
-          const parsed = parseContentHits(result.stdout, DEFAULT_CONTENT_OPTIONS.maxResults)
+          // Pass the same caps the command above was built with, so the
+          // "line clipped" flag reflects the real `cut` width.
+          const parsed = parseContentHits(
+            result.stdout,
+            DEFAULT_CONTENT_OPTIONS.maxResults,
+            DEFAULT_CONTENT_OPTIONS.maxLineChars,
+          )
           setContentHits(parsed.hits)
           setContentTruncated(parsed.truncated)
           setLinesClipped(parsed.linesClipped)

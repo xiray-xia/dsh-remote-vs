@@ -3,8 +3,10 @@
  * layout ported from the previous Git view), plus click-to-expand changed
  * files and a per-file diff of that commit.
  *
- * Loading is paged: the first page renders immediately, and scrolling to the
- * bottom pulls the next batch so a deep repository stays responsive.
+ * Loading is a SINGLE capped call (`api.git.log(..., GIT_LOG_MAX)`); a deep
+ * repository shows the newest GIT_LOG_MAX commits and is filtered client-side.
+ * The docstring here used to promise scroll-triggered paging that does not
+ * exist, which is worse than no comment: a reader trusts it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
@@ -29,6 +31,22 @@ const ROW_H = 22
 const LANE_W = 13
 const PAD_X = 9
 const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79c0ff', '#7ee787', '#ffa657']
+
+/**
+ * Ref badge decoration for one `%D` entry. Extracted from a pair of nested
+ * ternaries (forbidden by this project's review checklist) that were doing two
+ * different jobs — CSS modifier and display text — inside one JSX expression.
+ */
+function refBadgeClass(ref: string): string {
+  if (ref.startsWith('HEAD ->')) return ' head'
+  if (ref.startsWith('tag:')) return ' tag'
+  return ''
+}
+
+function refBadgeLabel(ref: string): string {
+  if (ref.startsWith('HEAD -> ')) return ref.slice('HEAD -> '.length)
+  return ref.replace(/^tag: /, '')
+}
 
 interface GraphRow {
   commit: GitCommit
@@ -157,7 +175,6 @@ export function HistoryPanel(): ReactNode {
   }, [commits, filter])
 
   const graph = useMemo(() => layoutLanes(visible), [visible])
-  const listRef = useRef<HTMLDivElement>(null)
 
   const toggleCommit = async (hash: string): Promise<void> => {
     if (expanded === hash) {
@@ -196,7 +213,7 @@ export function HistoryPanel(): ReactNode {
         />
       </div>
       {error !== undefined && <div className="rvs-banner error">{error}</div>}
-      <div className="rvs-scroll" ref={listRef}>
+      <div className="rvs-scroll">
         {loading && commits.length === 0 && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
         {!loading && commits.length === 0 && error === undefined && <div className="rvs-empty">{t('scm.logEmpty')}</div>}
         {graph.rows.map((row, index) => {
@@ -263,9 +280,9 @@ export function HistoryPanel(): ReactNode {
                     {commit.refs.slice(0, 2).map(ref => (
                       <span
                         key={ref}
-                        className={`rvs-ref-badge${ref.startsWith('HEAD ->') ? ' head' : ref.startsWith('tag:') ? ' tag' : ''}`}
+                        className={`rvs-ref-badge${refBadgeClass(ref)}`}
                       >
-                        {ref.startsWith('HEAD -> ') ? ref.slice('HEAD -> '.length) : ref.replace(/^tag: /, '')}
+                        {refBadgeLabel(ref)}
                       </span>
                     ))}
                   </span>

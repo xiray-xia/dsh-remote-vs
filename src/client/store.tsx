@@ -345,11 +345,6 @@ export function useExplorer(): ExplorerValue {
   )
 }
 
-/** Read the store outside React (callbacks, effects). */
-export function explorerStore(): ExplorerValue {
-  return snapshot
-}
-
 /** The repo-relative path of an absolute remote path ('' when outside). */
 export function repoRelative(repoRoot: string | undefined, fullPath: string): string {
   if (repoRoot === undefined) return ''

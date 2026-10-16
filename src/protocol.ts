@@ -298,7 +298,7 @@ export interface GitStash {
 
 /** One file row of a commit (`--name-status`). */
 export interface GitCommitFile {
-  /** Single letter, or `R100`-style for renames. */
+  /** Single letter (`R`/`C` for renames/copies); the similarity score is dropped. */
   status: string
   path: string
   origPath?: string

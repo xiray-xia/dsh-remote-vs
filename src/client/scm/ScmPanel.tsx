@@ -742,24 +742,3 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
     </div>
   )
 }
-
-/** Recent commits strip used by the history view header. */
-export function summarize(entries: ChangeEntry[]): { staged: number; unstaged: number } {
-  let stagedCount = 0
-  let unstagedCount = 0
-  for (const entry of entries) {
-    if (entry.staged) stagedCount += 1
-    else unstagedCount += 1
-  }
-  return { staged: stagedCount, unstaged: unstagedCount }
-}
-
-/** Kept for callers that need the language of a change row. */
-export function changeLang(lang: 'zh' | 'en'): string {
-  return lang === 'zh' ? 'zh' : 'en'
-}
-
-/** Unused-but-cheap memo helper: the change list is stable across renders. */
-export function useChangeList(entries: ChangeEntry[]): ChangeEntry[] {
-  return useMemo(() => entries, [entries])
-}

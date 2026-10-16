@@ -42,8 +42,6 @@ export const TOKEN_CLASSES = [
   'rvs-ck-invalid',
 ] as const
 
-export type TokenClass = typeof TOKEN_CLASSES[number]
-
 /** Tag → fixed class mapping. Colors live in vsc.css, not here. */
 export function vscodeHighlightStyle(): HighlightStyle {
   return HighlightStyle.define([
@@ -80,7 +78,6 @@ export interface Palette {
   activeGutter: string
   selection: string
   cursor: string
-  lineHighlight: string
 }
 
 export const DARK: Palette = {
@@ -92,7 +89,6 @@ export const DARK: Palette = {
   activeGutter: 'rgba(255, 255, 255, .08)',
   selection: '#264f78',
   cursor: '#aeafad',
-  lineHighlight: '#2a2d2e',
 }
 
 export const LIGHT: Palette = {
@@ -104,7 +100,6 @@ export const LIGHT: Palette = {
   activeGutter: 'rgba(0, 0, 0, .06)',
   selection: '#add6ff',
   cursor: '#000000',
-  lineHighlight: '#f5f5f5',
 }
 
 export function paletteFor(dark: boolean): Palette {

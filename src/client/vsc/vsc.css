@@ -680,13 +680,6 @@ body[data-ds-dark-theme] .rvs-root {
   color: #fff;
 }
 
-.rvs-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-}
-
 .rvs-input {
   flex: 1;
   min-width: 0;
@@ -863,17 +856,17 @@ body[data-ds-dark-theme] .rvs-root {
   display: none !important;
 }
 
-/* Find-match marks. Painted by our own StateField, not by
-   `@codemirror/search`'s highlighter, which only decorates while ITS panel is
-   mounted — and that panel is deliberately never mounted here. */
+/* Find-match marks. Painted by our own StateField (`findMatchHighlight`), and
+   deliberately the SAME colours as the `.cm-searchMatch` rules below so the
+   two paths cannot drift apart. */
 .rvs-find-match {
-  background: rgba(234, 92, 0, .28);
+  background-color: rgba(226, 183, 20, .30);
+  outline: 1px solid rgba(226, 183, 20, .55);
   border-radius: 2px;
 }
 
 .rvs-find-match.current {
-  background: rgba(255, 152, 0, .55);
-  outline: 1px solid rgba(255, 152, 0, .9);
+  background-color: rgba(226, 183, 20, .48);
 }
 
 /* ------------------------------------------------------- preview surfaces */
@@ -1145,42 +1138,6 @@ body[data-ds-dark-theme] .rvs-root {
   border-radius: 4px;
 }
 
-.rvs-diff-row {
-  display: flex;
-  align-items: stretch;
-  min-width: max-content;
-}
-
-.rvs-cell {
-  display: flex;
-  align-items: flex-start;
-  min-width: 0;
-  white-space: pre;
-}
-
-.rvs-cell.left {
-  flex: 1 1 50%;
-  border-right: 1px solid var(--rvs-border);
-}
-
-.rvs-cell.right {
-  flex: 1 1 50%;
-}
-
-.rvs-cell.solo {
-  flex: 1 1 100%;
-}
-
-.rvs-cell-text {
-  flex: 1;
-  min-width: 0;
-  padding: 0 8px 0 2px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
 .rvs-num {
   flex: none;
   display: inline-block;
@@ -1197,7 +1154,6 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-row-del .rvs-dline-text,
-.rvs-row-del .rvs-cell-text,
 .rvs-row-del .rvs-dline-num,
 .rvs-row-del .rvs-num {
   color: #f14c4c;
@@ -1208,7 +1164,6 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-row-add .rvs-dline-text,
-.rvs-row-add .rvs-cell-text,
 .rvs-row-add .rvs-dline-num,
 .rvs-row-add .rvs-num {
   color: #4ec9b0;
@@ -1609,16 +1564,6 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
   white-space: pre-wrap;
 }
 
-.rvs-detail-body {
-  margin: 6px 0;
-  max-height: 160px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--rvs-fg2);
-  user-select: text;
-}
-
 .rvs-file-row {
   display: flex;
   align-items: center;
@@ -1875,6 +1820,31 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
+}
+
+/* Wrapper that pairs a tab with its close button. The two are siblings so the
+   ✕ can be a real focusable <button> (a nested one is invalid HTML and left
+   keyboard users no way to close a tab). */
+.rvs-term-tabwrap {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.rvs-term-tabwrap .rvs-term-tab {
+  padding-right: 22px;
+}
+
+.rvs-term-tabwrap .rvs-etab-close {
+  position: absolute;
+  right: 3px;
+  opacity: 0;
+}
+
+.rvs-term-tabwrap:hover .rvs-etab-close,
+.rvs-term-tabwrap:focus-within .rvs-etab-close {
+  opacity: .8;
 }
 
 .rvs-term-tab:hover {

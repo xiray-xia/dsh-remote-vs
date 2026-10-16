@@ -16,9 +16,15 @@ import { EditorView } from '@codemirror/view'
 import { isDarkScheme, subscribeColorScheme } from '../theme.ts'
 import { paletteFor, type Palette } from './editor-palette.ts'
 
-/** The chrome (background, gutters, selection) for one palette. */
-function chrome(p: Palette): Extension {
-  const dark = p.bg === '#1e1e1e'
+/**
+ * The chrome (background, gutters, selection) for one palette.
+ *
+ * `dark` is passed in rather than inferred from `p.bg === '#1e1e1e'`: deriving
+ * it from a colour literal meant that editing the dark background silently
+ * flipped the gutter border and tooltip colours to their light values, with no
+ * error anywhere.
+ */
+function chrome(p: Palette, dark: boolean): Extension {
   return EditorView.theme({
     '&': {
       backgroundColor: p.bg,
@@ -61,7 +67,7 @@ function chrome(p: Palette): Extension {
  * and a scheme flip cannot drop it.
  */
 export function vscodeEditorTheme(dark: boolean): Extension {
-  return chrome(paletteFor(dark))
+  return chrome(paletteFor(dark), dark)
 }
 
 /** Compartment holding the theme, so the scheme can flip at runtime. */
