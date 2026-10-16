@@ -719,24 +719,48 @@ body[data-ds-dark-theme] .rvs-root {
 /* ------------------------------------------------- conversation-view mount */
 
 /**
- * The center surface (RemoteEditorView) had NO rule at all, so it fell back to
- * `display: block; height: auto` inside an unknown host slot. `.rvs-root`'s
- * `height: 100%` then resolved against an auto-height parent: `.rvs-column`
- * grew past the viewport, the host's slot became the scroll container, and
- * scrolling the code carried the tab strip and the file info bar off the top.
- * Pinning the height here makes the only scroll container the editor itself
- * (`.cm-scroller`), which is what keeps the two header rows in place.
+ * Bound the center surface to the height the host gave the slot.
  *
- * `height: 100%` is deliberate rather than `flex: 1`: this element is the
- * outermost node in *someone else's* slot, so it must work whether the host
- * wraps it in a flex column or a plain block. `min-height: 0` allows shrinking
- * below the content when the host does make it a flex item.
+ * `flex: 1 1 0` is the load-bearing declaration, and BOTH halves of it matter.
+ * The host's own slot rules are:
+ *
+ *   .wSkVaW_viewArea              { flex: 1; min-height: 0; overflow: hidden }
+ *   [data-phase=active] .viewArea { flex: 1 0 auto; min-height: auto }
+ *   .wSkVaW_root                  { height: 100%; position: relative }
+ *
+ * While a conversation is active the slot's flex-basis is `auto`, so the slot's
+ * height is driven by its child's INTRINSIC size. A full-height editor then
+ * pushed it to 5510px for a 300-line file, the outer scroller took over, and
+ * the tab strip and file info bar scrolled off the top with the code.
+ *
+ * `flex-basis: 0` breaks that cycle: the item stops contributing its content
+ * height, so the slot stays the size the host intended and `.cm-scroller`
+ * becomes the only scroller. Measured in the fixture (.spike/layout-fixture.html,
+ * which mirrors the slot rules above) — only the bottom row fits:
+ *
+ *   flex: 1 1 0   + min-height: 0  ->  736px  OK
+ *   flex: 1 1 auto (i.e. `flex: 1`) -> 5510px  broken
+ *   height: 0 + min-height: 100%   -> 5510px  broken
+ *   max-height: 100%               -> 5510px  broken
+ *   height: 100vh                  -> 5510px  broken
+ *
+ * `height: 100%` is deliberately NOT set here any more. It resolves to `auto`
+ * against a slot whose height is not definite — it reads like the fix but
+ * measures as a no-op, which is how this regressed once already.
+ *
+ * NOT `position: absolute` either — that was another failed attempt: `.viewArea`
+ * is not itself positioned, so `inset: 0` escaped to the host's `.wSkVaW_root`
+ * (which is `position: relative`) and the plugin's global bar floated on top of
+ * the host's 对话 / 轨迹 / 远程编辑器 tab row.
+ *
+ * The sidebar's `.rvs-viewslot` is deliberately not covered: it has a bounding
+ * parent and this bug is specific to the conversation slot's `min-height: auto`
+ * phase.
  */
 .rvs-center {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
