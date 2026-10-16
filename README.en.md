@@ -47,13 +47,13 @@ open Settings → Remote hosts to configure.
 | Explorer | Lazy tree + expand/collapse + hidden-files toggle; context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference; git status colours and folder roll-up marks |
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line |
 | Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
-| Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers; switch between "before / after", and the after side is editable and savable |
+| Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers, **rendering only the rows inside the viewport** (a 3000-line file goes from 9000 row containers to ~174, with exactly the same scroll range as a full render); switch between "before / after", and the after side is editable and savable |
 | Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
 | Multi-tab editor | Open/save/reload, dirty marks, several files at once; image preview, Markdown/HTML preview (source vs preview) |
 | Syntax highlighting | VS Code **Dark+ / Light+** palettes; covers java/aidl/smali, c/c++, go, rust, js/ts, json, py, yaml, xml, html/css, md, sh, properties/rc/toml, diff …; a **fallback colorer** takes over when no grammar matches, so a file is never left monochrome. Honest caveat: kotlin / gradle / smali are coloured by the Java grammar (no dedicated package), which gets keywords, strings and comments right but does not split their own syntax |
 | Find | In-editor `Ctrl+F` (`Aa` / `ab_` / `.*`, `3/17` count, ↑↓, `F3`/`Shift+F3`, `Esc`); **selected text is carried into the box by `Ctrl+F`**; the widget is pinned to the top-right and does not scroll away |
 | Jump | Clicking a search hit opens the file at that line, centres it and **lights the landing line** (fades after ~2.6s); repeat jumps in the same file work |
-| Terminals | Tabbed multi-terminal (`+` to create, `✕`/middle-click to close behind a confirm), across hosts; session ids are persisted so a page refresh reattaches to the running shells |
+| Terminals | Tabbed multi-terminal (`+` to create, `✕`/middle-click to close behind a confirm), across hosts; session ids are persisted so a page refresh reattaches to the running shells, and a session is kept for **10 minutes after its last socket goes away** (enough for a refresh or a browser-tab switch) before the remote shell is closed |
 | Workspaces | Binding list + routing-mode dropdown + the dual-mode (local / remote) new-workspace wizard |
 
 ### Hosts and transport
@@ -62,9 +62,11 @@ open Settings → Remote hosts to configure.
 | --- | --- |
 | Host management | CRUD + connectivity test; key / password auth; config in `$DSH_HOME/dsh-remote.json` (0600), independent from `dsh-ssh.json` |
 | Key bootstrap | One click generates a dedicated keypair on password hosts and deploys `authorized_keys`, key auth from then on |
-| Push pipeline | Remote arch/OS probe → version compare → skip-if-same / else push; the executable channel pushes a self-built helper |
-| Remote files | SFTP browse / read / write / create / delete / rename (0-byte files and large trees hardened — see "Known limits") |
-| Remote terminal | ssh2 PTY + WebSocket, xterm rendering (copy-paste/theme-follow/reconnect-on-refresh) |
+| Push pipeline | Remote arch/OS probe → version compare → skip-if-same / else push; the executable channel pushes a self-built helper. A failed deploy no longer retries on every remote file operation: it backs off from **5 seconds up to 5 minutes**, and the Settings "Push" button forces an immediate retry |
+| Remote files | SFTP browse / read / write / create / delete / rename. Boundaries hardened: 0-byte files no longer deadlock, and every SFTP operation times out at 60s and releases its channel; **a single directory listing is capped at 20000 entries** (the first 20000 after sorting — directories first, then names — announced in the host log; the protocol carries no "truncated" field, so the UI has no marker) |
+| Remote terminal | ssh2 PTY + WebSocket, xterm rendering (copy-paste/theme-follow/reconnect-on-refresh); **a reattach only takes over, it does not resize** (a page reload no longer shrinks a running shell to 80×24); an output backlog applies real backpressure to the far end; **frames are capped at 1 MiB**, and pastes past 64 Ki characters are chunked on code points by the client instead of dropping the connection |
+| Concurrent channels | At most **6** remote channels per host at a time (no longer colliding with the far end's sshd `MaxSessions`); the 7th queues for up to **30 seconds** and then fails with `remote host <alias> is busy` instead of piling on connections |
+| Timeouts and process cleanup | exec runs in its own session (`setsid --wait`); on timeout it sends TERM and **escalates to KILL after 3 seconds**, reaping the child processes with it; a host without `setsid --wait` is detected by a one-shot probe and falls back to the old behaviour, with a host-log line saying the timed-out remote command may still be running |
 | Git graph | Remote repo status + branches + SVG commit graph + commit details (exec + frontend parsing, zero Host additions) |
 | Import | One-click import from `~/.ssh/config` and from an existing `dsh-ssh.json` (read once, no coupling) |
 
@@ -160,7 +162,7 @@ into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4
 `.spike/` (gitignored) holds live-host verification scripts plus the local self-checks:
 `p2-router.ts` main regression (real remote + real Cordis + real router classes) and probes like
 `grep-probe.mjs` (build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
-`fallback-check.mjs` which need no host at all (see "Development").
+`fallback-check.mjs` / `client-load-check.mjs` which need no host at all (see "Development").
 
 ## Remote workbench (VS Code style)
 
@@ -169,7 +171,10 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
 "remote editor" tab** (next to 对话/轨迹, giving the code area full width).
 
 - **Activity rail**: explorer / search / source control / commit graph / editor / terminal / workspaces.
-  A panel stays mounted after its first visit, so switching back neither refetches nor flashes.
+  A panel stays mounted after its first visit, so switching back neither refetches nor flashes. While it is
+  hidden it does **no remote work** (directory listings, the SCM stash/branch/remote queries and editor
+  image reads all wait for the next foreground pass), and visibility is MEASURED on the plugin root
+  (IntersectionObserver) instead of being taken from a host prop.
 - **Editor**: tabs plus an info bar (path, language, **build stamp**, `tok N` coloured-token count,
   saved state, reload/save). Those three marks exist for troubleshooting: the stamp answers "is the
   browser running the bundle I just built?", `tok 0` answers "did a grammar match this extension?".
@@ -178,7 +183,10 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
   a selection is carried into it by `Ctrl+F`; a jump from the search results centres the line and
   lights it up.
 - **Terminals**: tabbed sessions with the session id persisted one by one, so a page refresh reattaches
-  to the shells that are still running.
+  to the shells that are still running; **a reattach only takes over, it does not resize** (a live shell is
+  never shrunk to 80×24 — the true size comes from the one tab that can measure itself, sent as a `resize`
+  frame); a session is kept for **10 minutes** after its last socket goes away before the remote shell is
+  closed (it used to be kept forever, so closing the browser left the shell holding an sshd session slot).
 - **Known limits (stated honestly)**:
   - There is **no public API to select the "remote editor" view**; the plugin can only click the shell's
     own tab by its label and toasts a hint when that fails (`revealEditor()`).
@@ -186,6 +194,12 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
     (a deliberate performance trade-off).
   - Opening a file is capped at 8MiB (official helper constant); beyond that it is shown read-only.
   - The find widget floats above the code (like VS Code) and takes no layout space.
+  - Output backpressure is **per shell**: one tab that cannot keep up pauses every tab attached to that
+    shell — a deliberate trade, preferring to hold the remote command back on behalf of the slowest
+    consumer over letting host memory grow without bound.
+  - A directory listing past 20000 entries is truncated, and since the protocol has no "truncated" field
+    the UI shows **no marker at all** — only the host log line
+    `listing <path> on <alias> shows 20000 of N entries`.
 
 ## P2 transparent remote execution (Windows native)
 
@@ -250,6 +264,7 @@ How to tell:
 Self-checks (no host, no DSH, a few seconds each):
 
 ```sh
+node .spike/client-load-check.mjs # really evaluates the client modules: load-time errors tsc/bundler/other harnesses miss
 node .spike/model-check.mjs      # 55 checks: real git output → parsers, diff model, hunk patches, class↔CSS contract
 node .spike/reveal-check.mjs     # 5 checks: jump target, landing highlight, repeat jump in one editor
 node .spike/fallback-check.mjs   # 12 checks: the fallback colorer colours java/cpp/shell in a real DOM
@@ -275,8 +290,10 @@ tsc, to the bundler and to jsdom — this fixture is the only place they reprodu
 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/markdown-check.js`.
 
 > `.spike/` is git-ignored, so these checks are local only and run in no CI. **Run them before quoting any
-> number** rather than copying a historical figure out of a commit message — those drifted across two
-> contradictory values (48 / 55) before this note existed.
+> number** rather than copying a figure out of any file — one `model-check` count drifted across the README,
+> the local maintenance doc and the review reports as 44 / 48 / 55, while the harness actually prints 55/55
+> (its source holds 57 `check(` call sites, 2 of them inside loops and reachable only on failure, which is
+> exactly why "57 call sites" and "55 checks run" differ by 2).
 
 The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
 Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. The mandatory steps after a host-half change are `pnpm run verify:lib` plus the load self-check.
