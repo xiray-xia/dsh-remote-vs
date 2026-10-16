@@ -7,7 +7,7 @@
  * every code pane is the same CodeMirror buffer with Ctrl+S wired to the
  * remote write route.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { sameLocalDir } from './composer.ts'
@@ -124,22 +124,22 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    *
    * `CodeEditor` is keyed by tab id, so switching files remounts it — a fresh
    * buffer rather than the previous file's undo stack, which is what we want,
-   * but it also reset the scroll and the caret. The state is captured while
-   * the tab is still on screen (below) rather than inside the switch handler,
-   * because `CodeEditor` owns the view and the snapshot has to be taken before
-   * React unmounts it.
+   * but it also reset the scroll and the caret.
+   *
+   * The editor REPORTS its position (see `CodeEditor`'s `onViewState`) instead
+   * of this component reading it back through `editorRef`, because the ref is
+   * already `null` by the time any cleanup here could run: React clears a
+   * child's ref before running the parent's cleanup. Both earlier attempts
+   * failed on exactly that — a `useEffect` keyed on the active tab captured the
+   * INCOMING tab's editor (always scrollTop 0), and a `useLayoutEffect` cleanup
+   * found `editorRef.current === null`. `.spike/tabswitch-check.mjs` reproduces
+   * both failures and pins the working wiring.
    */
   const viewStates = useRef(new Map<string, CodeEditorViewState>())
-  const previousTabId = useRef<string | undefined>(undefined)
-
-  useEffect(() => {
-    const leaving = previousTabId.current
-    if (leaving !== undefined && leaving !== store.activeTabId) {
-      const state = editorRef.current?.getViewState()
-      if (state !== undefined) viewStates.current.set(leaving, state)
-    }
-    previousTabId.current = store.activeTabId
-  }, [store.activeTabId])
+  const activeTabId = activeTab?.id
+  const rememberViewState = useCallback((state: CodeEditorViewState): void => {
+    if (activeTabId !== undefined) viewStates.current.set(activeTabId, state)
+  }, [activeTabId])
 
   /**
    * True only while the CodeMirror instance for the active tab is mounted.
@@ -326,6 +326,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                         ? {}
                         : { viewState: viewStates.current.get(activeTab.id) })}
                       onTokens={setTokenCount}
+                      onViewState={rememberViewState}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}
                     />

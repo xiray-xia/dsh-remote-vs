@@ -106,6 +106,18 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   /** Reports how many token spans the grammar produced (diagnostics). */
   onTokens?: (count: number) => void
   /**
+   * Reports this editor's scroll + caret as they change, and once more when it
+   * unmounts.
+   *
+   * The editor reports it, rather than the parent asking through the ref,
+   * because the parent's ref is already `null` by the time its layout-effect
+   * cleanup runs — React clears a child's ref before running the parent's
+   * cleanup (measured: `.spike/tabswitch-debug.mjs` printed
+   * `refTouches=null captured=undefined`). Only this component still holds the
+   * `EditorView` at that moment.
+   */
+  onViewState?: (state: CodeEditorViewState) => void
+  /**
    * Scroll + caret to restore after this instance mounts.
    *
    * Read ONCE on mount (through a ref, so a later change to the prop cannot
@@ -234,6 +246,43 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       window.clearInterval(timer)
     }
   }, [findOpen])
+
+  /**
+   * Report SCROLL as it moves, so a tab switch can come back to it.
+   *
+   * Throttled to an animation frame: a scroll fires per wheel tick and the
+   * consumer keeps one snapshot per tab, so coalescing is free. The selection
+   * half is reported by the update listener in the mount extensions (CodeMirror
+   * is the only thing that sees a caret move).
+   */
+  useEffect(() => {
+    const report = (): void => {
+      const view = viewRef.current
+      const handler = propsRef.current.onViewState
+      if (view === undefined || handler === undefined) return
+      handler({
+        scrollTop: view.scrollDOM.scrollTop,
+        scrollLeft: view.scrollDOM.scrollLeft,
+        cursor: view.state.selection.main.head,
+        ranges: view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
+      })
+    }
+    let frame: number | undefined
+    const schedule = (): void => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        report()
+      })
+    }
+    const scroller = viewRef.current?.scrollDOM
+    scroller?.addEventListener('scroll', schedule)
+    schedule()
+    return () => {
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+      scroller?.removeEventListener('scroll', schedule)
+    }
+  }, [props.onViewState])
 
   useImperativeHandle(ref, () => ({
     getContent: () => viewRef.current?.state.doc.toString() ?? savedRef.current,
@@ -423,6 +472,24 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           rect.top - window.scrollY,
         )
       }),
+      /**
+       * Report selection changes upward (scroll is reported by a DOM listener,
+       * which this complements): the caret is half of what a tab switch has to
+       * restore, and CodeMirror exposes selection changes only through here.
+       */
+      EditorView.updateListener.of((update) => {
+        if (!update.selectionSet) return
+        const handler = propsRef.current.onViewState
+        if (handler === undefined) return
+        const state = viewRef.current
+        if (state === undefined) return
+        handler({
+          scrollTop: state.scrollDOM.scrollTop,
+          scrollLeft: state.scrollDOM.scrollLeft,
+          cursor: state.state.selection.main.head,
+          ranges: state.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
+        })
+      }),
     ]
     const view = new EditorView({
       doc: propsRef.current.initial,
@@ -529,6 +596,23 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       window.clearTimeout(warmTimer)
       popupRef.current.hide()
       unwatchTheme()
+      /**
+       * Last report BEFORE the view goes away.
+       *
+       * This is the only reliable place to capture the position: the parent's
+       * ref is already null by the time its own cleanup runs (React clears a
+       * child's ref first), so the parent cannot ask for it. Also covers a tab
+       * closed while it was the active one.
+       */
+      const handler = propsRef.current.onViewState
+      if (handler !== undefined) {
+        handler({
+          scrollTop: view.scrollDOM.scrollTop,
+          scrollLeft: view.scrollDOM.scrollLeft,
+          cursor: view.state.selection.main.head,
+          ranges: view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
+        })
+      }
       view.destroy()
       viewRef.current = undefined
     }
