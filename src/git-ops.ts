@@ -34,9 +34,35 @@ function git(workdir: string): string {
   return `${GIT_ENV} git --no-pager -C ${shQuote(assertRemoteDir(workdir))} -c core.quotepath=false`
 }
 
-/** Pipe a command through a byte cap so one huge repo cannot flood the wire. */
+/**
+ * Cap a READ-ONLY command's stdout so one huge repo cannot flood the wire.
+ *
+ * Never use this for a command whose exit status is the answer: a shell
+ * pipeline reports the status of its LAST command, so `git push | head`
+ * returns head's 0 and a rejected push reads as a success. Mutating verbs
+ * take `statusOk()` instead; the caller reads `result.success` and would
+ * otherwise never learn the command failed.
+ */
 function capped(command: string, bytes: number = GIT_CAP): string {
   return `${command} | head -c ${bytes}`
+}
+
+/**
+ * Cap a MUTATING command's stdout while keeping the command's own exit
+ * status.
+ *
+ * The status cannot be read with a trailing `$?`: piping through `head`
+ * makes git die of SIGPIPE as soon as the cap is hit, so `$?` reports head's
+ * 0 (measured, not assumed). `${PIPESTATUS[0]}` would fix that but is
+ * bash-only — under dash it is an unset variable, i.e. silently 0 again.
+ * So: run git with stdout going straight to a file (no SIGPIPE), keep its
+ * status in a variable, then emit the capped bytes and exit with that status.
+ *
+ * stderr is deliberately left alone: git's own diagnosis (‘! [rejected]’,
+ * ‘hook declined’) has to reach the caller, which is the whole point.
+ */
+function statusOk(command: string, bytes: number = GIT_CAP): string {
+  return `d=$(mktemp -d); ${command} > "$d/out" 2>"$d/err"; st=$?; head -c ${bytes} "$d/out"; cat "$d/err" >&2; rm -rf "$d"; exit $st`
 }
 
 // ------------------------------------------------------------- assertions
@@ -212,94 +238,94 @@ export function commitCommand(workdir: string, request: CommitRequest): string {
   const parts = [`${git(workdir)} commit --no-edit -m ${shQuote(message)}`]
   if (request.amend === true) parts.push('--amend')
   if (request.noVerify === true) parts.push('--no-verify')
-  return capped(parts.join(' '))
+  return statusOk(parts.join(' '))
 }
 
 /** Check out an existing ref (branch, tag or hash). */
 export function checkoutCommand(workdir: string, ref: string): string {
-  return `${git(workdir)} checkout ${shQuote(assertRef(ref))}`
+  return statusOk(`${git(workdir)} checkout ${shQuote(assertRef(ref))}`)
 }
 
 /** Create (and check out) a branch, optionally from a start point. */
 export function createBranchCommand(workdir: string, name: string, from?: string): string {
   const start = from !== undefined && from !== '' ? ` ${shQuote(assertRef(from))}` : ''
-  return `${git(workdir)} checkout -b ${shQuote(assertBranchName(name))}${start}`
+  return statusOk(`${git(workdir)} checkout -b ${shQuote(assertBranchName(name))}${start}`)
 }
 
 /** Delete a branch (`force` maps to -D). */
 export function deleteBranchCommand(workdir: string, name: string, force: boolean): string {
-  return `${git(workdir)} branch ${force ? '-D' : '-d'} ${shQuote(assertBranchName(name))}`
+  return statusOk(`${git(workdir)} branch ${force ? '-D' : '-d'} ${shQuote(assertBranchName(name))}`)
 }
 
 /** Rename a branch. */
 export function renameBranchCommand(workdir: string, from: string, to: string): string {
-  return `${git(workdir)} branch -m ${shQuote(assertBranchName(from))} ${shQuote(assertBranchName(to))}`
+  return statusOk(`${git(workdir)} branch -m ${shQuote(assertBranchName(from))} ${shQuote(assertBranchName(to))}`)
 }
 
 /** Merge a ref into the current branch (no editor prompt). */
 export function mergeCommand(workdir: string, ref: string): string {
-  return capped(`${git(workdir)} merge --no-edit ${shQuote(assertRef(ref))}`)
+  return statusOk(`${git(workdir)} merge --no-edit ${shQuote(assertRef(ref))}`)
 }
 
 /** Publish a branch to a remote and set its upstream. */
 export function publishBranchCommand(workdir: string, branch: string, remote: string): string {
-  return capped(`${git(workdir)} push --set-upstream ${shQuote(assertRemoteName(remote))} ${shQuote(assertBranchName(branch))}`)
+  return statusOk(`${git(workdir)} push --set-upstream ${shQuote(assertRemoteName(remote))} ${shQuote(assertBranchName(branch))}`)
 }
 
 /** Fetch every remote, pruning deleted tracking refs. */
 export function fetchCommand(workdir: string): string {
-  return capped(`${git(workdir)} fetch --all --prune`)
+  return statusOk(`${git(workdir)} fetch --all --prune`)
 }
 
 /** Pull the current branch (merge, no editor prompt). */
 export function pullCommand(workdir: string): string {
-  return capped(`${git(workdir)} pull --no-edit`)
+  return statusOk(`${git(workdir)} pull --no-edit`)
 }
 
 /** Push the current branch. */
 export function pushCommand(workdir: string): string {
-  return capped(`${git(workdir)} push`)
+  return statusOk(`${git(workdir)} push`)
 }
 
 /** Stash the working tree (optionally including untracked files). */
 export function stashSaveCommand(workdir: string, message: string, includeUntracked: boolean): string {
   const text = message.trim() === '' ? 'dsh-remote-vs stash' : message.trim()
-  return `${git(workdir)} stash push ${includeUntracked ? '-u ' : ''}-m ${shQuote(text)}`
+  return statusOk(`${git(workdir)} stash push ${includeUntracked ? '-u ' : ''}-m ${shQuote(text)}`)
 }
 
 /** Apply (and keep) a stash entry. */
 export function stashApplyCommand(workdir: string, ref: string): string {
-  return `${git(workdir)} stash apply ${shQuote(assertStashRef(ref))}`
+  return statusOk(`${git(workdir)} stash apply ${shQuote(assertStashRef(ref))}`)
 }
 
 /** Apply and drop a stash entry. */
 export function stashPopCommand(workdir: string, ref: string): string {
-  return `${git(workdir)} stash pop ${shQuote(assertStashRef(ref))}`
+  return statusOk(`${git(workdir)} stash pop ${shQuote(assertStashRef(ref))}`)
 }
 
 /** Drop a stash entry (irreversible). */
 export function stashDropCommand(workdir: string, ref: string): string {
-  return `${git(workdir)} stash drop ${shQuote(assertStashRef(ref))}`
+  return statusOk(`${git(workdir)} stash drop ${shQuote(assertStashRef(ref))}`)
 }
 
 /** Register a remote. */
 export function addRemoteCommand(workdir: string, name: string, url: string): string {
-  return `${git(workdir)} remote add ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`
+  return statusOk(`${git(workdir)} remote add ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`)
 }
 
 /** Remove a remote. */
 export function removeRemoteCommand(workdir: string, name: string): string {
-  return `${git(workdir)} remote remove ${shQuote(assertRemoteName(name))}`
+  return statusOk(`${git(workdir)} remote remove ${shQuote(assertRemoteName(name))}`)
 }
 
 /** Point an existing remote at a new URL. */
 export function setRemoteUrlCommand(workdir: string, name: string, url: string): string {
-  return `${git(workdir)} remote set-url ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`
+  return statusOk(`${git(workdir)} remote set-url ${shQuote(assertRemoteName(name))} ${shQuote(assertRemoteUrl(url))}`)
 }
 
 /** Initialize a repository in place. */
 export function initCommand(workdir: string): string {
-  return `${git(workdir)} init`
+  return statusOk(`${git(workdir)} init`)
 }
 
 /**
@@ -314,7 +340,11 @@ export function applyPatchCommand(workdir: string, patchPath: string, mode: 'sta
     : mode === 'unstage'
       ? '--cached --reverse --whitespace=nowarn'
       : '--reverse --whitespace=nowarn'
-  return capped(`${git(workdir)} apply ${args} ${file}; rm -f ${file}`)
+  // `git apply` is the whole point of this call, so its exit status is the
+  // result: a plain `; rm -f` would hand back rm's 0 and report a rejected
+  // hunk as staged. The status is latched into a variable before the cleanup
+  // runs, because any command in between would overwrite `$?`.
+  return statusOk(`${git(workdir)} apply ${args} ${file}; st=$?; rm -f ${file}; exit $st`)
 }
 
 // ------------------------------------------------------------- parsers

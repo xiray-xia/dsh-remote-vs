@@ -299,6 +299,7 @@ const zh: Record<string, string> = {
   'editor.resizeHint': '拖拽调整面板 / 编辑器占比',
   'editor.openedIn': '已在顶部标签打开：',
   'editor.readTimeout': '读取超时（远端无响应）',
+  'editor.needSource': '切回「源码」才能保存：预览态没有编辑器缓冲区，直接保存会把旧内容写回远端。',
   'git.notARepo': '当前远端工作区不是 git 仓库。',
 }
 
@@ -598,6 +599,7 @@ const en: Record<string, string> = {
   'editor.resizeHint': 'Drag to resize panel / editor',
   'editor.openedIn': 'Opened in the top tab:',
   'editor.readTimeout': 'Read timed out (host not responding)',
+  'editor.needSource': 'Switch back to Source to save: preview mode has no editor buffer, so saving would write the pre-edit text to the remote file.',
   'git.notARepo': 'This remote workspace is not a git repository.',
 }
 

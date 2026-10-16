@@ -26,11 +26,19 @@ export function assertRemoteDir(path: string): string {
   return normalized
 }
 
+/**
+ * A bare ref name plus an optional revision suffix: `^`, `^2`, `^^`, `~`,
+ * `~3`, `^2~1`. The suffix is restricted to `^`/`~`/digits, so no shell
+ * metacharacter and no `{` can ride in — `@{...}` (reflog, an injection
+ * surface) is rejected separately below.
+ */
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/@-]*(?:\^(?:\d+)?|~\d*)*$/
+
 /** Assert a safe git ref/branch/hash (strict charset, no shell metachars). */
 export function assertRef(ref: string): string {
   if (typeof ref !== 'string' || ref === '' || ref.length > 128) throw new Error(`invalid ref: ${ref}`)
   if (ref === 'HEAD') return ref
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/@-]*$/.test(ref) || ref.includes('..') || ref.includes('@{')) {
+  if (!REF_RE.test(ref) || ref.includes('..') || ref.includes('@{')) {
     throw new Error(`invalid ref: ${ref}`)
   }
   return ref

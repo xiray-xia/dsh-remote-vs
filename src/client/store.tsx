@@ -257,7 +257,7 @@ export interface ExplorerValue {
   activateTab: (id: string) => void
   closeTab: (id: string) => void
   updateTab: (id: string, patch: Partial<EditorTab>) => void
-  saveTab: (id: string, content?: string) => Promise<void>
+  saveTab: (id: string, content: string) => Promise<void>
   reloadTab: (id: string) => Promise<void>
   info: (text: string) => void
   fail: (text: string) => void
@@ -746,11 +746,20 @@ export function updateTab(id: string, next: Partial<EditorTab>): void {
 }
 
 /** Write one tab back to the remote host. */
-export async function saveTab(id: string, content?: string): Promise<void> {
+export async function saveTab(id: string, content: string): Promise<void> {
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
   if (workspace === undefined || tab === undefined || tab.kind !== 'file' || tab.binary || tab.truncated) return
-  const text = content ?? tab.text
+  // Never fall back to the tab's loaded text. `tab.text` is only ever written
+  // by a load/reload, never by typing, so substituting it here would push the
+  // PRE-EDIT bytes to the remote file and report success — destroying the
+  // user's edit with a confirmation. A caller without a live buffer must
+  // refuse to save instead (see EditorPane.saveActive).
+  if (typeof content !== 'string') {
+    toast(t('editor.needSource'), true)
+    return
+  }
+  const text = content
   patchTab(id, { saving: true, text })
   try {
     await api.fileOp.write(workspace.alias, tab.fullPath, text)

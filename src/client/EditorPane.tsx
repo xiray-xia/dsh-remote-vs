@@ -27,6 +27,7 @@ import {
   baseName,
   confirmDialog,
   mimeFor,
+  toast,
 } from './vsc/kit.tsx'
 
 export function EditorPane(props: { visible: boolean }): ReactNode {
@@ -96,10 +97,34 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   // The editor owns the live buffer; the save path pulls it imperatively
   // instead of mirroring every keystroke into React state.
   const editorRef = useRef<CodeEditorHandle>(null)
+
+  /**
+   * True only while the CodeMirror instance for the active tab is mounted.
+   *
+   * The editor used to be conditionally unmounted in preview mode, which made
+   * `getContent()` return undefined; the save path then fell back to the
+   * tab's loaded text and wrote the PRE-EDIT bytes back to the remote file
+   * while reporting success. Refusing to save without a live buffer is the
+   * load-bearing half of that fix — the editor staying mounted (below) is the
+   * other half, so switching preview no longer drops unsaved edits either.
+   */
+  const editorMounted =
+    activeTab !== undefined
+    && activeTab.kind === 'file'
+    && !activeTab.image
+    && !activeTab.binary
+    && !activeTab.loading
+    && activeTab.error === undefined
+
   const saveActive = async (): Promise<void> => {
     const tab = activeTab
     if (tab === undefined) return
     const text = editorRef.current?.getContent()
+    if (text === undefined) {
+      // Never let the store fall back to stale text: that destroys the edit.
+      toast(t('editor.needSource'), true)
+      return
+    }
     await store.saveTab(tab.id, text)
   }
 
@@ -226,8 +251,19 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 {!activeTab.image && !activeTab.binary && activeTab.html && activeTab.preview && (
                   <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="allow-scripts" srcDoc={htmlDoc} />
                 )}
-                {!activeTab.image && !activeTab.binary && !(activeTab.preview && (activeTab.markdown || activeTab.html)) && (
-                  <div className="rvs-editor-host">
+                {/* The editor host stays MOUNTED and is hidden with CSS in
+                    preview mode. Unmounting it (the old behaviour) rebuilt the
+                    buffer from `activeTab.text` on every preview round-trip —
+                    `activeTab.text` is never updated by typing, so the edits
+                    silently reverted, the dirty flag lied, and the save path
+                    lost its live buffer. Hiding keeps buffer, undo history and
+                    caret across preview/source switches, and sibling surfaces
+                    (the image/HTML previews) end up in the same DOM positions
+                    as before, so their own remount behaviour is unchanged. */}
+                {!activeTab.image && !activeTab.binary && (
+                  <div
+                    className={`rvs-editor-host${activeTab.preview && (activeTab.markdown || activeTab.html) ? ' rvs-hidden' : ''}`}
+                  >
                     {activeTab.truncated && <div className="rvs-banner warn">{t('editor.truncated')}</div>}
                     <CodeEditor
                       key={activeTab.id}
