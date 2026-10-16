@@ -71,6 +71,45 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   const dragRef = useRef<{ startY: number; startRatio: number } | undefined>(undefined)
   const columnRef = useRef<HTMLDivElement>(null)
 
+  /**
+   * Visibility is measured, not promised.
+   *
+   * The mount points disagree: the native fallback forwards a real
+   * `tab.visible`, but the better-sidebar tab is registered as
+   * `component: () => <RemoteRoot ctx={ctx} />` with no props at all, so
+   * `visible` there is the constant `true` and every gate built on it is dead.
+   * An IntersectionObserver on this root gives the same answer on both paths
+   * and keeps giving it: the host hides a parked tab with `display:none` (and
+   * removes it when the tab closes), and a box-less element never intersects.
+   *
+   * Optimistic until the first callback so the first paint is unaffected.
+   *
+   * A CALLBACK ref, not a ref object plus a mount effect: the first render
+   * happens before `store.ready`, so it takes the loading branch below — a
+   * different element, with no ref on it. A mount-once effect would read `null`
+   * there and never run again (its deps are empty), leaving `onScreen` at the
+   * optimistic `true` and every gate below dead on the mount path that needs it
+   * most. React invokes this when the real root mounts, whenever that is, and
+   * calls it with `null` on the way out — which is also the disconnect.
+   */
+  const [onScreen, setOnScreen] = useState(true)
+  const observerRef = useRef<IntersectionObserver | null>(null)
+  const attachRoot = useCallback((node: HTMLDivElement | null): void => {
+    observerRef.current?.disconnect()
+    observerRef.current = null
+    if (node === null || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1]
+      if (entry !== undefined) setOnScreen(entry.isIntersecting)
+    })
+    observer.observe(node)
+    observerRef.current = observer
+  }, [])
+
+  /** The trusted "this panel is live" bit: host visibility AND actually painted. */
+  const live = props.visible && onScreen
+  const panelLive = (id: RailView): boolean => live && view === id
+
   const go = useCallback((next: RailView): void => {
     store.setView(next)
   }, [store])
@@ -168,12 +207,12 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   const panelFor = (id: RailView): ReactNode => {
     switch (id) {
       case 'search': return <SearchView />
-      case 'scm': return <ScmPanel onOpenHistory={() => go('history')} />
+      case 'scm': return <ScmPanel onOpenHistory={() => go('history')} visible={panelLive('scm')} />
       case 'history': return <HistoryPanel />
       case 'terminal':
         // The terminal draws its own header + tab strip, so it takes the whole
         // slot (no extra padding wrapper).
-        return <TerminalView t={t} hosts={store.hosts} visible={props.visible && view === 'terminal'} />
+        return <TerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} />
       case 'workspaces':
         return (
           <div className="rvs-viewpad" style={{ height: '100%' }}>
@@ -195,9 +234,15 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         // tab fight over the scroll position and the hidden one — sitting at
         // scrollTop 0 — wins, which is exactly why a tab switch kept snapping
         // back to the top of the file.
-        return editorInSidebar ? <EditorPane visible={props.visible && view === 'editor'} /> : null
+        return editorInSidebar ? <EditorPane visible={panelLive('editor')} /> : null
       default:
-        return <RemoteExplorer showHidden={showHidden} onToggleHidden={() => setShowHidden(v => !v)} />
+        return (
+          <RemoteExplorer
+            showHidden={showHidden}
+            onToggleHidden={() => setShowHidden(v => !v)}
+            visible={panelLive('explorer')}
+          />
+        )
     }
   }
 
@@ -239,7 +284,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   )
 
   return (
-    <div className="rvs-root">
+    <div className="rvs-root" ref={attachRoot}>
       <div className="rvs-rail">
         {railButton('explorer', t('tab.files'), <IconCode size={17} />)}
         {railButton('search', t('tab.search'), <IconSearch size={17} />)}
@@ -300,7 +345,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
               title={t('editor.resizeHint')}
             />
             <div className="rvs-pane grow">
-              <EditorPane visible={props.visible} />
+              <EditorPane visible={live} />
             </div>
           </>
         )}

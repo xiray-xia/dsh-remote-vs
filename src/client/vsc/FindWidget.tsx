@@ -35,34 +35,123 @@ const currentMark = Decoration.mark({ class: 'rvs-find-match current' })
  */
 const setFindQuery = StateEffect.define<SearchQuery | null>()
 
-function marksFor(query: SearchQuery | null, state: EditorState): DecorationSet {
-  if (query === null || !query.valid) return Decoration.none
-  const cursor = query.getCursor(state)
-  const found: { from: number; to: number }[] = []
-  for (let step = cursor.next(); step.done !== true; step = cursor.next()) {
-    // Guard the loop, not just the array: a zero-width match could otherwise
-    // keep producing values without ever reaching the cap.
-    if (found.length >= MATCH_CAP) break
-    found.push({ from: step.value.from, to: step.value.to })
-  }
-  if (found.length === 0) return Decoration.none
-  found.sort((left, right) => left.from - right.from)
-  const caret = state.selection.main.from
-  return Decoration.set(found.map(span =>
-    (span.from === caret ? currentMark : matchMark).range(span.from, span.to)))
+/** One walk of the query's cursor: the matches it found, in document order. */
+interface MatchScan {
+  matches: { from: number; to: number }[]
 }
 
-const matchField = StateField.define<{ query: SearchQuery | null; marks: DecorationSet }>({
-  create: () => ({ query: null, marks: Decoration.none }),
+/**
+ * What the running query is, plus what was derived from it.
+ *
+ * The match list is kept alongside the decorations because the count readout
+ * and the "which match is current" answer are both derivable from it without
+ * touching the document again.
+ */
+interface FindMarks {
+  query: SearchQuery | null
+  marks: DecorationSet
+  matches: { from: number; to: number }[]
+  /** Which match is highlighted, 1-based, or 0 when the caret is not on one. */
+  index: number
+}
+
+/**
+ * Walk the query's cursor once and return every match, in document order.
+ *
+ * One walk, because repeating it is expensive: `@codemirror/search`'s literal
+ * path is a per-code-point state machine that normalizes every character, not a
+ * substring search, so the cost is linear in the DOCUMENT rather than in the
+ * number of hits. The widget used to walk it four times per keystroke (marks,
+ * count, marks again after the step moved the selection, count again).
+ *
+ * The caret's own position is deliberately not derived here: it belongs to the
+ * state the caller has, and `indexAt` answers it from this list in O(log n).
+ */
+function scanMatches(query: SearchQuery | null, state: EditorState): MatchScan {
+  if (query === null || !query.valid) return { matches: [] }
+  const matches: { from: number; to: number }[] = []
+  try {
+    const cursor = query.getCursor(state)
+    for (let step = cursor.next(); step.done !== true; step = cursor.next()) {
+      // Guard the loop, not just the array: a zero-width match could otherwise
+      // keep producing values without ever reaching the cap.
+      if (matches.length >= MATCH_CAP) break
+      matches.push({ from: step.value.from, to: step.value.to })
+    }
+  } catch {
+    // An invalid regex: the panel shows "no results" instead of throwing.
+    return { matches: [] }
+  }
+  // The cursor yields matches in document order, which is what `indexAt`'s
+  // binary search and `Decoration.set` both rely on.
+  return { matches }
+}
+
+/** Decorate one match list, so `caretAt`'s match is the highlighted one. */
+function marksFor(spans: { from: number; to: number }[], caretAt: number): DecorationSet {
+  if (spans.length === 0) return Decoration.none
+  return Decoration.set(spans.map(span =>
+    (span.from === caretAt ? currentMark : matchMark).range(span.from, span.to)))
+}
+
+/**
+ * 1-based position of the match starting at `caret`, or 0 when the caret is not
+ * on one. Binary search: moving the caret has to re-label at most one
+ * decoration, and it must not cost a document walk to find out which.
+ */
+function indexAt(spans: { from: number; to: number }[], caret: number): number {
+  let low = 0
+  let high = spans.length - 1
+  while (low <= high) {
+    const mid = (low + high) >> 1
+    const at = spans[mid]?.from ?? 0
+    if (at === caret) return mid + 1
+    if (at < caret) low = mid + 1
+    else high = mid - 1
+  }
+  return 0
+}
+
+/** The count readout for a caret position, from a match list already in hand. */
+function countAt(spans: { from: number; to: number }[], caret: number): { total: number; index: number } {
+  return { total: spans.length, index: indexAt(spans, caret) }
+}
+
+/** The count readout for where the editor's caret is right now. */
+function countFor(view: EditorView): { total: number; index: number } {
+  return countAt(view.state.field(matchField).matches, view.state.selection.main.from)
+}
+
+const matchField = StateField.define<FindMarks>({
+  create: () => ({ query: null, marks: Decoration.none, matches: [], index: 0 }),
   update(value, tr) {
     const effect = tr.effects.find(item => item.is(setFindQuery))
     if (effect !== undefined) {
       const query = effect.value
-      return { query, marks: marksFor(query, tr.state) }
+      const scan = scanMatches(query, tr.state)
+      const caret = tr.state.selection.main.from
+      return { query, marks: marksFor(scan.matches, caret), matches: scan.matches, index: indexAt(scan.matches, caret) }
     }
-    // Edits or a moved caret can both change which matches exist / is current.
-    if (tr.docChanged || tr.selection !== undefined) {
-      return { query: value.query, marks: marksFor(value.query, tr.state) }
+    /**
+     * A moved caret changes only WHICH match is current, and the list is
+     * already in hand — so this re-labels at most one decoration instead of
+     * walking the document. Two guards make it cheap: the list is only useful
+     * for a non-null query, and the rebuild is skipped outright while the caret
+     * stays inside the same match. Most caret moves inside a document are
+     * exactly that, and the old code rescanned the whole document for every one
+     * of them.
+     */
+    if (tr.selection !== undefined && value.query !== null) {
+      const caret = tr.state.selection.main.from
+      const index = indexAt(value.matches, caret)
+      if (index === value.index) return value
+      return { query: value.query, marks: marksFor(value.matches, caret), matches: value.matches, index }
+    }
+    // Edits do change which matches exist, so those need the walk.
+    if (tr.docChanged) {
+      const scan = scanMatches(value.query, tr.state)
+      const caret = tr.state.selection.main.from
+      return { query: value.query, marks: marksFor(scan.matches, caret), matches: scan.matches, index: indexAt(scan.matches, caret) }
     }
     return value
   },
@@ -97,28 +186,6 @@ function toQuery(state: FindState): SearchQuery {
   })
 }
 
-/** Count matches and report the 1-based position of the caret's match. */
-function inspect(view: EditorView, state: FindState): { total: number; index: number } {
-  if (state.query === '') return { total: 0, index: 0 }
-  const query = toQuery(state)
-  const selection = view.state.selection.main
-  let total = 0
-  let index = 0
-  try {
-    for (let cursor = query.getCursor(view.state); ;) {
-      const step = cursor.next()
-      if (step.done === true) break
-      total += 1
-      if (step.value.from === selection.from) index = total
-      if (total > 5000) break
-    }
-  } catch {
-    // An invalid regex: the panel shows "no results" instead of throwing.
-    return { total: 0, index: 0 }
-  }
-  return { total, index }
-}
-
 /** True when the editor's current search query can actually be stepped. */
 function steppable(view: EditorView, state: FindState): boolean {
   if (state.query === '') return false
@@ -131,18 +198,24 @@ function steppable(view: EditorView, state: FindState): boolean {
   return query.valid
 }
 
-/** Push the query into the editor (highlights every match) and count them. */
+/**
+ * Push the query into the editor (highlights every match) and count them.
+ *
+ * The count is read back OUT of the field the dispatch just wrote, so one walk
+ * of the document serves the marks, the total and the caret's position — this
+ * used to be two walks here and two more once the caller stepped.
+ */
 export function applyFind(view: EditorView, state: FindState): { total: number; index: number } {
-  let query: SearchQuery | null = null
   try {
-    query = toQuery(state)
+    const query = toQuery(state)
     view.dispatch({ effects: [setSearchQuery.of(query), setFindQuery.of(query)] })
   } catch {
     // A malformed pattern must not break typing; clear the marks instead of
     // leaving the previous query's highlights on screen.
     view.dispatch({ effects: setFindQuery.of(null) })
   }
-  return inspect(view, state)
+  const scan = view.state.field(matchField)
+  return countAt(scan.matches, view.state.selection.main.from)
 }
 
 /** Drop every match mark (the widget was closed or reset). */
@@ -211,20 +284,90 @@ export function FindWidget(props: {
     input.select()
   }, [props.open])
 
-  // Re-run the search whenever the query or the toggles change.
-  useEffect(() => {
+  /**
+   * Apply the current query, then advance to its first match.
+   *
+   * Step BEFORE reading the count: counting first reported the caret's match as
+   * it was, so typing (the primary path) always read one match behind.
+   */
+  const runFind = (): void => {
     const view = props.view
-    if (view === undefined || !props.open) return
+    if (view === undefined) return
     const result = applyFind(view, state)
-    // Step BEFORE the final count: the old order counted the caret's match as
-    // it was before the step, so typing (the primary path) always read one
-    // match behind the editor while Enter/↑/↓ read correctly.
-    if (result.total > 0) stepFind(view, true, state)
-    setCount(result.total > 0 ? inspect(view, state) : result)
+    if (result.total === 0) {
+      setCount(result)
+      return
+    }
+    stepFind(view, true, state)
+    setCount(countFor(view))
+  }
+
+  /** The pending debounce run, so a step can cancel it (see `seek`). */
+  const findTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  /**
+   * Step the current query one match forward or back.
+   *
+   * Runs the pending query first (`applyFind`), so the editor is searched for
+   * what is typed even when the user presses Enter before the 150 ms is up —
+   * the editor's own query is what `findNext`/`findPrevious` walk, and without
+   * the flush the step would run against the PREVIOUS query while the widget
+   * displays the new one.
+   *
+   * The pending run is then cancelled, not just flushed: otherwise it fires a
+   * moment later and advances a second time, and a single Enter would land two
+   * matches on. (It would also reset a BACKWARD step to the first match.)
+   */
+  const seek = (forward: boolean): void => {
+    const view = props.view
+    if (view === undefined) return
+    if (findTimer.current !== undefined) {
+      clearTimeout(findTimer.current)
+      findTimer.current = undefined
+    }
+    applyFind(view, state)
+    stepFind(view, forward, state)
+    refreshCount()
+  }
+
+  /**
+   * Re-run the search whenever the query or the toggles change — debounced, the
+   * way `SearchView` already runs its own query. Each run walks the whole
+   * document, so running it per keystroke made typing the slowest thing the
+   * widget did; 150 ms is still well inside "feels immediate". The cleanup also
+   * cancels a run whose query was replaced, or whose widget was closed, before
+   * it fired.
+   */
+  useEffect(() => {
+    if (props.view === undefined || !props.open) return
+    // Bare `setTimeout`, matching how `index.tsx` arms its timers: with the
+    // node types in scope this is the `ReturnType<typeof setTimeout>` the ref
+    // already declares, and `unref` stays an optional no-op in a browser.
+    const timer = setTimeout(() => {
+      findTimer.current = undefined
+      runFind()
+    }, 150)
+    timer.unref?.()
+    findTimer.current = timer
+    return () => {
+      clearTimeout(timer)
+      findTimer.current = undefined
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, props.open, props.view])
 
   if (!props.open) return null
+
+  /**
+   * The count readout for where the caret is NOW. Reads the match list the
+   * field already holds: stepping, clicking and arrowing repaint from it
+   * instead of walking the document again.
+   */
+  const refreshCount = (): void => {
+    if (props.view === undefined) return
+    const next = countFor(props.view)
+    setCount(previous => (previous.total === next.total && previous.index === next.index ? previous : next))
+  }
 
   const patch = (next: Partial<FindState>): void => {
     setState(prev => ({ ...prev, ...next }))
@@ -263,10 +406,7 @@ export function FindWidget(props: {
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault()
-            if (props.view !== undefined) {
-              stepFind(props.view, !e.shiftKey, state)
-              setCount(inspect(props.view, state))
-            }
+            seek(!e.shiftKey)
           } else if (e.key === 'Escape') {
             e.preventDefault()
             props.onClose()
@@ -288,21 +428,13 @@ export function FindWidget(props: {
       </span>
       <IconButton
         title="上一个（Shift+Enter）"
-        onClick={() => {
-          if (props.view === undefined) return
-          stepFind(props.view, false, state)
-          setCount(inspect(props.view, state))
-        }}
+        onClick={() => seek(false)}
       >
         <span style={{ fontSize: 13 }}>↑</span>
       </IconButton>
       <IconButton
         title="下一个（Enter）"
-        onClick={() => {
-          if (props.view === undefined) return
-          stepFind(props.view, true, state)
-          setCount(inspect(props.view, state))
-        }}
+        onClick={() => seek(true)}
       >
         <span style={{ fontSize: 13 }}>↓</span>
       </IconButton>

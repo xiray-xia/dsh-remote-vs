@@ -40,6 +40,24 @@ const UPLOAD_IDLE_MS = 60_000
 
 const TRUNCATED_MARKER = '\n[... truncated: output exceeded 2 MiB ...]\n'
 
+/** Leading line the session wrapper prints so the timeout can kill its group. */
+const PGID_MARKER = 'RV_PID='
+
+/** One-shot `setsid --wait` capability probe (see RemotePool.supportsSetsid). */
+const SETSID_PROBE = "setsid --wait sh -c 'exit 7' 2>/dev/null; test $? -eq 7 && echo RV_SETSID=1"
+const SETSID_PROBE_MARK = 'RV_SETSID=1'
+
+/** Deadline for the probe and for a group kill; both are one tiny command. */
+const CONTROL_TIMEOUT_MS = 15_000
+
+/**
+ * How long a killed group gets to report its exit before TERM escalates to
+ * KILL. Without the escalation a command that ignores TERM would survive the
+ * timeout, which is the leak this kill exists to close (p2/ssh-proc.ts uses
+ * the same grace before its own escalation).
+ */
+const GROUP_KILL_GRACE_MS = 3_000
+
 interface Pooled {
   conn: Client
   timer: ReturnType<typeof setTimeout> | undefined
@@ -51,6 +69,13 @@ interface Pooled {
 
 export interface ExecOptions {
   timeoutMs?: number
+  /**
+   * Internal: send the line exactly as given — no session wrapper, and no group
+   * kill when it times out. Only the two commands the pool sends on its own
+   * behalf (the setsid probe and the group kill) use it; wrapping those would
+   * recurse into the machinery that dispatched them.
+   */
+  bare?: boolean
 }
 
 export interface ShellOptions {
@@ -62,12 +87,17 @@ export class RemotePool {
   private readonly conns = new Map<string, Pooled>()
   /** TOFU fingerprints observed this process (alias -> sha256). */
   private readonly hostKeys = new Map<string, string>()
+  /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
+  private readonly setsidProbes = new Map<string, Promise<boolean>>()
 
   constructor(private readonly store: RemoteStore) {}
 
   /** Drop one pooled connection (call after host update/delete). */
   drop(alias: string): void {
     const pooled = this.conns.get(alias)
+    // The host entry can change under an alias, so the capability answer goes
+    // with the connection; the next exec probes again.
+    this.setsidProbes.delete(alias)
     if (pooled === undefined) return
     this.conns.delete(alias)
     if (pooled.timer !== undefined) clearTimeout(pooled.timer)
@@ -101,6 +131,10 @@ export class RemotePool {
   async exec(alias: string, command: string, opts: ExecOptions = {}): Promise<RemoteExecResult> {
     const started = Date.now()
     const timeoutMs = opts.timeoutMs ?? 60_000
+    // Run the line in its own session, or the timeout below has nothing to kill
+    // (see sessionLine). The probe is one extra channel per alias, not per
+    // call; a remote that cannot host the wrapper keeps working unwrapped.
+    const session = opts.bare === true ? false : await this.supportsSetsid(alias)
     let conn: Client
     try {
       conn = await this.acquire(alias)
@@ -114,6 +148,19 @@ export class RemotePool {
     try {
       return await new Promise<RemoteExecResult>((resolve) => {
         let settled = false
+        let timedOut = false
+        /** Server-confirmed child exit; a bare channel close is not proof. */
+        let exited = false
+        /** Session/process-group id, from the wrapper's leading marker line. */
+        let pgid: number | undefined
+        let markerPending = session
+        let warned = false
+        /** Say once, and only once, that the timeout could not reach the command. */
+        const warnOnce = (): void => {
+          if (warned) return
+          warned = true
+          warnDetached(alias)
+        }
         const finish = (result: Omit<RemoteExecResult, 'durationMs'>): void => {
           if (settled) return
           settled = true
@@ -121,40 +168,87 @@ export class RemotePool {
           this.release(alias)
           resolve({ ...result, durationMs: Date.now() - started })
         }
+        /**
+         * Signal the command's process group over a fresh channel: the timed-out
+         * channel is closing, and `channel.signal()` would only reach the outer
+         * shell anyway. `bare` keeps the kill out of the wrapper — a kill that
+         * hung would otherwise try to kill its own group.
+         */
+        const killGroup = (signal: 'TERM' | 'KILL'): void => {
+          if (pgid === undefined) return
+          void this.exec(alias, `kill -${signal} -- -${pgid}`, { timeoutMs: CONTROL_TIMEOUT_MS, bare: true }).catch(() => undefined)
+        }
+        const terminateGroup = (): void => {
+          killGroup('TERM')
+          setTimeout(() => {
+            if (!exited) killGroup('KILL')
+          }, GROUP_KILL_GRACE_MS).unref?.()
+        }
         const timer = setTimeout(() => {
+          timedOut = true
           try {
             stream?.close()
           } catch {
             // Ignore.
           }
+          // Closing the channel releases our side only: a `git` or `rg` that is
+          // still working never notices and keeps burning remote CPU until it
+          // finishes on its own. Kill the group instead — p2/ssh-proc.ts:9-25
+          // is the same lesson learned in the subprocess runtime.
+          if (pgid !== undefined) terminateGroup()
+          else if (!session) warnOnce()
+          // Session without a group id yet: the channel is still opening, and
+          // the data handler below kills the group as soon as the marker names
+          // it (the close handler warns if it never does).
           finish({ success: false, exitCode: null, timedOut: true, stdout: out, stderr: err })
         }, timeoutMs)
         let stream: ClientChannel | undefined
         let out = ''
         let err = ''
-        conn.exec(command, (execError, channel) => {
+        conn.exec(session ? sessionLine(command) : command, (execError, channel) => {
           if (execError !== undefined && execError !== null) {
             finish({ success: false, exitCode: null, timedOut: false, stdout: '', stderr: '', error: execError.message })
             return
           }
           // The timeout may already have fired while the channel was opening
-          // (ssh2 offers no channel-open timeout). `stream` was still undefined
-          // then, so nothing closed this channel and it kept a session slot on
-          // the server until the command finished on its own.
+          // (ssh2 offers no channel-open timeout). The command may be running,
+          // so listen for the marker and let the handler below kill the group;
+          // a bounded give-up closes the channel so a line that never names a
+          // group cannot hold a server slot until it finishes on its own.
           if (settled) {
-            try {
-              channel.close()
-            } catch {
-              // Already gone.
-            }
-            return
+            setTimeout(() => {
+              if (pgid === undefined) warnOnce()
+              try {
+                channel.close()
+              } catch {
+                // Already gone.
+              }
+            }, GROUP_KILL_GRACE_MS).unref?.()
+          } else {
+            stream = channel
           }
-          stream = channel
-          channel.on('close', (code: number | null) => {
+          channel.on('close', (code: number | null, signalName?: string | null) => {
+            // An exit status is the server's proof the child is gone; the close
+            // we send ourselves is not.
+            if ((code !== null && code !== undefined) || (signalName !== null && signalName !== undefined)) exited = true
+            if (timedOut && session && pgid === undefined) warnOnce()
             finish({ success: code === 0, exitCode: code, timedOut: false, stdout: out, stderr: err })
           })
           channel.on('data', (chunk: Buffer) => {
             out = appendCapped(out, chunk.toString('utf8'))
+            if (pgid !== undefined || !markerPending) return
+            const marker = takePgid(out)
+            if (marker.pgid !== undefined) {
+              pgid = marker.pgid
+              out = marker.out
+              markerPending = false
+              // Only reachable when the timeout fired before this channel was
+              // open: the group had no id then, so kill it now that it has one.
+              if (timedOut) terminateGroup()
+            } else if (out.includes('\n')) {
+              // The first line is the command's own output, not our marker.
+              markerPending = false
+            }
           })
           channel.stderr.on('data', (chunk: Buffer) => {
             err = appendCapped(err, chunk.toString('utf8'))
@@ -284,6 +378,28 @@ export class RemotePool {
   }
 
   // ------------------------------------------------------------ internals
+
+  /**
+   * Whether this alias offers a util-linux-style `setsid --wait` — the only
+   * shape that both detaches the command into its own session AND reports its
+   * exit code (p2/ssh-proc.ts:7-21 learned that plain `setsid` double-forks and
+   * the channel then reports the wrapper's exit 0, which would turn every exit
+   * fact into fiction). The probe also verifies status propagation, so a broken
+   * setsid fails it instead of quietly corrupting exit codes.
+   *
+   * Probed once per alias: the probe is a whole extra channel, and exec is the
+   * hot path (SCM polling, search, agent tools). A remote without a compatible
+   * setsid is remembered as such — it keeps the pre-existing behaviour, where a
+   * timeout can only close the channel, and says so in the log.
+   */
+  private supportsSetsid(alias: string): Promise<boolean> {
+    const cached = this.setsidProbes.get(alias)
+    if (cached !== undefined) return cached
+    const probe = this.exec(alias, SETSID_PROBE, { timeoutMs: CONTROL_TIMEOUT_MS, bare: true })
+      .then(result => result.stdout.includes(SETSID_PROBE_MARK), () => false)
+    this.setsidProbes.set(alias, probe)
+    return probe
+  }
 
   /** Hold the connection against idle eviction (balanced by release). */
   private hold(alias: string): void {
@@ -451,6 +567,58 @@ function appendCapped(current: string, chunk: string): string {
   const next = current + chunk
   if (next.length <= OUTPUT_CAP) return next
   return next.slice(0, OUTPUT_CAP) + TRUNCATED_MARKER
+}
+
+/**
+ * Put one shell line in its own session/process group.
+ *
+ * `setsid --wait` is what makes the timeout able to end the command: the
+ * wrapper echoes its own pid, which IS the new session's process-group id, and
+ * this pid is what `kill -- -<pgid>` needs. Everything the command spawns stays
+ * in that group, so a pipeline's whole tree dies with it — `channel.close()`
+ * only releases our side, and `channel.signal()` addresses the outer shell.
+ *
+ * `$0` is the login shell sshd itself used for this line, so a bashism in a
+ * caller's line keeps working on a remote whose /bin/sh is dash (a leading dash
+ * — login-shell argv[0] — is not an executable, hence the fallback to `sh`).
+ * The line travels as a positional argument rather than being re-quoted into
+ * the wrapper, so quoting and `$` expansion stay exactly as they were.
+ */
+function sessionLine(command: string): string {
+  const shell = '"${0:-sh}"'
+  const pick = `rv_shell=${shell}; case "$rv_shell" in -*) rv_shell=sh;; esac`
+  const wrap = `setsid --wait "$rv_shell" -c 'echo ${PGID_MARKER}$$; exec "$0" -c "$1"' "$rv_shell" ${shq(command)}`
+  return `${pick}; exec ${wrap}`
+}
+
+/** Single-quote one word for POSIX sh (same quoting p2/ssh-proc.ts uses). */
+function shq(word: string): string {
+  return `'${word.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * Consume the session wrapper's leading `RV_PID=<pgid>` line. The wrapper
+ * writes it before it execs the target, so it is the first line of the stream
+ * by construction; anything else is left untouched, which keeps a command that
+ * happens to print a similar first line intact.
+ */
+function takePgid(out: string): { pgid: number | undefined; out: string } {
+  const newline = out.indexOf('\n')
+  if (newline < 0) return { pgid: undefined, out }
+  const line = out.slice(0, newline).replace(/\r$/, '')
+  if (!line.startsWith(PGID_MARKER)) return { pgid: undefined, out }
+  const digits = line.slice(PGID_MARKER.length)
+  if (!/^\d+$/.test(digits)) return { pgid: undefined, out }
+  return { pgid: Number(digits), out: out.slice(newline + 1) }
+}
+
+/**
+ * A timed-out line whose process group was never learned cannot be killed, so
+ * say it out loud instead of pretending the command stopped.
+ */
+function warnDetached(alias: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[dsh-remote-vs] exec timed out on ${alias}: the channel is closed but the remote command may still be running (no killable process group)`)
 }
 
 /**

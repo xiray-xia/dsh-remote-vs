@@ -53,7 +53,7 @@ function dirKey(alias: string, dir: string): string {
   return `${alias}:${dir}`
 }
 
-export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () => void }): ReactNode {
+export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () => void; visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, alias, root, repoRoot, marks } = store
   const ctx = store.ctx
@@ -107,19 +107,36 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   // Root listing + refresh on the shared revision bump (git writes, saves...).
   const revision = store.revision
-  useEffect(() => {
-    if (root === '') return
-    setExpanded(prev => new Set(prev).add(root))
-    void loadDir(root)
-  }, [root, loadDir])
+  /**
+   * The binding this tree was listed from and the revision it was listed at.
+   * A parked panel stays MOUNTED behind `display:none`, so a write made off
+   * screen is not lost by parking: it only leaves these two behind, and the
+   * tree catches up in a single pass as soon as the panel is on screen again.
+   */
+  const listedBinding = useRef('')
+  const listedRevision = useRef(revision)
 
   useEffect(() => {
-    if (revision === 0 || root === '') return
-    void loadDir(root, true)
-    for (const dir of expanded) void loadDir(dir, true)
-    // Re-listing every open directory after a write is what keeps the tree honest.
+    // `visible === false` covers both ways in: the panel is parked behind
+    // `display:none`, or the whole surface is hidden (`RemoteRoot` measures it).
+    if (root === '' || props.visible === false) return
+    const rebind = listedBinding.current !== dirKey(alias, root)
+    if (!rebind && revision === listedRevision.current) return
+    listedBinding.current = dirKey(alias, root)
+    listedRevision.current = revision
+    // `expanded` is keyed by absolute path, so a binding change has to DROP the
+    // previous workspace's directories. The old add-only form kept them, and
+    // every later write listed those paths under the NEW alias — a failed
+    // request each, plus the error toast that goes with it.
+    if (rebind) setExpanded(new Set([root]))
+    // Root plus every open directory, once each: `expanded` always holds the
+    // root, and listing it separately on top of the loop listed it twice. They
+    // are fired concurrently — each one opens its own SFTP session host side.
+    for (const dir of new Set(rebind ? [root] : [root, ...expanded])) void loadDir(dir, true)
+    // `expanded` is deliberately not a dependency: opening a directory lists it
+    // itself, so re-listing the whole tree per expand would put the bug back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [revision])
+  }, [revision, root, alias, props.visible, loadDir])
 
   const rowsOf = useCallback((dir: string): RemoteFileEntry[] | undefined => {
     const rows = listings[dirKey(alias, dir)]
