@@ -174,18 +174,34 @@ export function groupHits(hits: readonly ContentHit[]): { path: string; hits: Co
 /**
  * Split a line around every match of the query, for highlighting.
  * A regex that does not compile degrades to a literal match.
+ *
+ * `compiled` is for callers that split MANY lines with one query: compiling a
+ * `RegExp` per call costs a few microseconds, which is invisible for one line
+ * and adds up to milliseconds for the up-to-400 result rows a content search
+ * renders. Pass the same pattern the flags describe (`g`/`gi`, regex mode); a
+ * caller that passes nothing keeps the old behaviour.
  */
-export function splitMatches(text: string, query: string, regex: boolean, caseSensitive: boolean): { text: string; hit: boolean }[] {
+export function splitMatches(
+  text: string,
+  query: string,
+  regex: boolean,
+  caseSensitive: boolean,
+  compiled?: RegExp | null,
+): { text: string; hit: boolean }[] {
   const trimmed = query
   if (trimmed === '') return [{ text, hit: false }]
   let pattern: RegExp
   try {
-    pattern = regex
+    pattern = compiled ?? (regex
       ? new RegExp(trimmed, caseSensitive ? 'g' : 'gi')
-      : new RegExp(trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'g' : 'gi')
+      : new RegExp(trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'g' : 'gi'))
   } catch {
     pattern = new RegExp(trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'g' : 'gi')
   }
+  // A shared pattern carries `lastIndex` between calls, and this loop leaves it
+  // wherever the last match ended — so a reused regex would start mid-line on
+  // the next row and silently drop that row's earlier matches.
+  pattern.lastIndex = 0
   const out: { text: string; hit: boolean }[] = []
   let last = 0
   let guard = 0

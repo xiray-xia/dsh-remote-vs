@@ -170,7 +170,31 @@ export function XTerm(props: {
       },
     }
 
-    term.onData((data) => send(ws, { t: 'in', d: data }))
+    /**
+     * Terminal input, chunked because `onData` hands over a whole PASTE at
+     * once: the host refuses frames past its own cap (it will not parse them),
+     * so one large paste would otherwise drop the connection. Splitting on code
+     * points keeps surrogate pairs whole; 64 Ki characters is at most 256 KiB of
+     * UTF-8, and ~384 KiB once JSON escapes the worst case of control
+     * characters — far under that cap either way, and far above a keystroke.
+     */
+    const INPUT_CHUNK_CHARS = 64 * 1024
+    const sendInput = (data: string): void => {
+      if (data.length <= INPUT_CHUNK_CHARS) {
+        send(ws, { t: 'in', d: data })
+        return
+      }
+      let chunk = ''
+      for (const character of data) {
+        if (chunk.length + character.length > INPUT_CHUNK_CHARS) {
+          send(ws, { t: 'in', d: chunk })
+          chunk = ''
+        }
+        chunk += character
+      }
+      if (chunk !== '') send(ws, { t: 'in', d: chunk })
+    }
+    term.onData(sendInput)
     ws.addEventListener('open', () => {
       opened = true
       pushSize()

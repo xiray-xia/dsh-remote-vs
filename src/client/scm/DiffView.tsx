@@ -67,7 +67,7 @@ interface RowWindow {
 /** What one render pass gets from `useRowWindow`. */
 interface RowWindowing {
   /** Goes on the element that owns the vertical scroll (`.rvs-diff-grid`). */
-  scrollRef: React.RefObject<HTMLDivElement>
+  attachGrid: (node: HTMLDivElement | null) => void
   onScroll: (event: React.UIEvent<HTMLDivElement>) => void
   /** The rows to paint, already sliced and clamped. */
   rows: DiffRow[]
@@ -133,52 +133,51 @@ function computeRowWindow(
  * Nothing is pinned outside the window: an off-screen hunk button is reached by
  * scrolling to its row, the same gesture as before.
  */
-function useRowWindow(rows: DiffRow[], visible: boolean, gridMounted: boolean): RowWindowing {
-  const scrollRef = useRef<HTMLDivElement>(null)
+function useRowWindow(rows: DiffRow[]): RowWindowing {
   const scrollTopRef = useRef(0)
   const heightRef = useRef(FALLBACK_VISIBLE_ROWS * ROW_HEIGHT)
   const lastWindowRef = useRef<{ rows: DiffRow[]; window: RowWindow }>({
     rows: [],
     window: { from: -1, to: -1, before: 0, after: 0 },
   })
+  const observerRef = useRef<ResizeObserver | null>(null)
   const [, bumpWindow] = useState(0)
 
   /**
-   * `useLayoutEffect`, not `useEffect`: the first painted frame must already
-   * carry the right slice, otherwise a tall file flashes its opening rows at
-   * scrollTop 0 and then jumps to where the scroll actually is.
+   * A CALLBACK ref, so the grid is measured whenever it actually mounts.
+   *
+   * A layout effect cannot do this job: a diff opens on its loading branch,
+   * where there is no grid to point at, and the grid only appears once the
+   * model arrives — at which point no dependency has changed and the effect
+   * would never run. The height would stay at the fallback and the bottom of a
+   * tall viewport would sit blank until the first scroll. React calls this on
+   * mount and with `null` on the way out, which is also the observer teardown.
+   *
+   * Measuring here keeps the guarantee that motivated the layout effect: the
+   * first painted frame already carries the right slice, so opening or resizing
+   * the split does not flash the opening rows and then jump. A 0-height reading
+   * is the grid being hidden, not a collapsed viewport, so the last real height
+   * is kept. The pane can also change size without the window following (a
+   * sidebar split, a window resize, the editor header appearing), which is what
+   * the observer below is for.
    */
-  useLayoutEffect(() => {
-    if (!visible) return undefined
-    const grid = scrollRef.current
-    if (grid === null) return undefined
-    scrollTopRef.current = grid.scrollTop
-    if (grid.clientHeight > 0) heightRef.current = grid.clientHeight
-
-    /**
-     * The pane can also be resized without the window following: a sidebar
-     * split, a window resize, or the editor header appearing. A 0-height
-     * reading is the grid being hidden, not a collapsed viewport, so the last
-     * real height is kept.
-     */
+  const attachGrid = useCallback((node: HTMLDivElement | null): void => {
+    observerRef.current?.disconnect()
+    observerRef.current = null
+    if (node === null || typeof ResizeObserver === 'undefined') return
+    scrollTopRef.current = node.scrollTop
+    if (node.clientHeight > 0) heightRef.current = node.clientHeight
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.borderBoxSize[0]
-      const measured = box === undefined ? grid.clientHeight : box.blockSize
+      const measured = box === undefined ? node.clientHeight : box.blockSize
       if (measured > 0 && measured !== heightRef.current) {
         heightRef.current = measured
         bumpWindow(step => step + 1)
       }
     })
-    observer.observe(grid)
-    // No teardown of `scrollRef`: the grid is unmounted with the mode it lives
-    // in, and React clears the ref itself, so writing `null` here would only
-    // fight that (and a readonly `RefObject` forbids it anyway).
-    return () => { observer.disconnect() }
-    // `gridMounted` belongs in the deps: the grid exists only in `split`, so a
-    // view that opens straight into 变更前/变更后 leaves the ref null and this
-    // effect would never run again — the height would stay at the fallback and
-    // the bottom of the viewport would sit blank until the first scroll.
-  }, [visible, gridMounted])
+    observer.observe(node)
+    observerRef.current = observer
+  }, [])
 
   const range = computeRowWindow(rows, scrollTopRef.current, heightRef.current, lastWindowRef)
   /**
@@ -203,7 +202,7 @@ function useRowWindow(rows: DiffRow[], visible: boolean, gridMounted: boolean): 
   }, [rows])
 
   return {
-    scrollRef,
+    attachGrid,
     onScroll,
     rows: rows.slice(range.from, range.to),
     range,
@@ -267,7 +266,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
   const rightRef = useRef<HTMLDivElement>(null)
   const hbarRef = useRef<HTMLDivElement>(null)
   const [barWidth, setBarWidth] = useState(0)
-  const rowsInView = useRowWindow(tab.model?.rows ?? [], props.visible, mode === 'split')
+  const rowsInView = useRowWindow(tab.model?.rows ?? [])
 
   /**
    * Measure the widest pane and size the top bar's spacer to it. Runs after
@@ -435,7 +434,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
           <HScrollBar barRef={hbarRef} width={barWidth} onScroll={syncFromBar} />
           {/* The grid owns the vertical scroll for all three columns, so the
               window below is shared and the panes cannot drift apart. */}
-          <div className="rvs-diff-grid" ref={rowsInView.scrollRef} onScroll={rowsInView.onScroll}>
+          <div className="rvs-diff-grid" ref={rowsInView.attachGrid} onScroll={rowsInView.onScroll}>
             <div className="rvs-diff-cols">
               {/* Left pane: fixed 50% (see .rvs-diff-col) with its own hidden
                   horizontal scroll, driven from the bar above. */}

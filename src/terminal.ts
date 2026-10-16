@@ -53,6 +53,18 @@ const EMPTY_SOCKET_TTL_MS = 10 * 60_000
 const OUT_HIGH_WATER = 4 * 1024 * 1024
 const OUT_LOW_WATER = 1 * 1024 * 1024
 
+/**
+ * The largest client frame accepted, in bytes.
+ *
+ * The only frame with a payload is `in` — keystrokes, and pastes, which the
+ * client chunks to stay under this. The upgrade server (`routes.ts`) passes
+ * this value as ws's `maxPayload`, so an oversized frame is refused before it
+ * is buffered at all; the check in `hookSocket` is the second layer, and it is
+ * what keeps such a frame from becoming a string plus an object graph in the
+ * process that also runs the agent.
+ */
+export const TERMINAL_MAX_FRAME_BYTES = 1024 * 1024
+
 export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>()
 
@@ -108,15 +120,23 @@ export class TerminalSessionRegistry {
     return id
   }
 
-  /** Attach another socket to a live session; false when unknown/dead. */
-  attach(ws: WebSocket, id: string, cols: number, rows: number): boolean {
+  /**
+   * Attach another socket to a live session; false when unknown/dead.
+   *
+   * The size in the URL is deliberately NOT applied here. It is the same
+   * fixed 80x24 the view uses to open a shell, and re-applying it on every
+   * reattach — which is what a page reload does — SHRANK a running shell:
+   * SIGWINCH, and a full-screen program re-laying itself out at 80 columns,
+   * until that tab became visible and refit. The session already has a size.
+   * The socket sends a real `resize` frame as soon as it can measure itself
+   * (`XTerm.pushSize`), which is the only place that knows how wide it is.
+   *
+   * The parameters stay because the upgrade handler owns the URL and passes
+   * them on both paths; they matter to `open` (the PTY's initial size) only.
+   */
+  attach(ws: WebSocket, id: string, _cols: number, _rows: number): boolean {
     const session = this.sessions.get(id)
     if (session === undefined || !session.alive) return false
-    try {
-      session.channel.setWindow(rows, cols, 0, 0)
-    } catch {
-      // Best effort.
-    }
     this.hookSocket(session, ws)
     this.send(ws, { t: 'ready', id })
     return true
@@ -158,6 +178,17 @@ export class TerminalSessionRegistry {
     this.cancelReap(session)
     session.sockets.add(ws)
     ws.on('message', (raw) => {
+      // Refuse an oversized frame before parsing it — see
+      // TERMINAL_MAX_FRAME_BYTES. 1009 is the protocol's "message too big".
+      const bytes = Array.isArray(raw) ? raw.reduce((total, part) => total + part.byteLength, 0) : raw.byteLength
+      if (bytes > TERMINAL_MAX_FRAME_BYTES) {
+        try {
+          ws.close(1009)
+        } catch {
+          // Already gone.
+        }
+        return
+      }
       let frame: TerminalClientFrame
       try {
         frame = JSON.parse(String(raw)) as TerminalClientFrame

@@ -20,10 +20,13 @@ import { RemoteFiles } from './sftp.ts'
 import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
 import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport } from './importers.ts'
-import { TerminalSessionRegistry } from './terminal.ts'
+import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts'
 
 /** One noServer WebSocket server for terminal upgrades (RFC 6455). */
-const terminalWss = new WebSocketServer({ noServer: true })
+// `maxPayload` is the authoritative frame bound: without it ws buffers up to its
+// 100 MiB default before the handler ever sees the message, in the process that
+// also runs the agent. Terminal frames are small JSON control messages.
+const terminalWss = new WebSocketServer({ noServer: true, maxPayload: TERMINAL_MAX_FRAME_BYTES })
 
 function queryParam(url: URL, name: string): string | undefined {
   const value = url.searchParams.get(name)

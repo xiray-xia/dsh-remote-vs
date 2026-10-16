@@ -1984,10 +1984,10 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
   color: var(--rvs-code-fg);
 }
 
-.rvs-toast.error {
-  border-color: rgba(241, 76, 76, .6);
-  background: #3a1f22;
-}
+/* `.rvs-toast.error` is styled with the overlay form further up, so the popup
+   opacity convention (an opaque Canvas base plus a token layer) still governs
+   it. A flat `background: #3a1f22` shorthand sat here and overrode that chain —
+   same opaque result, but outside the convention. */
 
 @keyframes rvsFade {
   from { opacity: 0; }
@@ -2133,25 +2133,6 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
   border-radius: 2px;
   background: rgba(226, 183, 20, .3);
   color: inherit;
-}
-
-.rvs-hit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 10px;
-  border: none;
-  background: transparent;
-  color: var(--rvs-fg);
-  font: inherit;
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.rvs-hit:hover {
-  background: var(--rvs-hover);
 }
 
 .rvs-hit-dir {

@@ -169,6 +169,24 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     return activeTab.text
   }, [activeTab])
 
+  /**
+   * The parsed Markdown preview.
+   *
+   * It used to be `renderMarkdown(activeTab.text)` inline in the JSX, which
+   * re-parsed the whole document into a fresh element tree on EVERY store
+   * publish: this component subscribes to the store, so opening another file,
+   * saving, a git refresh or switching a panel all paid for a parse of text
+   * that had not changed. `renderMarkdown` is a pure function of the text, and
+   * a tab's identity changes when its text does (`updateTab`/`reloadTab` patch
+   * the tab), so the tab is what Memo compares — the same key the `htmlDoc`
+   * memo above uses. The markdown/preview guards keep the parse from happening
+   * at all for a file that is being read in source mode.
+   */
+  const markdownPreview = useMemo(() => {
+    if (activeTab === undefined || !activeTab.markdown || !activeTab.preview) return null
+    return renderMarkdown(activeTab.text)
+  }, [activeTab])
+
   // The editor owns the live buffer; the save path pulls it imperatively
   // instead of mirroring every keystroke into React state.
   const editorRef = useRef<CodeEditorHandle>(null)
@@ -377,7 +395,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   </div>
                 )}
                 {!activeTab.image && activeTab.binary && <div className="rvs-empty">{t('editor.binary')}</div>}
-                {!activeTab.image && !activeTab.binary && activeTab.markdown && activeTab.preview && renderMarkdown(activeTab.text)}
+                {!activeTab.image && !activeTab.binary && activeTab.markdown && activeTab.preview && markdownPreview}
                 {!activeTab.image && !activeTab.binary && activeTab.html && activeTab.preview && (
                   <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="allow-same-origin" srcDoc={htmlDoc} />
                 )}

@@ -48,9 +48,32 @@ function gitBase(workdir: string): string {
   return `git -C ${shQuote(assertRemoteDir(workdir))} -c core.quotepath=false`
 }
 
+/**
+ * Byte cap on one read-only builder's stdout (the same value as `git-ops.ts`'s
+ * GIT_CAP — duplicated rather than imported, because git-ops.ts already imports
+ * this module).
+ *
+ * The host's exec route caps what it ACCUMULATES (`pool.appendCapped`,
+ * `OUTPUT_CAP`), but that only stops the string growing on this side: without a
+ * cap in the command the remote `git` still produces the whole output and ships
+ * every byte. `head -c` closes the pipe, so a huge status / diffstat kills the
+ * remote git with SIGPIPE instead — which `appendCapped` cannot do.
+ *
+ * Read-only builders only. A shell pipeline reports its LAST command's status,
+ * so a capped command reports `head`'s 0 with an empty stdout instead of its own
+ * failure (a missing `git` stops looking like an error to `result.success`).
+ * Where the exit code IS the answer, `git-ops.ts` has `statusOk()`: it captures
+ * git's status, then emits the same capped bytes and exits with that status.
+ */
+const GIT_CAP = 2_000_000
+
+function capped(command: string): string {
+  return `${command} | head -c ${GIT_CAP}`
+}
+
 /** Branch + porcelain status in one call. */
 export function statusCommand(workdir: string): string {
-  return `${gitBase(workdir)} status --porcelain=v1 -b --untracked-files=normal`
+  return capped(`${gitBase(workdir)} status --porcelain=v1 -b --untracked-files=normal`)
 }
 
 /** Structured log for the graph renderer. */
@@ -62,17 +85,17 @@ export function logCommand(workdir: string, max: number, branch?: string): strin
 
 /** Local branch list. */
 export function branchesCommand(workdir: string): string {
-  return `${gitBase(workdir)} for-each-ref --format='%(refname:short)%x1f%(objectname:short)%x1f%(upstream:short)%x1f%(HEAD)' refs/heads`
+  return capped(`${gitBase(workdir)} for-each-ref --format='%(refname:short)%x1f%(objectname:short)%x1f%(upstream:short)%x1f%(HEAD)' refs/heads`)
 }
 
 /** Full message of one commit. */
 export function messageCommand(workdir: string, ref: string): string {
-  return `${gitBase(workdir)} log -1 --pretty=%B ${assertRef(ref)} --`
+  return capped(`${gitBase(workdir)} log -1 --pretty=%B ${assertRef(ref)} --`)
 }
 
 /** Diffstat of one commit. */
 export function statCommand(workdir: string, ref: string): string {
-  return `${gitBase(workdir)} show --color=never --stat --oneline ${assertRef(ref)} --`
+  return capped(`${gitBase(workdir)} show --color=never --stat --oneline ${assertRef(ref)} --`)
 }
 
 /** True when stderr reports a non-repository / missing git. */

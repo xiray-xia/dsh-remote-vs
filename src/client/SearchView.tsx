@@ -224,6 +224,27 @@ export function SearchView(): ReactNode {
 
   const groups = useMemo(() => groupHits(contentHits), [contentHits])
 
+  /**
+   * The content query, compiled ONCE per (text, flags) instead of once per
+   * result row.
+   *
+   * `splitMatches` compiles a `RegExp` on every call, and it is called from
+   * inside the row's JSX — so a 400-hit result rebuilt 400 regexes on every
+   * render, and this panel re-renders on every store publish (it subscribes to
+   * the whole store). Passing the compiled pattern down makes that one
+   * compile per query change. A pattern that does not compile yields null, and
+   * `splitMatches` falls back to the literal match it already implements.
+   */
+  const contentPattern = useMemo(() => {
+    const text = query.trim()
+    if (text === '' || !options.regex) return null
+    try {
+      return new RegExp(text, options.caseSensitive ? 'g' : 'gi')
+    } catch {
+      return null
+    }
+  }, [query, options.regex, options.caseSensitive])
+
   const toggle = (title: string, active: boolean, onClick: () => void, body: ReactNode): ReactNode => (
     <button
       type="button"
@@ -368,7 +389,7 @@ export function SearchView(): ReactNode {
                   >
                     <span className="rvs-hit-lineno">{hit.line}</span>
                     <span className="rvs-hit-text">
-                      {splitMatches(hit.text, query.trim(), options.regex, options.caseSensitive).map((part, index) => (
+                      {splitMatches(hit.text, query.trim(), options.regex, options.caseSensitive, contentPattern).map((part, index) => (
                         part.hit
                           ? <mark key={index} className="rvs-mark">{part.text}</mark>
                           : <span key={index}>{part.text}</span>
