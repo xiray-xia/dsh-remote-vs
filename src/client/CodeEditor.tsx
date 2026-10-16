@@ -107,16 +107,21 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   onTokens?: (count: number) => void
   /**
    * Reports this editor's scroll + caret as they change, and once more when it
-   * unmounts.
+   * unmounts. The FIRST argument is this editor's own tab id, so the consumer
+   * never has to guess which tab a reading belongs to.
    *
    * The editor reports it, rather than the parent asking through the ref,
    * because the parent's ref is already `null` by the time its layout-effect
    * cleanup runs — React clears a child's ref before running the parent's
-   * cleanup (measured: `.spike/tabswitch-debug.mjs` printed
-   * `refTouches=null captured=undefined`). Only this component still holds the
-   * `EditorView` at that moment.
+   * cleanup. Only this component still holds the `EditorView` at that moment.
    */
-  onViewState?: (state: CodeEditorViewState) => void
+  onViewState?: (tabId: string, state: CodeEditorViewState) => void
+  /**
+   * This editor's tab id, echoed back with every report (see `onViewState`).
+   * Optional because the diff panes mount `CodeEditor` too and have no tab of
+   * their own; they pass no `onViewState`, so nothing is reported for them.
+   */
+  tabId?: string
   /**
    * Scroll + caret to restore after this instance mounts.
    *
@@ -248,41 +253,18 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   }, [findOpen])
 
   /**
-   * Report SCROLL as it moves, so a tab switch can come back to it.
+   * Note on the SCROLL report: it is wired up INSIDE the mount effect below,
+   * where the view is created — not in an effect of its own. An earlier version
+   * used a separate `useEffect` declared ABOVE the mount effect, and that
+   * silently did nothing: React runs same-kind effects in declaration order, so
+   * it executed while `viewRef.current` was still `undefined`,
+   * `addEventListener` was skipped through the optional chain, and its deps
+   * never changed afterwards so it never retried. The result was an empty
+   * position map and a tab switch that always snapped back to the top.
    *
-   * Throttled to an animation frame: a scroll fires per wheel tick and the
-   * consumer keeps one snapshot per tab, so coalescing is free. The selection
-   * half is reported by the update listener in the mount extensions (CodeMirror
-   * is the only thing that sees a caret move).
+   * The SELECTION half is reported by an update listener in the mount
+   * extensions, since CodeMirror is the only thing that sees a caret move.
    */
-  useEffect(() => {
-    const report = (): void => {
-      const view = viewRef.current
-      const handler = propsRef.current.onViewState
-      if (view === undefined || handler === undefined) return
-      handler({
-        scrollTop: view.scrollDOM.scrollTop,
-        scrollLeft: view.scrollDOM.scrollLeft,
-        cursor: view.state.selection.main.head,
-        ranges: view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
-      })
-    }
-    let frame: number | undefined
-    const schedule = (): void => {
-      if (frame !== undefined) return
-      frame = window.requestAnimationFrame(() => {
-        frame = undefined
-        report()
-      })
-    }
-    const scroller = viewRef.current?.scrollDOM
-    scroller?.addEventListener('scroll', schedule)
-    schedule()
-    return () => {
-      if (frame !== undefined) window.cancelAnimationFrame(frame)
-      scroller?.removeEventListener('scroll', schedule)
-    }
-  }, [props.onViewState])
 
   useImperativeHandle(ref, () => ({
     getContent: () => viewRef.current?.state.doc.toString() ?? savedRef.current,
@@ -480,10 +462,11 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       EditorView.updateListener.of((update) => {
         if (!update.selectionSet) return
         const handler = propsRef.current.onViewState
-        if (handler === undefined) return
+        const tabId = propsRef.current.tabId
+        if (handler === undefined || tabId === undefined) return
         const state = viewRef.current
         if (state === undefined) return
-        handler({
+        handler(tabId, {
           scrollTop: state.scrollDOM.scrollTop,
           scrollLeft: state.scrollDOM.scrollLeft,
           cursor: state.state.selection.main.head,
@@ -527,13 +510,102 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       } catch {
         // A malformed capture must never break the editor.
       }
-      const frame = window.requestAnimationFrame(() => {
+      /**
+       * Re-apply across frames until it sticks.
+       *
+       * A single `scrollTop` write is not enough: CodeMirror measures lazily and
+       * its scroll handler scrolls the caret back into view, so a write made
+       * before (or between) those passes is silently replaced with 0 and the
+       * tab appears to have lost its position. Repeating for a few frames costs
+       * nothing when the first write already won, and is what makes the restore
+       * actually hold. Measured: without the retry the value came back as 0.
+       */
+      let attempts = 0
+      const applyScroll = (): void => {
         const scroller = viewRef.current?.scrollDOM
         if (scroller === undefined) return
-        scroller.scrollTop = restore.scrollTop
-        scroller.scrollLeft = restore.scrollLeft
+        if (scroller.scrollTop !== restore.scrollTop) scroller.scrollTop = restore.scrollTop
+        if (scroller.scrollLeft !== restore.scrollLeft) scroller.scrollLeft = restore.scrollLeft
+        attempts += 1
+        if (attempts < 8 && scroller.scrollTop !== restore.scrollTop) {
+          restoreFrame = window.requestAnimationFrame(applyScroll)
+        }
+      }
+      restoreFrame = window.requestAnimationFrame(applyScroll)
+    }
+
+    /**
+     * Publish scroll + caret upward, now that the view exists.
+     *
+     * Deliberately wired HERE and not in an effect of its own: the view is
+     * created in this effect, so anything declared before it would run while
+     * `viewRef.current` is still undefined and would never retry. (That was the
+     * bug — a position map that stayed empty, and a tab switch that always
+     * snapped back to the top.)
+     */
+    /**
+     * Last position read WHILE THE VIEW WAS LIVE.
+     *
+     * The unmount report must not re-read `.scrollTop`: by then React has
+     * detached the subtree and the scroller reports 0, which overwrote the real
+     * position on the way out.
+     */
+    const lastLive = { scrollTop: 0, scrollLeft: 0, cursor: 0, ranges: [] as { anchor: number; head: number }[] }
+    const capture = (): void => {
+      lastLive.scrollTop = view.scrollDOM.scrollTop
+      lastLive.scrollLeft = view.scrollDOM.scrollLeft
+      lastLive.cursor = view.state.selection.main.head
+      lastLive.ranges = view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head }))
+    }
+
+    /**
+     * Publish scroll + caret upward, now that the view exists.
+     *
+     * The tab id travels WITH the reading. It cannot be inferred by the parent
+     * from "which tab is active right now": React unmounts the outgoing editor
+     * and mounts the incoming one in the same commit, so the incoming editor's
+     * first report (scrollTop 0) arrives while the parent still sees the
+     * OUTGOING tab as active — and overwrote the position just saved for it.
+     * Measured: the map held `App.tsx: 1656`, then flipped back to 0, and every
+     * switch landed at the top.
+     *
+     * Wired HERE and not in an effect of its own: the view is created in this
+     * effect, so anything declared before it would run while `viewRef.current`
+     * is still undefined and would never retry.
+     */
+    const report = (source: string): void => {
+      const handler = propsRef.current.onViewState
+      const tabId = propsRef.current.tabId
+      if (handler === undefined || tabId === undefined) return
+      if (source === 'unmount') {
+        // Publish the last live reading, not a fresh one (see `lastLive`).
+        handler(tabId, { ...lastLive, ranges: lastLive.ranges.map(range => ({ ...range })) })
+        return
+      }
+      capture()
+      handler(tabId, { ...lastLive, ranges: lastLive.ranges.map(range => ({ ...range })) })
+    }
+    let reportFrame: number | undefined
+    const scheduleReport = (): void => {
+      // Record the scroll offset synchronously: the throttled report may not
+      // have run yet when the tab is switched away in the same frame, and
+      // "last live reading" has to mean the latest, not the latest reported.
+      lastLive.scrollTop = view.scrollDOM.scrollTop
+      lastLive.scrollLeft = view.scrollDOM.scrollLeft
+      if (reportFrame !== undefined) return
+      reportFrame = window.requestAnimationFrame(() => {
+        reportFrame = undefined
+        report('scroll-rAF')
       })
-      restoreFrame = frame
+    }
+    view.scrollDOM.addEventListener('scroll', scheduleReport)
+    // One report right after mount, so a never-scrolled tab has an entry too.
+    report('mount')
+    const disposeViewReport = (): void => {
+      view.scrollDOM.removeEventListener('scroll', scheduleReport)
+      if (reportFrame !== undefined) window.cancelAnimationFrame(reportFrame)
+      // One last report while the view is still alive.
+      report('unmount')
     }
     /**
      * Self-verifying coloring.
@@ -597,22 +669,12 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       popupRef.current.hide()
       unwatchTheme()
       /**
-       * Last report BEFORE the view goes away.
-       *
-       * This is the only reliable place to capture the position: the parent's
-       * ref is already null by the time its own cleanup runs (React clears a
-       * child's ref first), so the parent cannot ask for it. Also covers a tab
-       * closed while it was the active one.
+       * Last report BEFORE the view goes away, which is the only reliable place
+       * to capture the position: the parent's ref is already null by the time
+       * its own cleanup runs (React clears a child's ref first), so the parent
+       * cannot ask for it. Also covers a tab closed while it was the active one.
        */
-      const handler = propsRef.current.onViewState
-      if (handler !== undefined) {
-        handler({
-          scrollTop: view.scrollDOM.scrollTop,
-          scrollLeft: view.scrollDOM.scrollLeft,
-          cursor: view.state.selection.main.head,
-          ranges: view.state.selection.ranges.map(range => ({ anchor: range.anchor, head: range.head })),
-        })
-      }
+      disposeViewReport()
       view.destroy()
       viewRef.current = undefined
     }

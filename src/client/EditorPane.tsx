@@ -143,10 +143,23 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    * mounts on `editorSurface` and must keep doing so.
    */
   const viewStates = useRef(new Map<string, CodeEditorViewState>())
-  const activeTabId = activeTab?.id
-  const rememberViewState = useCallback((state: CodeEditorViewState): void => {
-    if (activeTabId !== undefined) viewStates.current.set(activeTabId, state)
-  }, [activeTabId])
+  /**
+   * Store a reading under the tab that produced it.
+   *
+   * The tab id comes FROM the report, never from "which tab is active now":
+   * React unmounts the outgoing editor and mounts the incoming one in the same
+   * commit, so the incoming editor's first report (scrollTop 0) arrives while
+   * this component still sees the OUTGOING tab as active. Keying on that
+   * overwrote the position just saved for the tab being left — the map held
+   * `App.tsx: 1656` and then flipped back to 0, so every switch landed at the
+   * top.
+   *
+   * No dependency on the active tab either: the callback has to be able to
+   * accept a report for any tab.
+   */
+  const rememberViewState = useCallback((tabId: string, state: CodeEditorViewState): void => {
+    viewStates.current.set(tabId, state)
+  }, [])
 
   /**
    * True only while the CodeMirror instance for the active tab is mounted.
@@ -320,6 +333,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       ref={editorRef}
                       initial={activeTab.text}
                       path={activeTab.fullPath}
+                      tabId={activeTab.id}
                       readOnly={activeTab.truncated}
                       visible={props.visible}
                       ctx={store.ctx}
