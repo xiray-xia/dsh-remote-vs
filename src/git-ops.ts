@@ -337,6 +337,43 @@ export function parseRepoDiscovery(stdout: string): string[] {
 }
 
 /**
+ * Normalize a workspace-relative repository directory. `''` means "the workspace
+ * root itself", which is what a workspace whose root IS the repository uses.
+ *
+ * Pure and host-free so the client can persist exactly what the host will later
+ * resolve: leading/trailing separators drop, `.` segments drop, and a `..`
+ * segment pops its parent — so a picker can never address anything above the
+ * workspace root (a leading `..` pops nothing).
+ */
+export function normalizeRepoSubdir(input: string): string {
+  const stack: string[] = []
+  for (const segment of input.replace(/\\/g, '/').split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') stack.pop()
+    else stack.push(segment)
+  }
+  return stack.join('/')
+}
+
+/** The absolute directory git commands run in for one workspace + subdir. */
+export function repoWorkdir(workspaceRoot: string, subdir: string): string {
+  const base = workspaceRoot.replace(/\/+$/, '')
+  const clean = normalizeRepoSubdir(subdir)
+  return clean === '' ? base : `${base}/${clean}`
+}
+
+/**
+ * A directory expressed relative to a workspace root, or undefined when it sits
+ * outside it. Turns a probed repository root back into the stored subdir, so
+ * choosing a directory INSIDE a repository settles on that repository's root.
+ */
+export function repoSubdirOf(workspaceRoot: string, dir: string): string | undefined {
+  const base = workspaceRoot.replace(/\/+$/, '')
+  if (dir === base) return ''
+  return dir.startsWith(`${base}/`) ? normalizeRepoSubdir(dir.slice(base.length + 1)) : undefined
+}
+
+/**
  * Porcelain v1 in `-z` form: `XY PATH\0` records, rename/copy records carry
  * `XY NEW\0OLD\0` (the field order is reversed versus the arrow form), and
  * ignored entries arrive as `!! PATH`.

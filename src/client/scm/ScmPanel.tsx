@@ -27,12 +27,14 @@ import {
   unstagePaths,
 } from './actions.ts'
 import type { ChangeEntry } from './status-map.ts'
+import { RepoPicker } from './RepoPicker.tsx'
 import {
   IconBranch,
   IconButton,
   IconCheck,
   IconChevronRight,
   IconClose,
+  IconFolder,
   IconPlus,
   IconRefresh,
   IconSync,
@@ -75,6 +77,7 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
   const [remoteOpen, setRemoteOpen] = useState(false)
   const [newBranch, setNewBranch] = useState('')
   const [remoteForm, setRemoteForm] = useState({ name: '', url: '' })
+  const [picker, setPicker] = useState(false)
 
   const fold = (id: string): void => setFolded(prev => ({ ...prev, [id]: prev[id] !== true }))
 
@@ -302,10 +305,55 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
           <IconRefresh size={14} />
         </IconButton>
       </div>
+      {/* Git answers for the directory it runs in, so a binding whose repository
+          sits in a sub-directory needs this row (the workspace picker above only
+          names the binding). */}
+      <div className="rvs-repo-bar" title={store.repoWorkdir === '' ? undefined : store.repoWorkdir}>
+        <span className="rvs-repo-bar-label">{t('scm.repoDir')}</span>
+        <button
+          type="button"
+          className="rvs-repo-bar-path"
+          title={t('scm.repoDirHint')}
+          onClick={() => setPicker(true)}
+        >
+          {store.repoSubdir === '' ? t('scm.repoDirRoot') : store.repoSubdir}
+        </button>
+        {store.repoSubdir !== '' && (
+          <IconButton
+            title={t('scm.repoDirReset')}
+            disabled={store.gitBusy}
+            onClick={() => {
+              void store.setRepoSubdir('').then(() => toast(t('scm.repoDirSwitched')))
+            }}
+          >
+            <IconClose size={12} />
+          </IconButton>
+        )}
+        <IconButton title={t('scm.browse')} onClick={() => setPicker(true)}>
+          <IconFolder size={14} />
+        </IconButton>
+      </div>
+      {picker && (
+        <RepoPicker
+          alias={alias}
+          root={store.root}
+          current={store.repoSubdir}
+          onClose={() => setPicker(false)}
+          onPick={(subdir) => {
+            setPicker(false)
+            void store.setRepoSubdir(subdir).then(() => toast(t('scm.repoDirSwitched')))
+          }}
+        />
+      )}
       <div className="rvs-scroll">
         {repoRoot === undefined && (
           <div className="rvs-empty">
             {store.repoMissing ? t('git.hint') : t('common.loading')}
+            {store.repoMissing && (
+              <div className="rvs-repo-bar-fix">
+                <button type="button" className="rvs-chip" onClick={() => setPicker(true)}>{t('scm.browse')}</button>
+              </div>
+            )}
           </div>
         )}
         {repoRoot !== undefined && (
