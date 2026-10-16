@@ -856,6 +856,13 @@ body[data-ds-dark-theme] .rvs-root {
   background: var(--rvs-code-bg);
 }
 
+/* Keep a panel mounted but out of layout (and out of the a11y tree). Used by
+   the editor host in preview mode: unmounting it destroyed the buffer and the
+   undo stack, hiding it preserves both. */
+.rvs-hidden {
+  display: none !important;
+}
+
 /* ------------------------------------------------------- preview surfaces */
 
 .rvs-preview-img {
