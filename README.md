@@ -29,11 +29,13 @@ P2 起原生工具在远端工作区里透明跑远端（见下）。
 ## 安装
 
 ```sh
-dsh plugin add github:xiray-xia/dsh-remote-vs
+dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
 ```
 
-要求 DSH `0.2.1-alpha.4`。首次安装按提示在 profile 的 `pnpm-workspace.yaml`
-里放行构建脚本后重跑；装完重启 `dsh web`，打开设置 → 远程主机开配。
+要求 DSH `0.2.1-alpha.4`。`--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
+必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。首次安装按提示在
+该 profile 的 `pnpm-workspace.yaml` 里放行构建脚本后重跑；装完重启 `dsh web`，打开设置 →
+远程主机开配。
 
 ## 能力
 
