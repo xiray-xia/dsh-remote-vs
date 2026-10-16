@@ -80,9 +80,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const loadDir = useCallback(async (dir: string, force = false): Promise<void> => {
     if (alias === '') return
     const key = dirKey(alias, dir)
-    if (!force) {
-      setListings(prev => (prev[key] === undefined ? prev : prev))
-    }
+    // NOTE: a cached listing is deliberately NOT reused here. The old form was
+    // `setListings(prev => prev[key] === undefined ? prev : prev)`, an identity
+    // update that changed nothing and read like a cache short-circuit; every
+    // caller therefore re-lists, which is what the tree relies on after a
+    // write. (The `force` flag only distinguishes caller intent.)
+    void force
     setLoading(prev => {
       const next = new Set(prev)
       next.add(key)
@@ -398,10 +401,16 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       setSelected(new Set([entry.path]))
       setAnchor(entry.path)
     }
-    const targets = entry !== undefined
-      ? (selected.has(entry.path) && selected.size > 1 ? selectedEntries : [entry])
-      : []
-    const dir = entry === undefined ? root : (entry.isDir ? entry.path : entry.path.split('/').slice(0, -1).join('/') || '/')
+    // Both of these were nested ternaries — the project's own review checklist
+    // forbids them, and they sat exactly where the multi-select / context-menu
+    // semantics are decided, which is the worst place to make a reader decode
+    // a two-level conditional.
+    const multi = entry !== undefined && selected.has(entry.path) && selected.size > 1
+    const targets = entry === undefined ? [] : (multi ? selectedEntries : [entry])
+    let dir = root
+    if (entry !== undefined) {
+      dir = entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/')
+    }
     const entries: MenuEntry[] = [
       { label: t('files.newFile'), onSelect: () => setCreating({ dir, kind: 'file' }) },
       { label: t('files.newFolder'), onSelect: () => setCreating({ dir, kind: 'folder' }) },
@@ -492,6 +501,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
             onCancel={() => setCreating(undefined)}
             fileIcon={<FileIcon path="name.ts" size={15} />}
             folderIcon={<FolderIcon path="name" open={false} size={15} />}
+            t={t}
           />
         )}
         {(rows ?? []).map((entry) => {
@@ -549,13 +559,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
                       {entry.name}
                     </span>
                   )}
-                {status !== undefined && entry.isDir !== true && (
+                {status !== undefined && (
                   <span className={`rvs-git-letter rvs-letter-${gitStatusClass(status)}`}>{gitLetter(status)}</span>
                 )}
-                {status !== undefined && entry.isDir && (
-                  <span className={`rvs-git-letter rvs-letter-${gitStatusClass(status)}`}>{gitLetter(status)}</span>
-                )}
-                {entry.isSymlink && <span className="rvs-hit-dir" title="symlink">↩</span>}
+                {entry.isSymlink && <span className="rvs-hit-dir" title={t('files.symlink')}>↩</span>}
                 <span className="rvs-node-actions">
                   <button
                     type="button"
@@ -634,13 +641,15 @@ function CreateRow(props: {
   onCancel: () => void
   fileIcon: ReactNode
   folderIcon: ReactNode
+  /** Translator, passed in: this component has no store scope of its own. */
+  t: (key: string) => string
 }): ReactNode {
   return (
     <div className="rvs-node" style={{ paddingLeft: 8 + props.depth * 14 }} onClick={(e) => e.stopPropagation()}>
       <span className="rvs-node-icon">{props.kind === 'folder' ? props.folderIcon : props.fileIcon}</span>
       <RenameInput
         initial=""
-        placeholder={props.kind === 'folder' ? 'folder name' : 'file name'}
+        placeholder={props.kind === 'folder' ? props.t('files.folderPlaceholder') : props.t('files.filePlaceholder')}
         onCommit={props.onCommit}
         onCancel={props.onCancel}
       />

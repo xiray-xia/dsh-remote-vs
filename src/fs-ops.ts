@@ -47,12 +47,11 @@ export function moveToCommand(from: string, intoDir: string, name?: string): str
   return `mv -- ${source} ${target}`
 }
 
-/** Remove a directory tree. */
-export function removeTreeCommand(path: string): string {
-  return `rm -rf -- ${shQuote(assertAbsPath(path))}`
-}
-
-/** Whether a remote path exists (and its type). */
-export function statCommand(path: string): string {
-  return `if [ -d ${shQuote(assertAbsPath(path))} ]; then echo dir; elif [ -e ${shQuote(assertAbsPath(path))} ]; then echo file; else echo none; fi`
-}
+// Two builders were removed from this file because nothing imported them:
+// `removeTreeCommand` (`rm -rf -- <path>`) and `statCommand`. Both had live,
+// tested counterparts elsewhere — removal goes through the SFTP route
+// (`sftp.ts` `removeTree`, which re-reads each child's attributes, refuses a
+// symlink, and rejects `/`), and stat through `git-format.ts` `statCommand`.
+// An unreachable `rm -rf` builder is stale destructive API: `assertAbsPath`
+// legitimately accepts `/`, so wiring it up later would put `rm -rf -- /` one
+// call away. Re-add it with the same guards as `sftp.ts` if it is ever needed.

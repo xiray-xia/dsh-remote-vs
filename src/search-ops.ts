@@ -103,10 +103,21 @@ export interface ContentSearchResult {
   linesClipped: boolean
 }
 
-/** Parse the NUL-separated grep output (tolerating a fallback colon format). */
-export function parseContentHits(stdout: string, maxResults = DEFAULT_CONTENT_OPTIONS.maxResults): ContentSearchResult {
+/**
+ * Parse the NUL-separated grep output (tolerating a fallback colon format).
+ *
+ * `maxLineChars` must be the cap the COMMAND was built with, not the default:
+ * the parser cannot otherwise know where the `cut` happened, and comparing
+ * against the default reports "line clipped" on lines of the wrong length.
+ */
+export function parseContentHits(
+  stdout: string,
+  maxResults = DEFAULT_CONTENT_OPTIONS.maxResults,
+  maxLineChars = DEFAULT_CONTENT_OPTIONS.maxLineChars,
+): ContentSearchResult {
   const hits: ContentHit[] = []
   const max = Math.max(1, Math.floor(maxResults))
+  const charCap = Math.max(1, Math.floor(maxLineChars))
   let truncated = false
   let linesClipped = false
   for (const raw of stdout.split('\n')) {
@@ -130,7 +141,11 @@ export function parseContentHits(stdout: string, maxResults = DEFAULT_CONTENT_OP
     const line = Number(rest.slice(0, colon))
     if (!Number.isFinite(line) || line <= 0) continue
     const text = rest.slice(colon + 1)
-    if (text.length >= DEFAULT_CONTENT_OPTIONS.maxLineChars - 1) linesClipped = true
+    // Compare against the cap the command used. `cut -c1-N` keeps N characters,
+    // so a line of exactly N is only "possibly clipped" when it is the LAST
+    // field (there is nothing after it to prove otherwise); flag at N-1 to stay
+    // conservative, but against the CALLER's N.
+    if (text.length >= charCap - 1) linesClipped = true
     if (hits.length >= max) {
       truncated = true
       break

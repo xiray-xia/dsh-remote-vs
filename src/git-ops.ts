@@ -333,13 +333,16 @@ export function initCommand(workdir: string): string {
  * The caller writes the patch through SFTP first — no stdin channel exists on
  * the exec route, and a temp file also keeps the patch out of shell quoting.
  */
+/** `git apply` argument set per hunk action (a map, not a nested ternary). */
+const APPLY_ARGS: Record<'stage' | 'unstage' | 'revert', string> = {
+  stage: '--cached --whitespace=nowarn',
+  unstage: '--cached --reverse --whitespace=nowarn',
+  revert: '--reverse --whitespace=nowarn',
+}
+
 export function applyPatchCommand(workdir: string, patchPath: string, mode: 'stage' | 'unstage' | 'revert'): string {
   const file = shQuote(assertRemoteDir(patchPath))
-  const args = mode === 'stage'
-    ? '--cached --whitespace=nowarn'
-    : mode === 'unstage'
-      ? '--cached --reverse --whitespace=nowarn'
-      : '--reverse --whitespace=nowarn'
+  const args = APPLY_ARGS[mode]
   // `git apply` is the whole point of this call, so its exit status is the
   // result: a plain `; rm -f` would hand back rm's 0 and report a rejected
   // hunk as staged. The status is latched into a variable before the cleanup
@@ -420,8 +423,11 @@ export function parseStatusDetail(stdout: string): GitStatusDetail {
     if (field === '') continue
     if (field.startsWith('##')) continue
     if (field.length < 4 || field[2] !== ' ') {
-      // A truncated tail (the byte cap can cut mid-record) — stop here.
-      if (field.length > 0 && !fields[i - 1 + 1]?.startsWith('##')) truncated = true
+      // A malformed record means the byte cap cut the stream mid-record; stop
+      // here. (`fields[i - 1 + 1]` used to test the CURRENT field's `##`
+      // prefix, which is unreachable anyway because `statusDetailCommand` does
+      // not pass `-b` — the branch header is never present.)
+      truncated = true
       break
     }
     const x = field[0] as string

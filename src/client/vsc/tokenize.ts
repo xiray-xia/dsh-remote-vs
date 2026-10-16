@@ -33,7 +33,14 @@ export interface Token {
   kind: TokenKind
 }
 
-/** Carry-over state between lines (block comments, python docstrings). */
+/**
+ * Carry-over state between lines: BLOCK COMMENTS ONLY.
+ *
+ * Python triple-quoted strings deliberately do not carry over — the python
+ * branch returns as soon as it finds no closing quote on the line, so a
+ * multi-line docstring is coloured on its first line and left plain after it.
+ * The docstring here used to claim otherwise.
+ */
 export interface LexState {
   blockEnd: string | undefined
 }
@@ -252,7 +259,11 @@ export function langLabel(lang: LangId | undefined): string {
   }
 }
 
-const IDENT_START = /[A-Za-z_$\\]/
+// `\\` used to be inside this class, which made a lone backslash an identifier
+// START (and then a one-character "word"): no supported language prefixes an
+// identifier with a backslash, and shell/python line continuations were being
+// classified as identifiers instead of operators.
+const IDENT_START = /[A-Za-z_$]/
 const IDENT = /[A-Za-z0-9_$]/
 const DIGIT = /[0-9]/
 

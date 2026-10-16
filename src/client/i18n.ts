@@ -3,6 +3,25 @@
  * dictionary instead of the locale service; keys are added with each view.
  */
 
+/**
+ * Keys reached through a LOOKUP rather than a literal translator call.
+ *
+ * The status chip picks its label from a table and the hunk toast picks one of
+ * three by action, so a source scan cannot see them — `.spike/i18n-check.mjs`
+ * would report them as orphans and invite someone to delete live copy. Listing
+ * them here keeps the check meaningful in both directions: every entry must
+ * exist in both dictionaries, and nothing else may be unreferenced.
+ */
+export const DYNAMIC_KEYS = [
+  'common.loading',
+  'editor.saving',
+  'editor.unsaved',
+  'editor.saved',
+  'scm.hunkStaged',
+  'scm.hunkUnstaged',
+  'scm.hunkReverted',
+] as const
+
 const zh: Record<string, string> = {
   'tab.workspaces': '工作区',
   'tab.files': '文件',
@@ -62,6 +81,9 @@ const zh: Record<string, string> = {
   'files.selectWorkspace': '选择一个远端工作区：',
   'files.newFile': '新建文件',
   'files.newFolder': '新建文件夹',
+  'files.filePlaceholder': '文件名',
+  'files.folderPlaceholder': '文件夹名',
+  'files.symlink': '符号链接',
   'files.refresh': '刷新',
   'files.referenceFile': '@文件',
   'files.addToConversation': '添加到对话',
@@ -347,6 +369,9 @@ const en: Record<string, string> = {
   'files.selectWorkspace': 'Pick a remote workspace:',
   'files.newFile': 'New file',
   'files.newFolder': 'New folder',
+  'files.filePlaceholder': 'file name',
+  'files.folderPlaceholder': 'folder name',
+  'files.symlink': 'symlink',
   'files.refresh': 'Refresh',
   'files.referenceFile': '@File',
   'files.addToConversation': 'Add to conversation',

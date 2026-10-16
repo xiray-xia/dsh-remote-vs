@@ -64,6 +64,13 @@ function HScrollBar(props: {
   )
 }
 
+/** i18n key per hunk action (a map, not a nested ternary). */
+const HUNK_TOAST_KEY: Record<'stage' | 'unstage' | 'revert', string> = {
+  stage: 'scm.hunkStaged',
+  unstage: 'scm.hunkUnstaged',
+  revert: 'scm.hunkReverted',
+}
+
 export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, lang } = store
@@ -161,7 +168,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
       await applyHunk(store.alias, store.repoRoot, hunk.patch, kind)
       await store.afterWrite()
       await store.reloadTab(tab.id)
-      toast(kind === 'stage' ? t('scm.hunkStaged') : kind === 'unstage' ? t('scm.hunkUnstaged') : t('scm.hunkReverted'))
+      toast(t(HUNK_TOAST_KEY[kind]))
     } catch (error) {
       toast(error instanceof GitOpError || error instanceof Error ? error.message : String(error), true)
     } finally {
@@ -363,14 +370,4 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
         )}
     </div>
   )
-}
-
-/** Base name for a tab title (kept local so the diff view has no store hop). */
-export function diffTitle(path: string): string {
-  return baseName(path)
-}
-
-/** Language label helper for the info bar. */
-export function diffLangLabel(path: string): string {
-  return langFromPath(path) ?? ''
 }

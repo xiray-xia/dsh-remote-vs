@@ -82,12 +82,6 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   revealNonce?: number
   /** Reports how many token spans the grammar produced (diagnostics). */
   onTokens?: (count: number) => void
-  /**
-   * Element the find widget is portalled into (the code-area box). Portalling
-   * puts the widget OUTSIDE every scroller in the editor subtree, so no scroll
-   * position can carry it off-screen.
-   */
-  overlayHost?: HTMLElement | null
   onSave: () => void
   onDirty: (dirty: boolean) => void
 }>(function CodeEditor(props, ref) {
@@ -183,10 +177,15 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       const host = hostRef.current
       if (host === null) return
       const rect = host.getBoundingClientRect()
-      setAnchor({
+      const next = {
         top: Math.max(4, rect.top + 6),
         right: Math.max(8, window.innerWidth - rect.right + 18),
-      })
+      }
+      // Skip the state write when nothing moved: the 350 ms poll below
+      // otherwise allocates a fresh anchor object every tick, and a new object
+      // identity means React cannot bail out of re-rendering the editor while
+      // the widget is open.
+      setAnchor(prev => (prev !== undefined && prev.top === next.top && prev.right === next.right ? prev : next))
     }
     update()
     window.addEventListener('resize', update)
@@ -401,15 +400,17 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       window.setTimeout(() => stamp(needsFallback ? 'fallback' : 'grammar'), 120)
     }
     // Two passes: the first lets CodeMirror's own highlighter settle, the
-    // second reports what actually ended up on screen.
-    window.setTimeout(armFallback, 250)
+    // second reports what actually ended up on screen. Both handles are kept
+    // so unmounting cancels them — they used to fire against a destroyed view
+    // when a tab was closed quickly.
+    const armTimer = window.setTimeout(armFallback, 250)
     // Warm the parser once so the file is never left MONOCHROME: Lezer
     // languages are highlighted from a syntax tree built by an idle-time
     // worker, and a busy main thread (the chat stream, say) can starve it
     // indefinitely. Forcing a bounded synchronous parse here costs a few
     // milliseconds and removes that whole failure mode. (The jump itself is
     // handled by the reveal effect below, which also covers re-jumps.)
-    window.setTimeout(() => {
+    const warmTimer = window.setTimeout(() => {
       try {
         ensureSyntaxTree(view.state, view.viewport.to, 300)
         view.dispatch({})
@@ -421,6 +422,8 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     // undo history and the cursor survive the swap).
     const unwatchTheme = watchEditorScheme(view)
     return () => {
+      window.clearTimeout(armTimer)
+      window.clearTimeout(warmTimer)
       popupRef.current.hide()
       unwatchTheme()
       view.destroy()

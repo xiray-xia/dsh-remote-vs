@@ -7,3 +7,8 @@ dist/
 # Local-only working docs (never push to GitHub; see MAINTENANCE §1)
 docs/P2-PLAN.md
 docs/MAINTENANCE.md
+# Review reports are local artifacts: they describe defects as they were
+# BEFORE the fixes, i.e. a map of weaknesses for anyone reading a public
+# repository. Keep them on disk, never in the tree.
+CODE-REVIEW*.md
+docs/CODE-REVIEW*.md

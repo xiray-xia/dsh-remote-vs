@@ -17,7 +17,6 @@ import {
   IconClose,
   IconPlus,
   IconTerminal,
-  baseName,
   confirmDialog,
 } from './vsc/kit.tsx'
 
@@ -177,7 +176,11 @@ export function TerminalView(props: {
   const labelFor = (tab: TermTab): string => {
     const siblings = tabs.filter(item => item.alias === tab.alias)
     const index = siblings.findIndex(item => item.id === tab.id) + 1
-    const name = baseName(tab.alias.replace(/\/+$/, '')) || tab.alias
+    // `baseName` was a no-op here: host aliases are validated server-side
+    // against [A-Za-z0-9._-]{1,64} (store.ts), so an alias can never contain a
+    // slash for baseName to strip — and the `|| tab.alias` fallback was
+    // unreachable. Reading it suggested aliases might be paths.
+    const name = tab.alias
     return siblings.length > 1 ? `${name} #${index}` : name
   }
 
@@ -212,27 +215,35 @@ export function TerminalView(props: {
 
       <div className="rvs-term-tabs" role="tablist">
         {tabs.map(tab => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={tab.id === active?.id}
-            className={`rvs-term-tab${tab.id === active?.id ? ' active' : ''}${tab.note === undefined ? '' : ' dead'}`}
-            title={`${tab.alias}${tab.session === undefined ? '' : `\n${tab.session}`}`}
-            onClick={() => setActiveId(tab.id)}
-            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); void closeTab(tab) } }}
-          >
-            <IconTerminal size={13} />
-            <span className="rvs-term-name">{labelFor(tab)}</span>
-            <span
+          // The close affordance is a SIBLING button, not a span inside the tab
+          // button: a nested interactive element is invalid, and with
+          // `role="presentation"` on it the only way to close a tab was the
+          // mouse — no keyboard path existed at all. Split out, the tab keeps
+          // role="tab" and the ✕ is a real focusable button.
+          <span key={tab.id} className="rvs-term-tabwrap">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab.id === active?.id}
+              className={`rvs-term-tab${tab.id === active?.id ? ' active' : ''}${tab.note === undefined ? '' : ' dead'}`}
+              title={`${tab.alias}${tab.session === undefined ? '' : `\n${tab.session}`}`}
+              onClick={() => setActiveId(tab.id)}
+              onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); void closeTab(tab) } }}
+            >
+              <IconTerminal size={13} />
+              <span className="rvs-term-name">{labelFor(tab)}</span>
+            </button>
+            <button
+              type="button"
               className="rvs-etab-close"
-              role="presentation"
+              aria-label={t('term.close')}
               title={t('term.close')}
-              onClick={(e) => { e.stopPropagation(); void closeTab(tab) }}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { void closeTab(tab) }}
             >
               <IconClose size={11} />
-            </span>
-          </button>
+            </button>
+          </span>
         ))}
         <button
           type="button"
