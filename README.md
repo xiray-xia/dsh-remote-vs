@@ -158,7 +158,8 @@ dsh_remote_vs/
 
 `.spike/`（gitignored）是真机验证脚本 + 本地自检脚本：`p2-router.ts` 主回归（真远端 + 真
 Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
-`model-check.mjs` / `reveal-check.mjs` / `fallback-check.mjs` / `client-load-check.mjs`（见下文“开发”）。
+`model-check.mjs` / `reveal-check.mjs` / `fallback-check.mjs` / `client-load-check.mjs` /
+`tool-schema-check.mjs`（见下文“开发”）。
 
 ## 远端工作台（VS Code 式）
 
@@ -249,6 +250,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 ```sh
 node .spike/client-load-check.mjs # 真求值客户端模块：加载期错误（模块级 TDZ 之类）tsc、打包、其它 harness 都看不见
+node .spike/tool-schema-check.mjs # 5 个 agent 工具：跑一遍 execute，用运行时的同一个校验器核对返回值和声明的输出 schema
 node .spike/model-check.mjs      # 55 项：真 git 输出 → 解析器、diff 模型、hunk 补丁可应用性、类名↔CSS 契约
 node .spike/reveal-check.mjs     # 5 项：跳转落点、落地高亮、同文件二次跳转
 node .spike/fallback-check.mjs   # 12 项：兜底着色器在真 DOM 里给 java/cpp/shell 上色
