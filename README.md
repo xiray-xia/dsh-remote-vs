@@ -60,7 +60,7 @@ dsh plugin add github:xiray-xia/dsh-remote-vs
 | 主机管理 | 增删改查、连接测试；证书 / 密码认证；配置存 `$DSH_HOME/dsh-remote.json`（0600），与 `dsh-ssh.json` 独立 |
 | 密钥 bootstrap | 密码主机一键生成专用密钥对并下发 `authorized_keys`，之后走密钥 |
 | 推送流水线 | 远端 arch/系统探测 → 版本比对 → 一致跳过 / 否则推送；executable 通道推送自编译 helper |
-| 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名。边界已加固：0 字节文件不再卡死，每个 SFTP 操作 60s 超时回收通道（详见 `docs/MAINTENANCE.md` §2.20） |
+| 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名。边界已加固：0 字节文件不再卡死，每个 SFTP 操作 60s 超时回收通道 |
 | 远端终端 | ssh2 PTY + WebSocket，xterm 渲染（复制粘贴/主题跟随/刷新重连） |
 | Git 图谱 | 远端仓库状态 + 分支 + SVG 提交图 + 提交详情（exec + 前端解析，零 Host 增量）|
 | 导入 | 从 `~/.ssh/config`、从现有 `dsh-ssh.json` 一键导入（只读一次，不耦合）|
@@ -144,7 +144,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub）
 │   ├── P2-PLAN.md          # P2 架构/分期/验收矩阵（含逐项状态）
-│   └── MAINTENANCE.md      # DSH 升级影响面 + helper 升级流程（升级先读它）
+│   └── MAINTENANCE.md      # 本地私有（.gitignore），不入库：DSH 升级影响面 + helper 升级流程
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（gitignored，link 安装后重启即生效）
 ```
@@ -152,7 +152,7 @@ dsh_remote_vs/
 `vendor/dsh-remote-helpers/`（入库）是 helper 种子：插件启动时自动铺到
 `$DSH_HOME/dsh-remote-helpers/`（缺啥补啥，永不覆盖），新机器装完即能推送。
 新版本 helper 编好后把 4 件套（tarball + sha256 + helper.json + 补丁说明）
-换进 vendor 并提交即可，见 `docs/MAINTENANCE.md` §4。
+换进 vendor 并提交即可（详细步骤在本地维护文档 `docs/MAINTENANCE.md` §4，该文件被 .gitignore，不随仓库分发）。
 
 `.spike/`（gitignored）是真机验证脚本 + 本地自检脚本：`p2-router.ts` 主回归（真远端 + 真
 Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
@@ -209,7 +209,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 - 校验：官方 `verify-ssh-helper-artifact.ts --sandbox=required` 8 项全绿
 - 缓存：`$DSH_HOME/dsh-remote-helpers/`（`*.tar.gz` + `.sha256` + `.helper.json`
   含 binarySha256，供 P2 的 helperHash）
-- 升级重编全流程见 `docs/MAINTENANCE.md` §4
+- 升级重编全流程见本地维护文档 `docs/MAINTENANCE.md` §4（.gitignore，不随仓库分发）
 
 ## 安全模型
 
@@ -238,13 +238,24 @@ dsh plugin --profile web add link:<本目录绝对路径>
 自检（不需要真机、不需要 DSH，几十秒）：
 
 ```sh
-node .spike/model-check.mjs      # 48 项：真 git/grep 输出 → 解析器、diff 模型、高亮类名↔CSS 契约
+node .spike/model-check.mjs      # 55 项：真 git 输出 → 解析器、diff 模型、hunk 补丁可应用性、类名↔CSS 契约
 node .spike/reveal-check.mjs     # 5 项：跳转落点、落地高亮、同文件二次跳转
 node .spike/fallback-check.mjs   # 12 项：兜底着色器在真 DOM 里给 java/cpp/shell 上色
+node .spike/editor-dom-check.mjs # 12 项：真 CodeMirror 在 jsdom 里对 java/shell/cpp 产出着色 span
+node .spike/i18n-check.mjs       # 中英词典一致性：无缺失键、无孤儿键、占位符形状一致
+node .spike/ref-check.mjs        # 32 项：assertRef 接受合法修订后缀、拒绝一切注入面
+node .spike/status-check.mjs     # 真 shell 里跑生成的 git 命令，验证退出码不再被管道掩盖
+node .spike/cache-check.mjs      # 增量分词缓存 vs 整篇分词，9 种语言 × 8 种编辑形态逐字节比对
 ```
 
+`markdown-check.ts` 需要先编译（它 import `.tsx`，Node 不能直跑）：
+`npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/markdown-check.js`。
+
+> `.spike/` 被 `.gitignore` 排除，这些检查只在本地存在、没有 CI；因此**引用任何数字前都要当场跑一遍**，
+> 不要照抄提交信息里的历史数字（曾经漂移出 48 / 55 两个互相矛盾的版本）。
+
 真机回归仍是 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`。
-DSH 发新版时先读 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手。
+DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到，改动 host 半后的必做动作是 `pnpm run verify:lib` + 加载自检。
 
 ## 开源许可
 

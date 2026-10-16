@@ -9,7 +9,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
-import { EditorState, StateEffect, StateField, Compartment, type Extension } from '@codemirror/state'
+import { EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
 import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { bracketMatching, ensureSyntaxTree, indentOnInput } from '@codemirror/language'
@@ -17,7 +17,7 @@ import { closeBrackets } from '@codemirror/autocomplete'
 import { search } from '@codemirror/search'
 import { syntaxHighlighting } from '@codemirror/language'
 import { vscodeHighlightStyle } from './vsc/editor-palette.ts'
-import { FindWidget, stepFind } from './vsc/FindWidget.tsx'
+import { FindWidget, clearFindMarks, findMatchHighlight, stepFind } from './vsc/FindWidget.tsx'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 import { json } from '@codemirror/lang-json'
@@ -94,6 +94,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | undefined>(undefined)
   const savedRef = useRef<string>(props.initial)
+  const savedDocRef = useRef<Text | undefined>(undefined)
   const dirtyRef = useRef<boolean>(false)
   const propsRef = useRef(props)
   propsRef.current = props
@@ -171,6 +172,11 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   useEffect(() => {
     if (!findOpen) {
       setAnchor(undefined)
+      // Closing the widget drops its match marks too: leaving the highlights
+      // behind would show a search result the user can no longer see the
+      // controls for.
+      const view = viewRef.current
+      if (view !== undefined) clearFindMarks(view)
       return
     }
     const update = (): void => {
@@ -200,7 +206,11 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     getContent: () => viewRef.current?.state.doc.toString() ?? savedRef.current,
     isDirty: () => dirtyRef.current,
     markSaved: () => {
-      savedRef.current = viewRef.current?.state.doc.toString() ?? savedRef.current
+      const view = viewRef.current
+      if (view !== undefined) {
+        savedRef.current = view.state.doc.toString()
+        savedDocRef.current = view.state.doc
+      }
       dirtyRef.current = false
       propsRef.current.onDirty(false)
     },
@@ -265,8 +275,14 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       indentOnInput(),
       bracketMatching(),
       closeBrackets(),
-      // Match highlighting only; the widget drives it.
+      // Search STATE only (the widget drives stepping); `createPanel: () =>
+      // null` keeps CodeMirror's own panel from ever rendering. Note that
+      // `@codemirror/search`'s own match highlighting stays off unless ITS
+      // panel is mounted, which is why findMatchHighlight below paints the
+      // matches instead — without it the widget counted "3/17" while nothing
+      // on screen was highlighted.
       search({ top: true }),
+      findMatchHighlight,
       initialEditorTheme(),
       // Syntax highlighting, OUTSIDE the theme compartment: colors come from
       // fixed `rvs-ck-*` classes in vsc.css, so this never needs reconfiguring
@@ -280,7 +296,13 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       ...langFor(propsRef.current.path),
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return
-        const dirty = update.state.doc.toString() !== savedRef.current
+        // Compare by `Text.eq`, not by materializing the document: the string
+        // form of a large file was copied on EVERY keystroke just to answer
+        // "is this dirty", which the file header explicitly says the editor
+        // avoids. `eq` is still O(n) but allocates nothing, and the identity
+        // short-circuit handles the common untouched case.
+        const saved = savedDocRef.current
+        const dirty = saved !== undefined && update.state.doc !== saved && !update.state.doc.eq(saved)
         if (dirty !== dirtyRef.current) {
           dirtyRef.current = dirty
           propsRef.current.onDirty(dirty)
@@ -341,6 +363,9 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       parent: host,
     })
     viewRef.current = view
+    // Baseline for the dirty check, kept as a `Text` so comparing on a
+    // keystroke does not have to materialize the document as a string.
+    savedDocRef.current = view.state.doc
     setView(view)
     /**
      * Self-verifying coloring.

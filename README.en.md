@@ -147,7 +147,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (never pushed to GitHub)
 │   ├── P2-PLAN.md          # P2 architecture/phases/acceptance matrix (with per-item status)
-│   └── MAINTENANCE.md      # DSH upgrade impact + helper upgrade procedure (read before upgrading)
+│   └── MAINTENANCE.md      # local-only (.gitignore), not shipped: DSH upgrade impact + helper procedure
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (gitignored, restart after link install to take effect)
 ```
@@ -155,7 +155,7 @@ dsh_remote_vs/
 `vendor/dsh-remote-helpers/` (committed) holds helper seeds: at startup the plugin spreads them into
 `$DSH_HOME/dsh-remote-helpers/` (copy-if-absent, never overwrites), so fresh installs can push right away.
 When a new helper is built, swap the 4-piece set (tarball + sha256 + helper.json + patch notes)
-into vendor and commit — see `docs/MAINTENANCE.md` §4.
+into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4, which is gitignored and not distributed).
 
 `.spike/` (gitignored) holds live-host verification scripts plus the local self-checks:
 `p2-router.ts` main regression (real remote + real Cordis + real router classes) and probes like
@@ -219,7 +219,7 @@ Upstream never published helper binaries (all Release assets are empty), so this
 - Checks: stock `verify-ssh-helper-artifact.ts --sandbox=required`, all 8 green
 - Cache: `$DSH_HOME/dsh-remote-helpers/` (`*.tar.gz` + `.sha256` + `.helper.json`
   with binarySha256, feeding P2's helperHash)
-- Full rebuild procedure for upgrades: `docs/MAINTENANCE.md` §4
+- Full rebuild procedure for upgrades: the local-only `docs/MAINTENANCE.md` §4 (gitignored, not distributed)
 
 ## Security model
 
@@ -250,13 +250,25 @@ How to tell:
 Self-checks (no host, no DSH, a few seconds each):
 
 ```sh
-node .spike/model-check.mjs      # 48 checks: real git/grep output → parsers, diff model, class↔CSS contract
+node .spike/model-check.mjs      # 55 checks: real git output → parsers, diff model, hunk patches, class↔CSS contract
 node .spike/reveal-check.mjs     # 5 checks: jump target, landing highlight, repeat jump in one editor
 node .spike/fallback-check.mjs   # 12 checks: the fallback colorer colours java/cpp/shell in a real DOM
+node .spike/editor-dom-check.mjs # 12 checks: a real CodeMirror in jsdom emits colour spans for java/shell/cpp
+node .spike/i18n-check.mjs       # zh/en dictionary consistency: no missing key, no orphan, matching placeholders
+node .spike/ref-check.mjs        # 32 cases: assertRef accepts real revision suffixes, rejects every injection surface
+node .spike/status-check.mjs     # runs the generated git commands in a real shell to prove exit codes are no longer masked
+node .spike/cache-check.mjs      # incremental token cache vs whole-document tokenizing, 9 languages × 8 edit shapes
 ```
 
+`markdown-check.ts` has to be compiled first (it imports a `.tsx`, which Node cannot load):
+`npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/markdown-check.js`.
+
+> `.spike/` is git-ignored, so these checks are local only and run in no CI. **Run them before quoting any
+> number** rather than copying a historical figure out of a commit message — those drifted across two
+> contradictory values (48 / 55) before this note existed.
+
 The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
-Before touching anything for a new DSH release, read `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist).
+Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. The mandatory steps after a host-half change are `pnpm run verify:lib` plus the load self-check.
 
 ## License
 

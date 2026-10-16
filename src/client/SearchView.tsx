@@ -111,6 +111,9 @@ export function SearchView(): ReactNode {
   }, [])
 
   const setOption = useCallback((patch: Partial<ContentOptions>): void => {
+    // Persist OUTSIDE the updater: a state updater must be pure, and React may
+    // invoke it more than once for one update (StrictMode, replay), which
+    // would repeat the localStorage write.
     setOptions(prev => {
       const next = { ...prev, ...patch }
       try {

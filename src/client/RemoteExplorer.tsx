@@ -270,6 +270,29 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     setBusy(true)
     try {
       await api.fileOp.rename(alias, entry.path, target)
+      // Re-key the path-indexed state. `expanded`, `selected`, `anchor` and
+      // the `listings` cache are all keyed by absolute path, so a renamed
+      // directory used to collapse (the new path was never in `expanded`), keep
+      // its selection pointing at a path that no longer exists, and strand a
+      // stale listing under the old key forever.
+      const from = entry.path
+      const movePath = (path: string): string =>
+        path === from || path.startsWith(`${from}/`) ? `${target}${path.slice(from.length)}` : path
+      setExpanded(prev => new Set([...prev].map(movePath)))
+      setSelected(prev => new Set([...prev].map(movePath)))
+      setAnchor(prev => (prev === undefined ? undefined : movePath(prev)))
+      setListings(prev => {
+        const next: Record<string, RemoteFileEntry[]> = {}
+        for (const [key, value] of Object.entries(prev)) {
+          const prefix = dirKey(alias, '')
+          if (!key.startsWith(prefix)) {
+            next[key] = value
+            continue
+          }
+          next[dirKey(alias, movePath(key.slice(prefix.length)))] = value
+        }
+        return next
+      })
       await refreshDirs([baseDirFor()])
       await store.afterWrite()
       toast(`${t('files.renamed')} ${target}`)

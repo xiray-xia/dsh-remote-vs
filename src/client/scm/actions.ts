@@ -375,22 +375,29 @@ export async function searchFiles(
 ): Promise<{ hits: SearchHit[]; truncated: boolean }> {
   const clean = assertQuery(query)
   const cap = Math.min(Math.max(Math.floor(limit), 1), 400)
+  // `-printf '%p\t%y'` carries the entry type, because `find -print` never
+  // emits a trailing slash for directories — the old `line.endsWith('/')`
+  // test could therefore never be true and every hit was reported as a file
+  // (so a directory hit was routed into openFile). GNU/BusyBox find support
+  // -printf; the content-search builder already depends on GNU grep flags.
   const command = `find ${shQuote(root)} -maxdepth ${depth} `
     + `\\( -name .git -o -name node_modules -o -name .venv -o -name dist -o -name build \\) -prune -o `
-    + `\\( -type f -o -type d \\) -iname ${shQuote(`*${clean}*`)} -print 2>/dev/null | head -n ${cap + 1}`
+    + `\\( -type f -o -type d \\) -iname ${shQuote(`*${clean}*`)} -printf '%p\\t%y\\n' 2>/dev/null | head -n ${cap + 1}`
   const out = await tryRun(alias, command, 90_000)
   const lines = out.split('\n').map(line => line.trim()).filter(line => line !== '')
   const truncated = lines.length > cap
   const base = root.replace(/\/+$/, '')
   const hits: SearchHit[] = []
-  for (const line of lines.slice(0, cap)) {
+  for (const raw of lines.slice(0, cap)) {
+    const isDir = raw.endsWith('\td')
+    const line = isDir || raw.endsWith('\tf') ? raw.slice(0, -2) : raw
     const rel = line.startsWith(`${base}/`) ? line.slice(base.length + 1) : line
     const cut = rel.lastIndexOf('/')
     hits.push({
       path: rel,
       name: cut < 0 ? rel : rel.slice(cut + 1),
       dir: cut < 0 ? '' : rel.slice(0, cut),
-      isDir: line.endsWith('/'),
+      isDir,
     })
   }
   return { hits, truncated }

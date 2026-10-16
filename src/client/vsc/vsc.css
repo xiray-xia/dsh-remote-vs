@@ -863,6 +863,19 @@ body[data-ds-dark-theme] .rvs-root {
   display: none !important;
 }
 
+/* Find-match marks. Painted by our own StateField, not by
+   `@codemirror/search`'s highlighter, which only decorates while ITS panel is
+   mounted — and that panel is deliberately never mounted here. */
+.rvs-find-match {
+  background: rgba(234, 92, 0, .28);
+  border-radius: 2px;
+}
+
+.rvs-find-match.current {
+  background: rgba(255, 152, 0, .55);
+  outline: 1px solid rgba(255, 152, 0, .9);
+}
+
 /* ------------------------------------------------------- preview surfaces */
 
 .rvs-preview-img {

@@ -127,6 +127,17 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
       toast(t('scm.dirEntry'), false)
       return
     }
+    // A conflicted path has no single diff: `git diff` prints a combined
+    // `diff --cc` block with `@@@` hunks, which the unified-diff parsers do
+    // not recognise. The result was worse than "no diff" — with no hunks and
+    // no stage-0 side to read, the projection marked EVERY line as added and
+    // the pane claimed the whole file was new. Send the user to the file
+    // instead, where the conflict markers can actually be resolved.
+    if (entry.status === 'U') {
+      store.openFile(`${repoRoot?.replace(/\/+$/, '') ?? store.root}/${entry.path}`)
+      toast(t('scm.conflictOpen'), false)
+      return
+    }
     if (isPreviewOnlyFile(entry.path)) {
       store.openFile(`${repoRoot?.replace(/\/+$/, '') ?? store.root}/${entry.path}`)
       return

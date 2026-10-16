@@ -145,17 +145,23 @@ export function TerminalView(props: {
     if (tab.session !== undefined) {
       api.terminalClose(tab.session).catch(() => undefined)
     }
-    setTabs(prev => {
-      const next = prev.filter(item => item.id !== tab.id)
-      setActiveId(current => (current === tab.id ? next[next.length - 1]?.id : current))
-      return next
-    })
-  }, [t])
+    // Compute the next tabs OUTSIDE the updater. A state updater must be pure:
+    // React may run it more than once for the same update (StrictMode, or a
+    // replay after a higher-priority render), and the old form dispatched
+    // setState — and, in reconnect, a terminalClose network call — from inside
+    // one, so those side effects can happen twice.
+    setTabs(prev => prev.filter(item => item.id !== tab.id))
+    const remaining = tabs.filter(item => item.id !== tab.id)
+    setActiveId(current => (current === tab.id ? remaining[remaining.length - 1]?.id : current))
+  }, [t, tabs])
 
   const reconnect = useCallback((id: string, fresh: boolean): void => {
+    if (fresh) {
+      const target = tabs.find(tab => tab.id === id)
+      if (target?.session !== undefined) api.terminalClose(target.session).catch(() => undefined)
+    }
     setTabs(prev => prev.map(tab => {
       if (tab.id !== id) return tab
-      if (fresh && tab.session !== undefined) api.terminalClose(tab.session).catch(() => undefined)
       return {
         ...tab,
         nonce: tab.nonce + 1,
@@ -164,7 +170,7 @@ export function TerminalView(props: {
         ...(fresh ? { session: undefined } : {}),
       }
     }))
-  }, [])
+  }, [tabs])
 
   const active = tabs.find(tab => tab.id === activeId) ?? tabs[0]
 
