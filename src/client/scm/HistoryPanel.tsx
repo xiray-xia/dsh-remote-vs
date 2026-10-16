@@ -112,22 +112,34 @@ export function HistoryPanel(): ReactNode {
   const [files, setFiles] = useState<Record<string, GitCommitFile[]>>({})
   const [filter, setFilter] = useState('')
   const head = store.head?.branch ?? ''
+  /**
+   * Ticket for the log request. The panel stays mounted across binding
+   * switches, so two `git log` calls can overlap; without this the slower one
+   * lands last and the tab lists the OTHER workspace's commits, with checkout
+   * buttons that act on the currently bound repository.
+   */
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (): Promise<void> => {
     if (alias === '' || repoRoot === undefined) {
+      loadSeq.current += 1
       setCommits([])
+      setLoading(false)
       return
     }
+    const ticket = ++loadSeq.current
     setLoading(true)
     setError(undefined)
     try {
       const list = await api.git.log(alias, repoRoot, GIT_LOG_MAX)
+      if (loadSeq.current !== ticket) return
       setCommits(list)
     } catch (caught) {
+      if (loadSeq.current !== ticket) return
       setCommits([])
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
-      setLoading(false)
+      if (loadSeq.current === ticket) setLoading(false)
     }
   }, [alias, repoRoot])
 

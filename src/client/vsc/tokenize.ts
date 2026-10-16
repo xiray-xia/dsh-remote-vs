@@ -456,3 +456,90 @@ export function tokenizeDocument(text: string, lang: LangId | undefined): Token[
   const state = lexState()
   return text.split('\n').map(line => tokenizeLine(line, lang, state))
 }
+
+/**
+ * A `Text`-backed token cache that survives edits.
+ *
+ * Why it exists: the fallback colorer used to run `tokenizeDocument(doc
+ * .toString())` on every keystroke — a full-document string plus one array
+ * per line, re-allocated for each key, on precisely the large files the
+ * fallback is for. Here each line keeps its text, tokens and the block state
+ * it entered with, so an unchanged line is carried over untouched and only
+ * the edited region is re-tokenized.
+ *
+ * Lives next to the tokenizer (instead of inside the CodeMirror plugin) so
+ * the plugin and its self-check exercise the SAME code — a harness that
+ * reimplements the cache proves nothing about the shipped one.
+ *
+ * Correctness rests on one property: a line whose text AND entry block state
+ * both match the previous run retokenizes to exactly the same thing, so it can
+ * be carried over untouched. Nothing here tries to stop early — the block
+ * state can legitimately return to an earlier value (a closing marker ends a
+ * block comment), so "the state matches again" does NOT imply the rest is
+ * unchanged and an early break would reuse a stale tail.
+ *
+ * What is actually saved per keystroke is the full-document string the old
+ * path materialized (doc.toString plus split on newline, i.e. one array per
+ * line) and every token array outside the edited region; walking the lines is
+ * what remains.
+ */
+export class LineTokenCache {
+  /**
+   * `entry`/`exit` are the block state BEFORE and AFTER the line.
+   *
+   * Both are needed. The entry state decides whether the cached tokens are
+   * still valid (closing a block comment above re-colors every line below even
+   * though their text is untouched), and the exit state is what lets a reused
+   * line advance the walk — without it the tokenizer state would stay frozen
+   * at a reused line and every later line would be classified against the
+   * wrong state.
+   */
+  private lines: { text: string; tokens: Token[]; entry: string | undefined; exit: string | undefined }[] = []
+  private source: unknown = undefined
+  private readonly lang: LangId | undefined
+
+  // NOTE: an explicit field, not a constructor parameter property — the local
+  // self-checks run the TypeScript sources directly through Node's strip-only
+  // TypeScript support (see the README's self-check section), and that mode
+  // rejects a parameter property such as constructor(private readonly x).
+  constructor(lang: LangId | undefined) {
+    this.lang = lang
+  }
+
+  /** Tokenized lines, aligned with the document's lines. */
+  get tokens(): readonly Token[][] {
+    return this.lines.map(line => line.tokens)
+  }
+
+  /** Lines actually re-tokenized by the last refresh (tests and diagnostics). */
+  lastTokenizedCount = 0
+
+  /** Bring the cache up to date with a CodeMirror Text. */
+  refresh(doc: { lines: number; line(number: number): { text: string } }): void {
+    if (doc === this.source) {
+      this.lastTokenizedCount = 0
+      return
+    }
+    const next: { text: string; tokens: Token[]; entry: string | undefined; exit: string | undefined }[] = []
+    let tokenized = 0
+    let carry: string | undefined
+    for (let index = 0; index < doc.lines; index += 1) {
+      const text = doc.line(index + 1).text
+      const prev = this.lines[index]
+      if (prev !== undefined && prev.text === text && prev.entry === carry) {
+        next.push(prev)
+        carry = prev.exit
+        continue
+      }
+      const state = lexState()
+      state.blockEnd = carry
+      const tokens = tokenizeLine(text, this.lang, state)
+      next.push({ text, tokens, entry: carry, exit: state.blockEnd })
+      carry = state.blockEnd
+      tokenized += 1
+    }
+    this.lines = next
+    this.source = doc
+    this.lastTokenizedCount = tokenized
+  }
+}

@@ -348,7 +348,13 @@ export function ScmPanel(props: { onOpenHistory: () => void }): ReactNode {
       <div className="rvs-scroll">
         {repoRoot === undefined && (
           <div className="rvs-empty">
-            {store.repoMissing ? t('git.hint') : t('common.loading')}
+            {/* A failed refresh has to say WHY. Keying this purely off
+                repoMissing/repoRoot meant a failing `git status` (huge repo,
+                dubious ownership, locked index) rendered "Loading…" forever
+                while the reason sat unread in store.gitError. */}
+            {store.gitError !== undefined
+              ? store.gitError
+              : store.repoMissing ? t('git.hint') : t('common.loading')}
             {store.repoMissing && (
               <div className="rvs-repo-bar-fix">
                 <button type="button" className="rvs-chip" onClick={() => setPicker(true)}>{t('scm.browse')}</button>

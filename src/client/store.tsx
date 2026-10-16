@@ -363,6 +363,30 @@ function currentWorkspace(): RemoteWorkspaceBinding | undefined {
   return state.workspaces.find(item => item.id === state.workspaceId) ?? state.workspaces[0]
 }
 
+/**
+ * The active binding PLUS the id its per-workspace localStorage is keyed by.
+ *
+ * The id is the resolved binding's own id, not `state.workspaceId`: on a
+ * fresh browser profile `state.workspaceId` is '' while `currentWorkspace()`
+ * has already auto-selected `workspaces[0]` (and the UI shows it). Reading
+ * per-binding state under '' while writing it under the resolved id loses the
+ * value on every reload — and reading a stale id hands a deleted binding's
+ * setting to a different workspace.
+ */
+function activeBinding(): { workspace: RemoteWorkspaceBinding | undefined; key: string } {
+  const workspace = currentWorkspace()
+  return { workspace, key: workspace?.id ?? state.workspaceId }
+}
+
+/**
+ * Monotonic ticket for git refreshes. Two refreshes can overlap whenever the
+ * binding changes or a write lands mid-read, and both panels stay mounted, so
+ * an older response arriving last would otherwise write ITS repository into
+ * the state the newer binding is using — after which every staged/discard
+ * button would act on the wrong repo (scm/actions.ts takes alias + repoRoot).
+ */
+let gitGeneration = 0
+
 // -------------------------------------------------------------- lifecycle
 
 let booted = false
@@ -383,13 +407,16 @@ export function refreshAll(): void {
   if (state.ctx === undefined) return
   Promise.all([api.getHosts(), api.getWorkspaces()]).then(
     ([hosts, payload]) => {
+      // The stored sub-directory is keyed by the RESOLVED binding (see
+      // activeBinding): it was written under that id, so reading it under the
+      // raw `state.workspaceId` ('' on a fresh profile) lost it every reload.
+      const key = activeBinding().key
       patch({
         hosts,
         workspaces: payload.workspaces,
         routing: { mode: payload.mode, aliasPaths: payload.aliasPaths, tombstones: payload.tombstones },
-        // The stored sub-directory belongs to whichever binding is selected
-        // (including the one auto-selected on a fresh browser profile).
-        repoSubdir: readRepoSubdir(state.workspaceId),
+        workspaceId: key,
+        repoSubdir: readRepoSubdir(key),
         ready: true,
         error: undefined,
       })
@@ -455,9 +482,9 @@ let searchSeq = 0
  * per binding and re-resolved on every refresh.
  */
 export async function setRepoSubdir(subdir: string): Promise<void> {
-  const workspace = currentWorkspace()
+  const { workspace, key } = activeBinding()
   const clean = normalizeRepoSubdir(subdir)
-  if (workspace !== undefined) writeRepoSubdir(workspace.id, clean)
+  if (workspace !== undefined) writeRepoSubdir(key, clean)
   patch({ repoSubdir: clean, repoRoot: undefined, gitError: undefined })
   await refreshGit()
 }
@@ -474,12 +501,19 @@ export async function discoverRepos(): Promise<string[]> {
 
 /** Re-read git status for the current binding. */
 export async function refreshGit(): Promise<void> {
-  const workspace = currentWorkspace()
+  const { workspace, key } = activeBinding()
   if (workspace === undefined) return
+  const gen = ++gitGeneration
+  // Discard a response that is no longer about the binding on screen (the
+  // user switched) or is superseded by a newer refresh. Without this the
+  // slower request wins the last write and the panel shows one workspace's
+  // repository while the selector and every action use another's.
+  const stale = (): boolean => gen !== gitGeneration || activeBinding().key !== key
   patch({ gitBusy: true })
   try {
     const workdir = repoWorkdir(workspace.remotePath, state.repoSubdir)
     const root = await resolveRepoRoot(workspace.alias, workdir)
+    if (stale()) return
     if (root === undefined) {
       patch({ repoRoot: undefined, repoMissing: true, status: EMPTY_STATUS, head: undefined, gitBusy: false, gitError: undefined })
       return
@@ -488,13 +522,23 @@ export async function refreshGit(): Promise<void> {
       withDeadline(loadStatusDetail(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
       withDeadline(loadHead(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
     ])
+    if (stale()) return
     // A directory INSIDE a repository settles on that repository's root, so the
     // stored choice is what git actually uses (and what the picker shows).
     const settled = repoSubdirOf(workspace.remotePath, root) ?? state.repoSubdir
-    if (settled !== state.repoSubdir) writeRepoSubdir(workspace.id, settled)
+    if (settled !== state.repoSubdir) writeRepoSubdir(key, settled)
     patch({ repoRoot: root, repoSubdir: settled, repoMissing: false, status: detail, head, gitBusy: false, gitError: undefined })
   } catch (error) {
+    if (stale()) return
+    // Clear the repo identity too. Leaving a previous binding's `repoRoot` in
+    // place kept its branch, change list and sync buttons painted while the
+    // selector said something else — and ScmPanel keys "Loading…" off
+    // repoRoot === undefined, so NOT clearing it showed a stale repo while
+    // clearing it without an error message showed a spinner forever. The
+    // message is now rendered by the panel (see ScmPanel's empty state).
     patch({
+      repoRoot: undefined,
+      head: undefined,
       status: EMPTY_STATUS,
       gitBusy: false,
       gitError: error instanceof Error ? error.message : String(error),
