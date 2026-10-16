@@ -121,23 +121,17 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-agent-preset": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-bash-local": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-file-reference": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-fs": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-shell": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-spill": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-subprocess": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
-    "dsh-better-sidebar": "^0.24.1",
+    "@deepseek-ai/cordis": "^4.0.5-alpha.2",
+    "@deepseek-ai/dsh-agent-preset": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-bash-local": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-file-reference": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-fs": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-shell": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-spill": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-subprocess": "^0.2.1-alpha.4",
+    "@deepseek-ai/dsh-tools": "^0.2.1-alpha.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
-  },
-  "peerDependenciesMeta": {
-    "dsh-better-sidebar": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
@@ -178,7 +172,8 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
-    "prepare": "pnpm run build",
+    "prepare": "node -e \"const fs=require('node:fs');process.exit(['lib/index.js','lib/client.js'].every(f=>fs.existsSync(f))?0:1)\" || pnpm run build",
+    "verify:lib": "node -e \"const fs=require('node:fs');const need=['index.js','client.js','p2-bridge.js','p2-bridge-refs.js','p2-router-fs.js','p2-router-subprocess.js','p2-router-spill.js','p2-router-refs.js','p2-shell-bash.js'];const miss=need.filter(f=>!fs.existsSync('lib/'+f));console.log(miss.length?'lib/ INCOMPLETE, missing: '+miss.join(', '):'lib/ complete: '+need.length+' entries');process.exit(miss.length?1:0)\"",
     "bundle": "tsdown",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"
