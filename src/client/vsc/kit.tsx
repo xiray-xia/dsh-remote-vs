@@ -302,10 +302,19 @@ export function gitStatusClass(status: string): string {
   return status.length > 1 ? (status[0] as string) : status
 }
 
-/** The single letter a row shows (empty for "no marker"). */
+/**
+ * The single letter a row shows (empty for "no marker").
+ *
+ * `?` renders as `?`, NOT as `U`. Both are defensible in isolation — VS Code
+ * shows `U` for untracked — but here `U` is already the letter a MERGE
+ * CONFLICT carries (`bucketStatus` pushes `status: 'U'` for unmerged paths), so
+ * mapping untracked onto it made the two indistinguishable in the change list
+ * while behaving completely differently on click: a conflict opens the file to
+ * resolve markers, an untracked entry opens an empty-side diff. Keeping `?`
+ * distinct costs nothing and removes the ambiguity.
+ */
 export function gitLetter(status: string | undefined): string {
   if (status === undefined || status === '') return ''
-  if (status === '?') return 'U'
   if (status === '!') return 'I'
   return status.length > 1 ? (status[0] as string) : status
 }
