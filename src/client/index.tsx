@@ -7,7 +7,13 @@
  * shadows the native directory-flow holes (Local/Remote dialog).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from 'dsh-better-sidebar'
+import type { ReactNode } from 'react'
+// No `dsh-better-sidebar` type import on purpose: that package is an OPTIONAL
+// runtime integration, and depending on its types pulled its own aging
+// @deepseek-ai/dsh-* chain into this repo — which dragged a second copy of
+// schemastery/cordis in and broke the declaration build (TS2742 on `Config`).
+// The service is soft-read through an untyped getter instead, exactly like
+// `conversation` and `sidebarRightTabs` above.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
@@ -68,7 +74,7 @@ export function apply(ctx: Context): void {
         component: () => React.ReactNode
       }) => () => void } | undefined
       try {
-        sidebar = ctx.get('betterSidebar') ?? undefined
+        sidebar = ((ctx as unknown as { get(name: string): unknown }).get('betterSidebar') ?? undefined) as typeof sidebar
       } catch {
         return false
       }
@@ -197,11 +203,25 @@ export function apply(ctx: Context): void {
   // the tree for a narrow sidebar column. The store then flips the editor
   // surface to 'center' and the sidebar keeps the whole column for browsing.
   // A host without this slot keeps the old sidebar split (nothing disappears).
+  //
+  // `conversation.view` is a runtime slot whose TYPE comes from
+  // dsh-better-sidebar's declarations — and depending on that package for types
+  // dragged its aging @deepseek-ai/dsh-* chain (and a second copy of zod, which
+  // made TypeScript run out of heap) into this repo. It is soft-registered
+  // through a narrow local signature instead: the try/catch below is both the
+  // runtime check and the documented fallback for a host without the slot.
   const viewT = makeT(detectLang())
   ctx.effect(() => {
     let dispose: (() => void) | undefined
     try {
-      dispose = ctx.slots.inject('conversation.view', () => ctx.slots.register({
+      const slots = ctx.slots as unknown as {
+        inject(slot: string, register: () => () => void): () => void
+        register(
+          options: { name: string; id: string; order: number; label: () => string },
+          component: () => ReactNode,
+        ): () => void
+      }
+      dispose = slots.inject('conversation.view', () => slots.register({
         name: 'conversation.view',
         id: 'remote-editor',
         order: 30,

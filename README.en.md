@@ -34,7 +34,7 @@ transparently run remotely (see below).
 dsh plugin add github:xiray-xia/dsh-remote-vs
 ```
 
-Requires DSH `0.2.1-alpha.3`. On first install, allow the printed build scripts
+Requires DSH `0.2.1-alpha.4`. On first install, allow the printed build scripts
 in the profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
 open Settings → Remote hosts to configure.
 
@@ -212,7 +212,7 @@ over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one H
 Upstream never published helper binaries (all Release assets are empty), so this plugin builds its own:
 
 - Build machine: WSL2 Ubuntu-22.04 (glibc 2.35, matching the remote targets), Node v24.21.0 + pnpm 11.28.5
-- Sources: the `dsh-v0.2.1-alpha.2` tag (same version as the Host, so the protocol handshake matches)
+- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — it is still 2, so a Host upgrade does not require a rebuild)
 - Command: stock script `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
 - Only deviation: no docker for the manylinux 2.28 rebuild, so a `DSH_GLIBC_CEILING`
   env override was added (default stays 2.28); this build targets 2.35 (see `glibc-ceiling.patch` in the cache dir)

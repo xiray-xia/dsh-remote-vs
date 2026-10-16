@@ -63,6 +63,10 @@
     # alpha.3 note: stock dropped `toolFilter` (subagent children now inherit
     # the parent composition; fork must not select presets) — our mirror drops
     # both blocks with it.
+    # alpha.4 note: stock added `tool-plugin-market` (disabled: true in every
+    # preset) right after `tool-plugin-manager` — mirrored here for the same
+    # reason as above: a row missing from the mirror is a preset that silently
+    # loads a different toolset than stock.
     - id: preset-remote
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -237,6 +241,9 @@
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
             name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
+          - id: tool-plugin-market
+            name: '@deepseek-ai/dsh-plugin-market/tools'
             disabled: true
 
 # P2 root replacement: stock providers yield to the transparent routers (local
