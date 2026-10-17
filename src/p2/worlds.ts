@@ -261,7 +261,13 @@ export class RemoteWorlds {
     if (policy === undefined || route.kind !== 'remote') return policy
     const root = policy.workspaceRoot
     if (typeof root !== 'string' || root === '') return policy
-    if (!this.contains(route.aliasPath, root)) return policy
+    // `contains` excludes equality, and the common case is exactly that: a
+    // session's workspace root IS the alias directory. The policy then reached
+    // the remote unchanged, still carrying `C:\...\aliases\<id>`, and the remote
+    // sandbox rejected every write with
+    //   policy.workspaceRoot: expected an absolute POSIX path
+    // which is why writes failed while reads and listings worked.
+    if (!this.containsOrIs(route.aliasPath, root) && !this.containsRemote(route.remotePath, root)) return policy
     return { ...policy, workspaceRoot: this.toRemotePath(route, root) }
   }
 
