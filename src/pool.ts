@@ -18,6 +18,24 @@ const IDLE_MS = 30 * 60 * 1000
 /** Connection establishment timeout. */
 const READY_TIMEOUT_MS = 15_000
 
+/** First cooldown after a failed dial; doubles per consecutive failure, then caps. */
+const DIAL_BACKOFF_BASE_MS = 60_000
+const DIAL_BACKOFF_MAX_MS = 300_000
+
+/**
+ * Cooldown to apply after the Nth consecutive failed dial (1-based).
+ *
+ * A failed dial evicts the cache entry, so without this every subsequent call
+ * dials again — and against an sshd that is not answering, each of those is one
+ * more connection sitting in the pre-auth limbo that exhausted `MaxStartups` in
+ * the first place. Retrying during an outage made the outage worse, so the
+ * cooldown grows until an attempt finally succeeds.
+ */
+export function dialBackoffMs(consecutiveFailures: number): number {
+  const exponent = Math.max(0, consecutiveFailures - 1)
+  return Math.min(DIAL_BACKOFF_BASE_MS * 2 ** exponent, DIAL_BACKOFF_MAX_MS)
+}
+
 /** Per-stream output cap (stdout/stderr each); overflow truncates with a marker. */
 const OUTPUT_CAP = 2 * 1024 * 1024
 
@@ -135,6 +153,14 @@ export class RemotePool {
   private readonly setsidProbes = new Map<string, Promise<boolean>>()
   /** Per-alias channel slots and the queue waiting for one (see acquireSlot). */
   private readonly slots = new Map<string, Slots>()
+  /**
+   * Consecutive dial failures per alias, and when dialing becomes allowed again.
+   *
+   * Only CONNECTION ESTABLISHMENT is counted. A failure on an already-open
+   * connection evicts it through `close`/`error` and re-dials normally; treating
+   * that as a strike would lock out a host over one transient operation.
+   */
+  private readonly dialFailures = new Map<string, { count: number; retryAt: number; last: string }>()
 
   constructor(private readonly store: RemoteStore) {}
 
@@ -586,10 +612,22 @@ export class RemotePool {
       pooled.lastUse = Date.now()
       return pooled.conn
     }
+    // Only a would-be DIAL is refused here: a cached connection is returned
+    // above, so a healthy host is never blocked by an earlier outage.
+    const paused = this.dialFailures.get(alias)
+    if (paused !== undefined && Date.now() < paused.retryAt) {
+      const wait = Math.max(1, Math.ceil((paused.retryAt - Date.now()) / 1000))
+      throw new Error(
+        `remote host ${alias}: ${paused.count} consecutive connection failures, `
+        + `so dialing is paused for another ${wait}s — retrying now cannot succeed and only adds load `
+        + `(last error: ${paused.last})`,
+      )
+    }
     const entry: Pooled = { conn: undefined as unknown as Client, timer: undefined, lastUse: Date.now(), connecting: undefined, held: 0 }
     this.conns.set(alias, entry)
     entry.connecting = this.dial(alias).then(
       (conn) => {
+        this.dialFailures.delete(alias)
         entry.conn = conn
         entry.connecting = undefined
         conn.on('close', () => {
@@ -604,6 +642,12 @@ export class RemotePool {
       },
       (error) => {
         this.conns.delete(alias)
+        const count = (this.dialFailures.get(alias)?.count ?? 0) + 1
+        this.dialFailures.set(alias, {
+          count,
+          retryAt: Date.now() + dialBackoffMs(count),
+          last: error instanceof Error ? error.message : String(error),
+        })
         throw error
       },
     )
