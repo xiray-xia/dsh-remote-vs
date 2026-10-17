@@ -25,6 +25,14 @@ export default class TransparentFileSystem extends FileSystem {
 
   /** Target identity -> owning world (full route for policy rewrites). */
   private readonly worlds = new WeakMap<object, WorldRoute>()
+  /**
+   * Hint for a target that was deliberately routed local from a remote session.
+   *
+   * The read tool observes absence through stat, which only ever receives the
+   * resolved target — the original path and cwd are gone by then. So the note is
+   * computed once, at resolve time, and carried on the target itself.
+   */
+  private readonly missNotes = new WeakMap<object, string>()
 
   private get localFs(): FileSystem {
     return (this.ctx as unknown as { localFs: FileSystem }).localFs
@@ -127,43 +135,48 @@ export default class TransparentFileSystem extends FileSystem {
     try {
       const target = await fs.resolve(this.routePathFor(route, path), this.routeOpts(route, opts))
       this.worlds.set(target, route)
+      const note = this.localMissNote(path, route, opts?.cwd)
+      if (note !== undefined) this.missNotes.set(target, note)
       return target
     } catch (error) {
-      throw this.explainLocalMiss(path, route, opts?.cwd, error)
+      const note = this.localMissNote(path, route, opts?.cwd)
+      if (note === undefined) throw error
+      const detail = error instanceof Error ? error.message : String(error)
+      const original = (error as { code?: FsErrorCode } | undefined)?.code
+      throw new FsError(`${detail}${note}`, original ?? 'FS_IO_ERROR')
     }
   }
 
   /**
-   * Turn a bare local "not found" into the explanation that actually helps.
+   * The explanatory suffix for the one genuinely confusing miss.
    *
    * `routePath` sends a Windows-absolute path outside the alias to the LOCAL
    * world deliberately: a `C:\…` path can never name a remote file, and the tool
    * seam's spill files genuinely live on the Host. But in a REMOTE session the
    * likely mistake is that the caller wrote the remote path with a drive letter
-   * — `C:\opt\x` when it meant `/opt/x` — and the plain "not found" hides it.
+   * — `C:\opt\x` when it meant `/opt/x` — and a bare "not found" hides it.
    * Naming both working forms is the difference between a guess and a fix.
+   *
+   * Returns undefined when nothing about this call is confusing, so callers can
+   * keep their normal behaviour untouched.
    */
-  private explainLocalMiss(path: string, route: WorldRoute, cwd: string | undefined, error: unknown): unknown {
-    if (route.kind !== 'local') return error
-    if (!isWindowsAbsolute(path)) return error
-    if (cwd === undefined || cwd.trim() === '') return error
+  private localMissNote(path: string, route: WorldRoute, cwd: string | undefined): string | undefined {
+    if (route.kind !== 'local') return undefined
+    if (!isWindowsAbsolute(path)) return undefined
+    if (cwd === undefined || cwd.trim() === '') return undefined
     let remote: Extract<WorldRoute, { kind: 'remote' }>
     try {
       const byCwd = this.remote.routeDir(cwd)
-      if (byCwd.kind !== 'remote') return error
+      if (byCwd.kind !== 'remote') return undefined
       remote = byCwd
     } catch {
-      return error
+      return undefined
     }
     const posix = `/${path.replace(/^[A-Za-z]:[\\/]/, '').split('\\').join('/')}`
-    const detail = error instanceof Error ? error.message : String(error)
-    const original = (error as { code?: FsErrorCode } | undefined)?.code
-    return new FsError(
-      `${detail} — this session works in the remote workspace "${remote.remotePath}", and "${path}" is a `
-      + 'Windows-absolute path outside that workspace\'s local alias, so it was looked up on the Host. '
-      + `If you meant the remote file, pass "${posix}" or a path relative to the workspace.`,
-      original ?? 'FS_IO_ERROR',
-    )
+    return ' — this session works in the remote workspace '
+      + `"${remote.remotePath}", and "${path}" is a Windows-absolute path outside that workspace's local alias, `
+      + 'so it was looked up on the Host. If you meant the remote file, pass '
+      + `"${posix}" or a path relative to the workspace.`
   }
 
   processPath(target: FsTarget): string {
@@ -215,7 +228,16 @@ export default class TransparentFileSystem extends FileSystem {
 
   async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
     const { fs } = await this.backendOf(target)
-    return fs.stat(target, signal)
+    const info = await fs.stat(target, signal)
+    if (info === undefined) {
+      // Absence is observed HERE, not through resolve or lstat: the read tool
+      // resolves first — which succeeds for a path that does not exist — and only
+      // then stats, turning `undefined` into its own "not found". So the hint
+      // computed at resolve time has to be raised at exactly this point.
+      const note = this.missNotes.get(target)
+      if (note !== undefined) throw new FsError(`not found${note}`, 'FS_NOT_FOUND')
+    }
+    return info
   }
 
   async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
@@ -223,9 +245,22 @@ export default class TransparentFileSystem extends FileSystem {
     const fs = route.kind === 'local' ? this.localFs : await this.remote.fsFor(route.alias)
     const routed = route.kind === 'local' ? opts : this.routeOpts(route, opts) as { cwd?: string } | undefined
     try {
-      return await fs.lstat(this.routePathFor(route, path), routed, signal)
+      const info = await fs.lstat(this.routePathFor(route, path), routed, signal)
+      if (info === undefined) {
+        // A miss comes back as `undefined`, NOT as an exception — which is why
+        // wrapping this call in try/catch was not enough to surface the hint.
+        // The caller turns `undefined` into its own "not found", so the only
+        // place to say anything useful is here.
+        const note = this.localMissNote(path, route, opts?.cwd)
+        if (note !== undefined) throw new FsError(`not found${note}`, 'FS_NOT_FOUND')
+      }
+      return info
     } catch (error) {
-      throw this.explainLocalMiss(path, route, opts?.cwd, error)
+      if (error instanceof FsError) throw error
+      const note = this.localMissNote(path, route, opts?.cwd)
+      if (note === undefined) throw error
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new FsError(`${detail}${note}`, 'FS_IO_ERROR')
     }
   }
 
