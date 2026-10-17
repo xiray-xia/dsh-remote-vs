@@ -33,6 +33,9 @@ export interface RpcHello {
 const MAX_FRAME = 64 * 1024 * 1024
 const MAX_PENDING = 128
 
+/** How much of the helper's stderr to keep for error messages. */
+const STDERR_TAIL_MAX = 2000
+
 export class RpcConnection {
   private conn: Client | undefined
   private channel: ClientChannel | undefined
@@ -41,12 +44,27 @@ export class RpcConnection {
   private heartbeat: ReturnType<typeof setInterval> | undefined
   private dead: Error | undefined
   private disposed = false
+  /**
+   * The helper's own error output, kept so its reason survives.
+   *
+   * Nothing read this stream before, so a helper that died on startup took its
+   * explanation with it and the caller only ever saw "channel closed". Reading
+   * it also removes a real hazard: an undrained stderr pipe blocks the child
+   * once its buffer fills. The tail is bounded because a chatty helper must not
+   * grow host memory.
+   */
+  private stderrTail = ''
 
   constructor(private readonly opts: RpcDialOpts) {}
 
   /** True while the channel is open and no fatal error occurred. */
   get alive(): boolean {
     return !this.disposed && this.dead === undefined && this.channel !== undefined && !this.channel.closed
+  }
+
+  /** Whatever the helper last wrote to stderr — empty when it said nothing. */
+  get diagnostics(): string {
+    return this.stderrTail.trim()
   }
 
   get ready(): Promise<RpcHello> {
@@ -147,6 +165,9 @@ export class RpcConnection {
       })
     })
     this.channel = channel
+    channel.stderr.on('data', (chunk: Buffer) => {
+      this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_MAX)
+    })
     channel.on('close', () => {
       this.invalidate(new Error('helper channel closed'))
     })
