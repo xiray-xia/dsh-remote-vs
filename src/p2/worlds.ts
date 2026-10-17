@@ -124,16 +124,60 @@ export class RemoteWorlds {
     return this.contains(aliasPath, path)
   }
 
+  /**
+   * Containment that also accepts the directory itself.
+   *
+   * `contains` excludes equality, so a session whose cwd IS the workspace root
+   * matched nothing and fell back to the local world — the same class of miss as
+   * the remote-form one below, and just as invisible.
+   */
+  private containsOrIs(root: string, target: string): boolean {
+    return target === root || this.contains(root, target)
+  }
+
+  /**
+   * The remote SPELLING of a binding's directory, e.g. `/opt`.
+   *
+   * A spawned session can arrive with the remote form instead of the local alias
+   * path. `routeDir` then matched nothing and EVERYTHING fell back to the Host —
+   * `read`/`write`/`glob`/`grep` and even `subprocess` (which routes on the same
+   * `routeDir(cwd)`), so a write to `/tmp/x` silently landed in `C:\tmp\x` and a
+   * spawn of `bash` died with ENOENT on Windows. Both spellings have to name the
+   * same world.
+   *
+   * Windows-only on purpose: on a Linux Host a genuinely local `/home/...` would
+   * otherwise be mistaken for a binding's remote directory.
+   */
+  private containsRemote(root: string, target: string): boolean {
+    if (process.platform !== 'win32') return false
+    const dir = root.endsWith('/') && root !== '/' ? root.slice(0, -1) : root
+    return target === dir || target.startsWith(dir === '/' ? '/' : `${dir}/`)
+  }
+
   private aliasFor(dir: string): RemoteWorkspaceBinding | undefined {
-    let best: RemoteWorkspaceBinding | undefined
+    let bestAlias: { binding: RemoteWorkspaceBinding; length: number } | undefined
+    const byRemotePath: { binding: RemoteWorkspaceBinding; length: number }[] = []
     for (const binding of this.deps.store.listWorkspaces()) {
-      if (this.contains(this.aliasPathFor(binding.id), dir)) {
-        if (best === undefined || this.aliasPathFor(binding.id).length > this.aliasPathFor(best.id).length) {
-          best = binding
+      const aliasPath = this.aliasPathFor(binding.id)
+      if (this.containsOrIs(aliasPath, dir)) {
+        if (bestAlias === undefined || aliasPath.length > bestAlias.length) {
+          bestAlias = { binding, length: aliasPath.length }
         }
+        continue
+      }
+      if (this.containsRemote(binding.remotePath, dir)) {
+        byRemotePath.push({ binding, length: binding.remotePath.length })
       }
     }
-    return best
+    if (bestAlias !== undefined) return bestAlias.binding
+    if (byRemotePath.length === 0) return undefined
+    const longest = Math.max(...byRemotePath.map(candidate => candidate.length))
+    const top = byRemotePath.filter(candidate => candidate.length === longest)
+    // Two bindings can share one remote directory — here `alias-c:/home` and
+    // `alias-d:/home` do. Picking either would send a write to the wrong host,
+    // and a wrong-host write is silent and destructive in a way a local one is
+    // not, so an ambiguous remote-form cwd stays local instead of guessing.
+    return top.length === 1 ? top[0].binding : undefined
   }
 
   private tombstoneFor(dir: string): string | undefined {
@@ -202,9 +246,13 @@ export class RemoteWorlds {
 
   /** Map a local alias path to its remote absolute path. */
   toRemotePath(route: Extract<WorldRoute, { kind: 'remote' }>, localAbsPath: string): string {
+    const base = route.remotePath.endsWith('/') && route.remotePath !== '/' ? route.remotePath.slice(0, -1) : route.remotePath
+    // Already the remote spelling. A spawned session can arrive with `/opt/...`
+    // as its cwd, and mapping THAT through the alias arithmetic produces
+    // nonsense like `/opt/../../opt`.
+    if (this.containsRemote(base, localAbsPath)) return localAbsPath
     const rel = relative(route.aliasPath, resolve(localAbsPath))
     const posixRel = rel === '' ? '' : rel.split(sep).join('/')
-    const base = route.remotePath.endsWith('/') && route.remotePath !== '/' ? route.remotePath.slice(0, -1) : route.remotePath
     return posixRel === '' ? base : `${base}/${posixRel}`
   }
 
