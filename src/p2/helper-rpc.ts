@@ -64,6 +64,53 @@ const MAX_IN_FLIGHT = 64
 /** How much of the helper's stderr to keep for error messages. */
 const STDERR_TAIL_MAX = 2000
 
+/**
+ * How long one helper request may go unanswered before the connection counts as
+ * stalled.
+ *
+ * Without a deadline the call hangs until the CALLER times out, which aborts the
+ * signal and fails the turn with "SSH operation cancelled; a completed remote
+ * mutation is not rolled back". Whether this helps depends on firing before that
+ * caller budget — one measurement says 30s did NOT beat the caller's abort on a
+ * session-creation path, so this is a knob rather than a fixed truth: override
+ * with DSH_REMOTE_VS_HELPER_TIMEOUT_MS (milliseconds, >= 1000) to tune it
+ * without a rebuild.
+ */
+const HELPER_REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_HELPER_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : 30_000
+})()
+
+/**
+ * Methods that are safe to send twice.
+ *
+ * A stalled MUTATION is deliberately NOT retried: the request may have been
+ * applied before the reply was lost, and replaying `fs.write` over a
+ * half-applied one is worse than reporting the failure. Anything not listed is
+ * treated as mutating.
+ */
+const READ_ONLY_METHODS = new Set([
+  'fs.resolve',
+  'fs.stat',
+  'fs.lstat',
+  'fs.readText',
+  'fs.stream',
+  'fs.readBytes',
+  'fs.readRange',
+  'fs.list',
+])
+
+/** The helper did not answer in time — a stall, not a refusal. */
+class HelperTimeoutError extends Error {
+  constructor(readonly method: string, readonly mutating: boolean) {
+    super(
+      `helper ${method} did not answer within ${Math.round(HELPER_REQUEST_TIMEOUT_MS / 1000)}s; `
+      + 'the helper stopped responding',
+    )
+    this.name = 'HelperTimeoutError'
+  }
+}
+
 export class RpcConnection {
   private conn: Client | undefined
   private channel: ClientChannel | undefined
@@ -104,15 +151,81 @@ export class RpcConnection {
 
   /** Send one helper operation (mirrors SshConnection.request for fs-ssh). */
   async request<T>(method: string, params: unknown, schema: z.ZodType<T>, signal?: AbortSignal): Promise<T> {
-    const peer = await this.peerReady()
-    // Queue rather than let the shared connection reject the call: every agent
-    // on this host funnels through here, and "pending request limit reached"
-    // used to fail a turn for work that only needed to wait its turn.
-    await this.gate.acquire(signal)
+    const mutating = !READ_ONLY_METHODS.has(method)
+    let attempt = 0
+    for (;;) {
+      const peer = await this.peerReady()
+      // Queue rather than let the shared connection reject the call: every agent
+      // on this host funnels through here, and "pending request limit reached"
+      // used to fail a turn for work that only needed to wait its turn.
+      await this.gate.acquire(signal)
+      try {
+        return await this.withDeadline(peer.request(method, params, schema, signal), method, mutating)
+      } catch (error) {
+        // A caller abort is the caller's decision — never retry it.
+        if (!(error instanceof HelperTimeoutError)) throw error
+        // Mark the connection dead so the cached fs view is dropped and the next
+        // caller dials cleanly instead of queueing behind a stuck channel.
+        this.invalidate(error)
+        if (mutating || attempt >= 1) throw error
+        attempt += 1
+        await this.reconnect()
+      } finally {
+        this.gate.release()
+      }
+    }
+  }
+
+  /** Race one request against the stall deadline. */
+  private async withDeadline<T>(work: Promise<T>, method: string, mutating: boolean): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new HelperTimeoutError(method, mutating)), HELPER_REQUEST_TIMEOUT_MS)
+      if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    })
     try {
-      return await peer.request(method, params, schema, signal)
+      return await Promise.race([work, expiry])
     } finally {
-      this.gate.release()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Dial again under the same identity.
+   *
+   * The `ssh` provider handed to fs-ssh captures THIS object, so replacing the
+   * instance would strand every view holding it; re-opening in place keeps those
+   * closures valid while giving the retry a fresh channel.
+   */
+  private async reconnect(): Promise<void> {
+    if (this.disposed) throw new Error('helper RPC was disposed')
+    try {
+      this.peer?.close()
+    } catch {
+      // Ignore.
+    }
+    try {
+      this.channel?.close()
+    } catch {
+      // Ignore.
+    }
+    try {
+      this.conn?.end()
+    } catch {
+      // Ignore.
+    }
+    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
+    this.peer = undefined
+    this.channel = undefined
+    this.conn = undefined
+    this.dead = undefined
+    this.readyPromise = this.open()
+    try {
+      await this.readyPromise
+    } catch (error) {
+      // Leave no poisoned promise behind: the next caller should be able to try.
+      this.readyPromise = undefined
+      throw error
     }
   }
 
