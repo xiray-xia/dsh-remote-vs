@@ -10,6 +10,7 @@ import { SshRpcPeer, SSH_PROTOCOL_VERSION } from '@deepseek-ai/dsh-ssh/protocol'
 import { helloSchema } from '@deepseek-ai/dsh-ssh/schemas'
 import { z } from 'zod'
 import type { RemoteHostEntry } from '../protocol.ts'
+import { InFlightGate } from './in-flight-gate.ts'
 
 export interface RpcDialOpts {
   entry: RemoteHostEntry
@@ -30,8 +31,35 @@ export interface RpcHello {
   nodeVersion: string
 }
 
+/**
+ * SSH transport handshake budget.
+ *
+ * ssh2 fails with "Timed out while waiting for handshake" when this expires.
+ * 15s proved too tight for a busy host: one measured case had the target at a
+ * load average of 10.59 and the handshake missed the window with nothing
+ * competing for it — no agent contention, the box was simply saturated — and the
+ * caller's turn failed. 30s still fails fast for a host that is genuinely
+ * unreachable.
+ */
+const CONNECT_READY_TIMEOUT_MS = 30_000
+
 const MAX_FRAME = 64 * 1024 * 1024
 const MAX_PENDING = 128
+
+/**
+ * In-flight helper requests allowed per connection — deliberately BELOW
+ * `MAX_PENDING`.
+ *
+ * One helper connection is shared by everything that touches the same host, so
+ * `MAX_PENDING` is reached by ordinary concurrency rather than by anything
+ * pathological: several agents listing and reading at once is enough, and the
+ * peer then rejects the next request outright with "SSH helper pending request
+ * limit reached" (`@deepseek-ai/dsh-ssh`), failing the caller's turn. The work
+ * itself is fine — it just has to wait — so this gate queues instead of failing
+ * and keeps the peer's own ceiling out of reach, with headroom left for the
+ * hello/heartbeat class that does not pass through here.
+ */
+const MAX_IN_FLIGHT = 64
 
 /** How much of the helper's stderr to keep for error messages. */
 const STDERR_TAIL_MAX = 2000
@@ -54,6 +82,8 @@ export class RpcConnection {
    * grow host memory.
    */
   private stderrTail = ''
+  /** Per-connection in-flight cap; see MAX_IN_FLIGHT. */
+  private readonly gate = new InFlightGate(MAX_IN_FLIGHT)
 
   constructor(private readonly opts: RpcDialOpts) {}
 
@@ -75,7 +105,15 @@ export class RpcConnection {
   /** Send one helper operation (mirrors SshConnection.request for fs-ssh). */
   async request<T>(method: string, params: unknown, schema: z.ZodType<T>, signal?: AbortSignal): Promise<T> {
     const peer = await this.peerReady()
-    return peer.request(method, params, schema, signal)
+    // Queue rather than let the shared connection reject the call: every agent
+    // on this host funnels through here, and "pending request limit reached"
+    // used to fail a turn for work that only needed to wait its turn.
+    await this.gate.acquire(signal)
+    try {
+      return await peer.request(method, params, schema, signal)
+    } finally {
+      this.gate.release()
+    }
   }
 
   async dispose(): Promise<void> {
@@ -138,7 +176,7 @@ export class RpcConnection {
             username: entry.user,
             privateKey: readFileSync(entry.auth.keyPath as string),
             passphrase: entry.auth.passphrase,
-            readyTimeout: 15000,
+            readyTimeout: CONNECT_READY_TIMEOUT_MS,
             keepaliveInterval: 30000,
             keepaliveCountMax: 3,
           })
@@ -148,7 +186,7 @@ export class RpcConnection {
             port: entry.port,
             username: entry.user,
             password: entry.auth.password,
-            readyTimeout: 15000,
+            readyTimeout: CONNECT_READY_TIMEOUT_MS,
             keepaliveInterval: 30000,
             keepaliveCountMax: 3,
           })

@@ -63,7 +63,7 @@ function provideRaw(ctx: Context, name: string, value: unknown): void {
 }
 
 /** True for drive-letter and UNC absolutes (never remote-meaningful). */
-function isWindowsAbsolute(path: string): boolean {
+export function isWindowsAbsolute(path: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
 }
 

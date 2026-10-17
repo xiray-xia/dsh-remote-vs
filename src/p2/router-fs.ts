@@ -4,7 +4,7 @@
  * in a WeakMap (never mutated — the helper's strict schemas would reject
  * extra fields); unknown targets fail closed.
  */
-import { FileSystem, FsError } from '@deepseek-ai/dsh-fs'
+import { FileSystem, FsError, type FsErrorCode } from '@deepseek-ai/dsh-fs'
 import type {
   FsDirEntry,
   FsEditOutcome,
@@ -18,7 +18,7 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import { aliasRoot } from '../paths.ts'
-import type { RemoteWorlds, WorldRoute } from './worlds.ts'
+import { isWindowsAbsolute, type RemoteWorlds, type WorldRoute } from './worlds.ts'
 
 export default class TransparentFileSystem extends FileSystem {
   static inject = ['localFs', 'remoteWorlds']
@@ -124,9 +124,46 @@ export default class TransparentFileSystem extends FileSystem {
   async resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
     const route = this.routeFor(path, opts?.cwd, `resolve ${path}`)
     const fs = route.kind === 'local' ? this.localFs : await this.remote.fsFor(route.alias)
-    const target = await fs.resolve(this.routePathFor(route, path), this.routeOpts(route, opts))
-    this.worlds.set(target, route)
-    return target
+    try {
+      const target = await fs.resolve(this.routePathFor(route, path), this.routeOpts(route, opts))
+      this.worlds.set(target, route)
+      return target
+    } catch (error) {
+      throw this.explainLocalMiss(path, route, opts?.cwd, error)
+    }
+  }
+
+  /**
+   * Turn a bare local "not found" into the explanation that actually helps.
+   *
+   * `routePath` sends a Windows-absolute path outside the alias to the LOCAL
+   * world deliberately: a `C:\…` path can never name a remote file, and the tool
+   * seam's spill files genuinely live on the Host. But in a REMOTE session the
+   * likely mistake is that the caller wrote the remote path with a drive letter
+   * — `C:\opt\x` when it meant `/opt/x` — and the plain "not found" hides it.
+   * Naming both working forms is the difference between a guess and a fix.
+   */
+  private explainLocalMiss(path: string, route: WorldRoute, cwd: string | undefined, error: unknown): unknown {
+    if (route.kind !== 'local') return error
+    if (!isWindowsAbsolute(path)) return error
+    if (cwd === undefined || cwd.trim() === '') return error
+    let remote: Extract<WorldRoute, { kind: 'remote' }>
+    try {
+      const byCwd = this.remote.routeDir(cwd)
+      if (byCwd.kind !== 'remote') return error
+      remote = byCwd
+    } catch {
+      return error
+    }
+    const posix = `/${path.replace(/^[A-Za-z]:[\\/]/, '').split('\\').join('/')}`
+    const detail = error instanceof Error ? error.message : String(error)
+    const original = (error as { code?: FsErrorCode } | undefined)?.code
+    return new FsError(
+      `${detail} — this session works in the remote workspace "${remote.remotePath}", and "${path}" is a `
+      + 'Windows-absolute path outside that workspace\'s local alias, so it was looked up on the Host. '
+      + `If you meant the remote file, pass "${posix}" or a path relative to the workspace.`,
+      original ?? 'FS_IO_ERROR',
+    )
   }
 
   processPath(target: FsTarget): string {
@@ -185,7 +222,11 @@ export default class TransparentFileSystem extends FileSystem {
     const route = this.routeFor(path, opts?.cwd, `lstat ${path}`)
     const fs = route.kind === 'local' ? this.localFs : await this.remote.fsFor(route.alias)
     const routed = route.kind === 'local' ? opts : this.routeOpts(route, opts) as { cwd?: string } | undefined
-    return fs.lstat(this.routePathFor(route, path), routed, signal)
+    try {
+      return await fs.lstat(this.routePathFor(route, path), routed, signal)
+    } catch (error) {
+      throw this.explainLocalMiss(path, route, opts?.cwd, error)
+    }
   }
 
   async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
