@@ -98,7 +98,12 @@ export class RemoteFiles {
   async read(alias: string, file: string): Promise<RemoteRead> {
     const path = remotePath(file)
     return this.pool.withSftp(alias, async (sftp) => {
-      const attrs = await lstatAsync(sftp, path)
+      const attrs = await lstatAsync(sftp, path).catch(async (error: unknown) => {
+        // The stat fails first for a path that is not there, so without this the
+        // caller got a bare "No such file" naming no path, while `list` and
+        // `write` already said which one.
+        throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      })
       // Checked from the stat that was already needed, rather than after a
       // failed read: asking the server to read a directory yields nothing but
       // "Failure", and this pre-check costs no extra round trip.

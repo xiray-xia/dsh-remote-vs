@@ -45,8 +45,20 @@ function toAgentHostRow(host: RemoteHostSummary): AgentHostRow {
   }
 }
 
-function renderHosts(hosts: RemoteHostSummary[]): string {
-  if (hosts.length === 0) return 'no remote hosts configured (add one in the Remote sidebar tab first)'
+/**
+ * Render the host table.
+ *
+ * An empty list has TWO very different causes and they used to share one
+ * message: nothing is configured, or a query filtered everything out. The
+ * second one claimed "no remote hosts configured" while five were sitting
+ * there, which reads as "stop looking" to a caller that just searched.
+ */
+function renderHosts(hosts: RemoteHostSummary[], query?: string): string {
+  if (hosts.length === 0) {
+    return query === undefined || query.trim() === ''
+      ? 'no remote hosts configured (add one in the Remote sidebar tab first)'
+      : `no remote host matches "${query}" — hosts are configured, the query just filtered them all out`
+  }
   const rows = hosts.map(h => [
     h.alias, h.host, String(h.port), h.user, h.auth,
     h.auth === 'key' ? (h.keyReady ? 'key-ok' : 'key-missing') : 'password',
@@ -133,7 +145,7 @@ export function remoteHostsTool(deps: RemoteToolsDeps): ReturnType<typeof define
           },
         },
       },
-      render: (_args, value: { hosts?: AgentHostRow[] }) => text(renderHosts(value.hosts ?? [])),
+      render: (args, value: { hosts?: AgentHostRow[] }) => text(renderHosts(value.hosts ?? [], args.query)),
     },
     isConcurrencySafe: () => true,
     async execute(args) {
