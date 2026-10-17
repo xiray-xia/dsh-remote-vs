@@ -56,6 +56,22 @@ function renderHosts(hosts: RemoteHostSummary[]): string {
   return ['alias | host | port | user | auth | key | tags | description', '--- | --- | --- | --- | --- | --- | --- | ---', ...rows].join('\n')
 }
 
+/**
+ * `ls -l`-style type letter for one entry.
+ *
+ * A symlink is NOT a regular file, and rendering it as one made the two
+ * indistinguishable: `/bin`, `/lib`, `/lib64` and `/sbin` on an ordinary host
+ * are symlinks to directories, and they came out as `- 7 bin`, which reads as a
+ * seven-byte file. `isSymlink` is already in the entry, so the render simply has
+ * to use it. `.spike/tool-schema-check.mjs` now renders every tool and fails if
+ * these three kinds stop being distinguishable.
+ */
+function entryKind(entry: { isDir: boolean; isSymlink: boolean }): string {
+  if (entry.isDir) return 'd'
+  if (entry.isSymlink) return 'l'
+  return '-'
+}
+
 function renderExec(result: RemoteExecResult): string {
   const marker = result.timedOut ? '[timed out]' : `[exit code: ${result.exitCode ?? 'null'}]`
   const parts = [marker]
@@ -221,8 +237,10 @@ export function remoteLsTool(deps: RemoteToolsDeps): ReturnType<typeof defineToo
           },
         },
       },
-      render: (_args, value: { entries?: { name: string; isDir: boolean; size: number }[] }) => text(
-        (value.entries ?? []).map(e => `${e.isDir ? 'd' : '-'} ${e.size} ${e.name}`).join('\n') || '(empty directory)',
+      render: (_args, value: { entries?: { name: string; isDir: boolean; isSymlink: boolean; size: number }[] }) => text(
+        (value.entries ?? [])
+          .map(e => `${entryKind(e)} ${e.size} ${e.name}`)
+          .join('\n') || '(empty directory)',
       ),
     },
     async execute(args) {
