@@ -177,6 +177,13 @@ export class RemoteWorlds {
     // `xjp-xiray:/home` do. Picking either would send a write to the wrong host,
     // and a wrong-host write is silent and destructive in a way a local one is
     // not, so an ambiguous remote-form cwd stays local instead of guessing.
+    //
+    // Raising a named error here instead was tried and reverted. It reads better
+    // but it lands during CHILD SESSION CREATION, where the spawn tool has
+    // already returned its activation receipt to the caller - so the message has
+    // no way back, the caller only ever sees "failed before it finished", and a
+    // session that would otherwise run (locally, imperfectly) dies instead.
+    // A silent local session beats a clear error nobody receives.
     return top.length === 1 ? top[0].binding : undefined
   }
 
