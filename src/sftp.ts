@@ -30,6 +30,8 @@ const MEMO_CAP = 512
 
 /** SFTP status code for "no such file or directory" (ssh2 sets `error.code`). */
 const SFTP_NO_SUCH_FILE = 2
+/** Generic SFTP failure — what OpenSSH returns for most non-ENOENT errors. */
+const SFTP_FAILURE = 4
 
 const S_IFMT = 0o170000
 const S_IFLNK = 0o120000
@@ -57,7 +59,14 @@ export class RemoteFiles {
   async list(alias: string, dir: string): Promise<RemoteFileEntry[]> {
     const path = remotePath(dir)
     return this.pool.withSftp(alias, async (sftp) => {
-      const rows = await readdirAsync(sftp, path)
+      let rows: ReaddirRow[]
+      try {
+        rows = await readdirAsync(sftp, path)
+      } catch (error) {
+        // Listing a FILE used to answer "No such file" for a file that plainly
+        // exists, which sends the caller looking for the wrong problem.
+        throw (await explainSftpFailure(sftp, path, 'directory', error)) ?? error
+      }
       const entries = rows
         .map((row) => toEntry(path, row.filename, row.attrs))
         .sort(compareEntries)
@@ -90,6 +99,10 @@ export class RemoteFiles {
     const path = remotePath(file)
     return this.pool.withSftp(alias, async (sftp) => {
       const attrs = await lstatAsync(sftp, path)
+      // Checked from the stat that was already needed, rather than after a
+      // failed read: asking the server to read a directory yields nothing but
+      // "Failure", and this pre-check costs no extra round trip.
+      if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
       const size = attrs.size
       // A zero-byte file has no window to read, and asking SFTP for zero bytes
       // is NOT a no-op: ssh2's `read()` rejects `off >= buf.length` with a
@@ -117,14 +130,20 @@ export class RemoteFiles {
     const dir = posix.dirname(path)
     const data = encoding === 'base64' ? Buffer.from(content, 'base64') : Buffer.from(content, 'utf8')
     return this.pool.withSftp(alias, async (sftp) => {
-      await this.withDirRetry(alias, dir, async () => {
-        await this.ensureDir(sftp, alias, dir)
-        // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
-        // leaves it undefined); an empty file is created by opening for
-        // truncation and closing again.
-        if (data.length === 0) await touchFile(sftp, path)
-        else await writeFileAsync(sftp, path, data)
-      })
+      try {
+        await this.withDirRetry(alias, dir, async () => {
+          await this.ensureDir(sftp, alias, dir)
+          // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
+          // leaves it undefined); an empty file is created by opening for
+          // truncation and closing again.
+          if (data.length === 0) await touchFile(sftp, path)
+          else await writeFileAsync(sftp, path, data)
+        })
+      } catch (error) {
+        // Wrapped OUTSIDE the retry: withDirRetry keys off `error.code`, so
+        // translating any earlier would break its re-create-the-directory path.
+        throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      }
       return { size: data.length }
     })
   }
@@ -289,6 +308,73 @@ function toEntry(dir: string, name: string, attrs: Stats): RemoteFileEntry {
     mode: attrs.mode,
     isSymlink: isSymlink(attrs.mode),
   }
+}
+
+/** What is actually at a path — the question a raw SFTP status never answers. */
+type PathKind =
+  | { kind: 'missing' }
+  | { kind: 'symlink' }
+  | { kind: 'dir' }
+  | { kind: 'file'; size: number }
+
+async function pathKind(sftp: SFTPWrapper, path: string): Promise<PathKind> {
+  try {
+    const attrs = await lstatAsync(sftp, path)
+    if (isSymlink(attrs.mode)) return { kind: 'symlink' }
+    if (isDir(attrs.mode)) return { kind: 'dir' }
+    return { kind: 'file', size: attrs.size }
+  } catch {
+    return { kind: 'missing' }
+  }
+}
+
+function describeKind(kind: PathKind): string {
+  switch (kind.kind) {
+    case 'missing': return 'not present'
+    case 'symlink': return 'a symbolic link'
+    case 'dir': return 'a directory'
+    default: return `a regular file (${kind.size} bytes)`
+  }
+}
+
+/**
+ * Replace an opaque SFTP status with the fact the caller actually needs.
+ *
+ * ssh2 forwards the server's own status text, and OpenSSH returns just two of
+ * them for a wide range of problems: `No such file` (2) and `Failure` (4).
+ * Both leaked straight to the caller, with results that were not merely vague
+ * but wrong: listing a *file* reported "No such file" for a file that plainly
+ * exists, and reading a *directory* reported only "Failure". An agent given
+ * either message cannot tell a wrong path from a wrong KIND of path, so it
+ * guesses — which is worse than a longer message.
+ *
+ * Only those two statuses are explained, and only when the path really is
+ * missing or really is the wrong kind. Any other failure (permissions, a full
+ * disk, a transport error) keeps its original error, because that message is
+ * already the most accurate thing available and guessing over it would make
+ * things worse.
+ *
+ * Called on the failure path only, so a working operation pays nothing.
+ */
+async function explainSftpFailure(
+  sftp: SFTPWrapper,
+  path: string,
+  wanted: 'directory' | 'file',
+  cause: unknown,
+): Promise<Error | undefined> {
+  const code = (cause as { code?: number } | undefined)?.code
+  if (code !== SFTP_NO_SUCH_FILE && code !== SFTP_FAILURE) return undefined
+  const kind = await pathKind(sftp, path)
+  if (kind.kind === 'missing') {
+    return new Error(wanted === 'directory' ? `no such directory: ${path}` : `no such file: ${path}`)
+  }
+  if (wanted === 'directory' && kind.kind !== 'dir') {
+    return new Error(`not a directory: ${path} is ${describeKind(kind)}`)
+  }
+  if (wanted === 'file' && kind.kind === 'dir') {
+    return new Error(`not a file: ${path} is a directory`)
+  }
+  return undefined
 }
 
 /** Directories first, case-insensitive name order (VSCode explorer order). */
