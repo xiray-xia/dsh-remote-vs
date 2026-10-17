@@ -70,6 +70,12 @@ function isWindowsAbsolute(path: string): boolean {
 /** Dial cooldown after consecutive helper-connection failures: 1s, 2s, 4s … capped. */
 const DIAL_BACKOFF_BASE_MS = 1_000
 const DIAL_BACKOFF_CAP_MS = 30_000
+/**
+ * Immediate redials allowed before a helper that dies right after hello counts
+ * as a failure. Each one is a full SSH dial, so this stays small; it exists so a
+ * transient blip heals itself instead of failing the caller's operation.
+ */
+const DIAL_IMMEDIATE_RETRIES = 2
 
 export class RemoteWorlds {
   private readonly rpcs = new Map<string, Promise<RpcConnection>>()
@@ -445,6 +451,10 @@ export class RemoteWorlds {
 
   /** Shared helper RPC connection for one host alias (auto-deploys). */
   async rpcFor(alias: string): Promise<RpcConnection> {
+    return this.dial(alias, 0)
+  }
+
+  private async dial(alias: string, attempt: number): Promise<RpcConnection> {
     this.assertDialAllowed(alias)
     let pending = this.rpcs.get(alias)
     if (pending === undefined) {
@@ -462,14 +472,28 @@ export class RemoteWorlds {
     }
     const conn = await pending
     if (!conn.alive) {
-      // Dialed, then closed before the caller could use it (a helper that exits
-      // right after hello). This branch used to delete and redial with no delay,
-      // so that case recursed through one full SSH dial per iteration; counting
-      // the failure here is what makes the recursive call fail fast through the
-      // cooldown instead.
+      // Dialed, then closed before the caller could use it — a helper that dies
+      // right after hello.
+      //
+      // Retry a bounded number of times BEFORE recording a failure. Recording
+      // one here sets a cooldown that the very next line then trips, so this
+      // branch could never actually retry: a blip that used to heal itself
+      // (v0.4.0 redialed with no delay until it either worked or spun) became a
+      // guaranteed failed turn. Only when the attempts are spent does the
+      // cooldown engage, which is what keeps a PERMANENT condition from
+      // storming — the guard belongs on the persistent case, not the first
+      // hiccup.
       this.rpcs.delete(alias)
-      this.noteDialFailure(alias, new Error('helper connection closed right after dialing'))
-      return this.rpcFor(alias)
+      if (attempt < DIAL_IMMEDIATE_RETRIES) return this.dial(alias, attempt + 1)
+      const detail = conn.diagnostics
+      const reason = 'helper connection closed right after dialing'
+        + (detail === '' ? ' (the helper wrote nothing to stderr)' : ` — helper stderr: ${detail}`)
+      // Recorded so the NEXT call backs off, and thrown here rather than
+      // recursed: the first recorded failure no longer blocks (see
+      // noteDialFailure), so recursing would spend another full round of dials
+      // before it could ever give up.
+      this.noteDialFailure(alias, new Error(reason))
+      throw new Error(`helper RPC for ${alias} is unavailable after ${attempt + 1} attempt(s): ${reason}`)
     }
     return conn
   }
@@ -505,7 +529,14 @@ export class RemoteWorlds {
     const now = Date.now()
     this.dialFailures.set(alias, {
       failures,
-      retryAt: now + Math.min(DIAL_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 5), DIAL_BACKOFF_CAP_MS),
+      // The FIRST consecutive failure does not block. A cooldown exists to stop
+      // a storm, and one failure is not a storm — but it used to cost the caller
+      // every call it made for the next second, which turns a single network
+      // blip into a visibly broken turn. From the second failure on the backoff
+      // is 1s, 2s, 4s … capped, so a persistent condition still backs right off.
+      retryAt: now + (failures <= 1
+        ? 0
+        : Math.min(DIAL_BACKOFF_BASE_MS * 2 ** Math.min(failures - 2, 5), DIAL_BACKOFF_CAP_MS)),
       lastFailureAt: now,
       reason: error instanceof Error ? error.message : String(error),
     })
