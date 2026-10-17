@@ -69,7 +69,7 @@ export class RpcConnection {
   private channel: ClientChannel | undefined
   private peer: SshRpcPeer | undefined
   private readyPromise: Promise<RpcHello> | undefined
-  private heartbeat: ReturnType<typeof setInterval> | undefined
+  private heartbeat: ReturnType<typeof setTimeout> | undefined
   private dead: Error | undefined
   private disposed = false
   /**
@@ -119,7 +119,7 @@ export class RpcConnection {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    if (this.heartbeat !== undefined) clearInterval(this.heartbeat)
+    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
     try {
       this.peer?.close()
     } catch {
@@ -232,12 +232,28 @@ export class RpcConnection {
     if (hello.bootstrapHash !== undefined) {
       throw new Error('helper reported an unexpected PTC bootstrap digest')
     }
-    this.heartbeat = setInterval(() => {
-      peer.request('heartbeat', {}, z.null(), AbortSignal.timeout(Math.floor(leaseMs / 2))).catch((error: unknown) => {
-        this.invalidate(error instanceof Error ? error : new Error(String(error)))
-      })
-    }, Math.floor(leaseMs / 3))
-    if (typeof this.heartbeat === 'object' && 'unref' in this.heartbeat) this.heartbeat.unref()
+    // Self-scheduling, NOT setInterval. `requestClass('heartbeat')` allows
+    // exactly ONE in flight (`managementLimits.heartbeat = 1`), and a fixed
+    // interval of leaseMs/3 armed a beat every 20s while each was allowed 30s —
+    // so any helper slower than 20s had the next beat throw "SSH helper pending
+    // request limit reached", which the catch below then turned into
+    // invalidate(): the connection killed ITSELF and the next call paid a fresh
+    // dial. On a loaded host that dial then timed out at 30s, and the caller saw
+    // a "pending request limit" that had nothing to do with its own request.
+    // Arming the next beat only after the previous one settles makes overlap
+    // impossible.
+    const beat = (): void => {
+      if (this.disposed || this.dead !== undefined) return
+      this.heartbeat = setTimeout(() => {
+        peer.request('heartbeat', {}, z.null(), AbortSignal.timeout(Math.floor(leaseMs / 2)))
+          .catch((error: unknown) => {
+            this.invalidate(error instanceof Error ? error : new Error(String(error)))
+          })
+          .finally(beat)
+      }, Math.floor(leaseMs / 3))
+      if (typeof this.heartbeat === 'object' && 'unref' in this.heartbeat) this.heartbeat.unref()
+    }
+    beat()
     return {
       protocol: hello.protocol,
       kind: hello.kind,
@@ -250,7 +266,7 @@ export class RpcConnection {
   private invalidate(error: Error): void {
     if (this.dead !== undefined || this.disposed) return
     this.dead = error
-    if (this.heartbeat !== undefined) clearInterval(this.heartbeat)
+    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
     try {
       this.peer?.close(error)
     } catch {
