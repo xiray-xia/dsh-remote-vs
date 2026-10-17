@@ -256,19 +256,42 @@ export class RemoteWorlds {
     return posixRel === '' ? base : `${base}/${posixRel}`
   }
 
-  /** Rewrite a sandbox policy root into the remote world when it sits under the alias. */
+  /**
+   * Express a sandbox policy's workspace root in the remote world.
+   *
+   * The helper validates `workspaceRoot` as an absolute POSIX path
+   * (`dsh-ssh/lib/schemas.js`), so anything Windows-spelled has to be converted
+   * or the write dies with a zod error that names the field but not the caller's
+   * mistake. Three cases, and the last one is why this is a fallback rather than
+   * a conditional rewrite:
+   *
+   * - under the alias directory  -> map through the alias arithmetic
+   * - already a remote path      -> use it as-is
+   * - anything else (a Windows-spelled root that is neither) -> fall back to the
+   *   remote workspace base. Refusing is strictly worse: the operation is legal,
+   *   only the policy spelling is not, and `remotePolicy` already fences the same
+   *   way for the child's own service policy.
+   */
   rewritePolicy<T extends { workspaceRoot?: string }>(policy: T | undefined, route: WorldRoute): T | undefined {
     if (policy === undefined || route.kind !== 'remote') return policy
     const root = policy.workspaceRoot
     if (typeof root !== 'string' || root === '') return policy
-    // `contains` excludes equality, and the common case is exactly that: a
-    // session's workspace root IS the alias directory. The policy then reached
-    // the remote unchanged, still carrying `C:\...\aliases\<id>`, and the remote
-    // sandbox rejected every write with
-    //   policy.workspaceRoot: expected an absolute POSIX path
-    // which is why writes failed while reads and listings worked.
-    if (!this.containsOrIs(route.aliasPath, root) && !this.containsRemote(route.remotePath, root)) return policy
-    return { ...policy, workspaceRoot: this.toRemotePath(route, root) }
+    const base = route.remotePath.endsWith('/') && route.remotePath !== '/'
+      ? route.remotePath.slice(0, -1)
+      : route.remotePath
+    if (this.containsOrIs(route.aliasPath, root) || this.containsRemote(base, root)) {
+      return { ...policy, workspaceRoot: this.toRemotePath(route, root) }
+    }
+    // Named once so the next occurrence is diagnosable from the host log instead
+    // of needing another round of guessing.
+    try {
+      this.ctx.logger.info(
+        `[remote-vs] policy workspaceRoot "${root}" is not expressible on ${route.alias}; using ${base}`,
+      )
+    } catch {
+      // Logging must never break a write.
+    }
+    return { ...policy, workspaceRoot: base }
   }
 
   /** Shadow-mode note (remote/tombstone decisions only; locals stay silent). */
