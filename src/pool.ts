@@ -15,8 +15,21 @@ import type { RemoteExecResult, RemoteHostEntry } from './protocol.ts'
 /** Idle time after which a pooled connection is closed. */
 const IDLE_MS = 30 * 60 * 1000
 
-/** Connection establishment timeout. */
-const READY_TIMEOUT_MS = 15_000
+/**
+ * Connection establishment timeout, including authentication.
+ *
+ * This was 15s, which is not a handshake budget so much as a CPU budget: on a
+ * two-core host running a build, sshd could not complete a PASSWORD exchange
+ * inside it, and every call failed with "Timed out while waiting for handshake"
+ * while the banner was arriving in 15ms. Key auth fixed the common case (~1s),
+ * but a loaded host is still slow enough to be worth headroom.
+ *
+ * Override with DSH_REMOTE_VS_CONNECT_TIMEOUT_MS (milliseconds, >= 1000).
+ */
+const READY_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_CONNECT_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : 45_000
+})()
 
 /** First cooldown after a failed dial; doubles per consecutive failure, then caps. */
 const DIAL_BACKOFF_BASE_MS = 60_000

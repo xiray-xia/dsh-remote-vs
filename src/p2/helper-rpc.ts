@@ -39,9 +39,14 @@ export interface RpcHello {
  * load average of 10.59 and the handshake missed the window with nothing
  * competing for it — no agent contention, the box was simply saturated — and the
  * caller's turn failed. 30s still fails fast for a host that is genuinely
- * unreachable.
+ * unreachable — but it did NOT survive a two-core host under load with password
+ * auth, where the exchange could not finish at all. Raised to 45s to match the
+ * pool, and overridable with DSH_REMOTE_VS_CONNECT_TIMEOUT_MS (ms, >= 1000).
  */
-const CONNECT_READY_TIMEOUT_MS = 30_000
+const CONNECT_READY_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_CONNECT_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : 45_000
+})()
 
 const MAX_FRAME = 64 * 1024 * 1024
 const MAX_PENDING = 128
