@@ -185,7 +185,14 @@ export default class TransparentFileSystem extends FileSystem {
     if (world.kind === 'local') return this.localFs.processPath(target)
     const fs = this.remote.cachedFs(world.alias)
     if (fs === undefined) throw new FsError(`remote fs view for ${world.alias} is not ready (resolve first)`, 'FS_IO_ERROR')
-    return fs.processPath(target)
+    // The remote view answers the remote absolute path (correct for display and
+    // for remote processes), but that spelling is not guaranteed to route BACK:
+    // a session path derived from it (working-directory.set commits THIS value)
+    // would resolve local whenever two bindings share the remote root — that is
+    // how subagents of `alias-c`/`alias-d` sessions ended up running on the Host.
+    // toSessionPath keeps the remote spelling where it is unambiguous and uses
+    // the binding's unique alias spelling only where it is not.
+    return this.remote.toSessionPath(world, fs.processPath(target))
   }
 
   processPathFromHostPath(hostPath: string): string | undefined {

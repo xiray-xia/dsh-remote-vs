@@ -263,6 +263,58 @@ export class RemoteWorlds {
     return posixRel === '' ? base : `${base}/${posixRel}`
   }
 
+  /** True when a remote-spelling path sits at/inside one binding's remote root. */
+  private underRemoteBase(route: Extract<WorldRoute, { kind: 'remote' }>, remoteAbsPath: string): boolean {
+    return this.containsRemote(route.remotePath, remoteAbsPath)
+  }
+
+  /**
+   * The spelling a remote target has to be COMMITTED as when a session path is
+   * derived from it.
+   *
+   * `workingDirectory.set` stores `fs.processPath(target)` (the working-directory
+   * service canonicalizes through it), and the remote fs view answers the remote
+   * absolute path. That is the right spelling for display and for remote
+   * processes, but it is not always a spelling the router can route BACK: two
+   * bindings may share one remote root (`alias-c:/home` + `alias-d:/home`), and
+   * `/home` is then deliberately ambiguous and resolves local. A spawned child
+   * session inherits exactly that committed spelling — so every subagent of a
+   * remote session in one of those workspaces silently ran on the Host (and a
+   * re-`ensure()` could not repair it: the restored value is the same `/home`
+   * again, so no corrective event is ever appended).
+   *
+   * The alias spelling is unique per binding by construction, so it is the only
+   * spelling that always routes back. Keep the remote spelling wherever it is
+   * already unambiguous (every uniquely-mapped workspace stays byte-identical);
+   * switch to the alias spelling only where the remote one cannot answer.
+   * Paths outside the binding root keep the remote spelling — they name no alias
+   * location and are only reached through a session cwd that already routes.
+   */
+  toSessionPath(route: Extract<WorldRoute, { kind: 'remote' }>, remoteAbsPath: string): string {
+    if (!this.underRemoteBase(route, remoteAbsPath)) return remoteAbsPath
+    let routed: WorldRoute
+    try {
+      routed = this.routeDir(remoteAbsPath)
+    } catch {
+      // Tombstoned spelling: leave it as-is (the caller's operation fails closed
+      // on the next routeDir anyway; rewriting it would hide the tombstone).
+      return remoteAbsPath
+    }
+    if (routed.kind === 'remote' && routed.id === route.id) return remoteAbsPath
+    return this.toAliasPath(route, remoteAbsPath)
+  }
+
+  /** Inverse of {@link toRemotePath}: the alias spelling of a remote path. */
+  toAliasPath(route: Extract<WorldRoute, { kind: 'remote' }>, remoteAbsPath: string): string {
+    const base = route.remotePath.endsWith('/') && route.remotePath !== '/' ? route.remotePath.slice(0, -1) : route.remotePath
+    if (!this.containsRemote(base, remoteAbsPath)) return remoteAbsPath
+    if (remoteAbsPath === base) return route.aliasPath
+    // `containsRemote` already guarded the boundary, so the remainder is a
+    // relative POSIX path beneath the binding root.
+    const rel = remoteAbsPath.slice(base === '/' ? 1 : base.length + 1)
+    return rel === '' ? route.aliasPath : join(route.aliasPath, ...rel.split('/'))
+  }
+
   /**
    * Express a sandbox policy's workspace root in the remote world.
    *
