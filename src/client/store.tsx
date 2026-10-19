@@ -21,7 +21,8 @@ import type {
   RemoteRoutingStatus,
   RemoteWorkspaceBinding,
 } from '../protocol.ts'
-import { api, RemoteApiError } from './api.ts'
+import { api, RemoteApiError, configureTimeouts, fileReadTimeoutMs, gitTimeoutMs } from './api.ts'
+import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
 import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
@@ -92,6 +93,8 @@ interface State {
   repoMissing: boolean
   gitBusy: boolean
   gitError: string | undefined
+  /** Effective per-git-command budget (ms), from the Host's config. */
+  gitDeadlineMs: number
   tabs: EditorTab[]
   activeTabId: string | undefined
   revision: number
@@ -192,6 +195,7 @@ const state: State = {
   repoMissing: false,
   gitBusy: false,
   gitError: undefined,
+  gitDeadlineMs: DEFAULT_GIT_TIMEOUT_MS,
   tabs: [],
   activeTabId: undefined,
   revision: 0,
@@ -230,6 +234,8 @@ export interface ExplorerValue {
   head: HeadInfo | undefined
   gitBusy: boolean
   gitError: string | undefined
+  /** Effective per-git-command budget (ms), for the loading hint. */
+  gitDeadlineMs: number
   tabs: EditorTab[]
   activeTab: EditorTab | undefined
   activeTabId: string | undefined
@@ -327,6 +333,7 @@ function build(): ExplorerValue {
     head: state.head,
     gitBusy: state.gitBusy,
     gitError: state.gitError,
+    gitDeadlineMs: state.gitDeadlineMs,
     tabs: state.tabs,
     activeTab: state.tabs.find(item => item.id === state.activeTabId),
     activeTabId: state.activeTabId,
@@ -435,6 +442,10 @@ export function refreshAll(): void {
   if (state.ctx === undefined) return
   Promise.all([api.getHosts(), api.getWorkspaces()]).then(
     ([hosts, payload]) => {
+      // Apply the Host's effective timeouts FIRST: `refreshGit()` right below
+      // computes its deadline from them, and a stale default would cut a large
+      // repository off at the old 45 s before the raised value could apply.
+      const timeouts = configureTimeouts(payload.timeouts)
       // The stored sub-directory is keyed by the RESOLVED binding (see
       // activeBinding): it was written under that id, so reading it under the
       // raw `state.workspaceId` ('' on a fresh profile) lost it every reload.
@@ -445,6 +456,7 @@ export function refreshAll(): void {
         routing: { mode: payload.mode, aliasPaths: payload.aliasPaths, tombstones: payload.tombstones },
         workspaceId: key,
         repoSubdir: readRepoSubdir(key),
+        gitDeadlineMs: timeouts.gitMs,
         ready: true,
         error: undefined,
       })
@@ -547,8 +559,8 @@ export async function refreshGit(): Promise<void> {
       return
     }
     const [detail, head] = await Promise.all([
-      withDeadline(loadStatusDetail(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
-      withDeadline(loadHead(workspace.alias, root), READ_DEADLINE_MS, t('editor.readTimeout')),
+      withDeadline(loadStatusDetail(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
+      withDeadline(loadHead(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
     ])
     if (stale()) return
     // A directory INSIDE a repository settles on that repository's root, so the
@@ -637,8 +649,22 @@ function patchTab(id: string, next: Partial<EditorTab>): void {
   patch({ tabs: state.tabs.map(tab => (tab.id === id ? { ...tab, ...next } : tab)) })
 }
 
-/** Deadline for one remote read: a wedged host must never look like a spinner. */
-const READ_DEADLINE_MS = 45_000
+/**
+ * Deadline for one git round trip.
+ *
+ * Was a fixed 45 s shared with file reads, which made a cold `git status` on a
+ * large remote repository look like a dead host ("读取超时（远端无响应）(45s)").
+ * Git now follows the configured `gitTimeoutMs` (default 300 s), refreshed from
+ * the Host's workspaces answer — see `timeouts.ts`.
+ */
+function gitDeadlineMs(): number {
+  return clientDeadlineFor(gitTimeoutMs())
+}
+
+/** Deadline for one SFTP file read (editor, diff sides, preview). */
+function fileReadDeadlineMs(): number {
+  return clientDeadlineFor(fileReadTimeoutMs())
+}
 
 /**
  * Reject a remote call that never answers. The host route has its own caps,
@@ -707,7 +733,7 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
   })
   void (async () => {
     try {
-      const read = await withDeadline(api.fileOp.read(workspace.alias, fullPath), READ_DEADLINE_MS, t('editor.readTimeout'))
+      const read = await withDeadline(api.fileOp.read(workspace.alias, fullPath), fileReadDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {
         loading: false,
         binary: read.binary,
@@ -792,7 +818,7 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
   })
   void (async () => {
     try {
-      const payload = await withDeadline(loadDiff(workspace.alias, root, rel, staged, untracked), READ_DEADLINE_MS, t('editor.readTimeout'))
+      const payload = await withDeadline(loadDiff(workspace.alias, root, rel, staged, untracked), gitDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {
         loading: false,
         diff: payload,
@@ -836,7 +862,7 @@ export function openCommitFile(hash: string, rel: string): void {
   })
   void (async () => {
     try {
-      const payload = await withDeadline(loadCommitFileDiff(workspace.alias, root, hash, rel), READ_DEADLINE_MS, t('editor.readTimeout'))
+      const payload = await withDeadline(loadCommitFileDiff(workspace.alias, root, hash, rel), gitDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {
         loading: false,
         diff: payload,
@@ -900,7 +926,7 @@ export async function reloadTab(id: string): Promise<void> {
   if (workspace === undefined || tab === undefined) return
   if (tab.kind === 'file') {
     try {
-      const read = await withDeadline(api.fileOp.read(workspace.alias, tab.fullPath), READ_DEADLINE_MS, t('editor.readTimeout'))
+      const read = await withDeadline(api.fileOp.read(workspace.alias, tab.fullPath), fileReadDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {
         loading: false,
         error: undefined,
@@ -918,8 +944,8 @@ export async function reloadTab(id: string): Promise<void> {
   if (root === undefined) return
   try {
     const payload = tab.ref !== undefined
-      ? await withDeadline(loadCommitFileDiff(workspace.alias, root, tab.ref, tab.rel), READ_DEADLINE_MS, t('editor.readTimeout'))
-      : await withDeadline(loadDiff(workspace.alias, root, tab.rel, tab.staged, tab.untracked), READ_DEADLINE_MS, t('editor.readTimeout'))
+      ? await withDeadline(loadCommitFileDiff(workspace.alias, root, tab.ref, tab.rel), gitDeadlineMs(), t('editor.readTimeout'))
+      : await withDeadline(loadDiff(workspace.alias, root, tab.rel, tab.staged, tab.untracked), gitDeadlineMs(), t('editor.readTimeout'))
     patchTab(id, {
       loading: false,
       error: undefined,

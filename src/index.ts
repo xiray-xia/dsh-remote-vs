@@ -15,9 +15,17 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { RemoteStore } from './store.ts'
+import type { RemoteTimeouts } from './protocol.ts'
 import { RemotePool } from './pool.ts'
 import { seedHelperCache } from './deploy.ts'
 import { makeRoutes } from './routes.ts'
+import {
+  DEFAULT_GIT_TIMEOUT_MS,
+  DEFAULT_READ_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
+  MIN_TIMEOUT_MS,
+  resolveTimeouts,
+} from './timeouts.ts'
 import { RemoteWorlds, type RoutingMode, type WorldRoute } from './p2/worlds.ts'
 import {
   remoteExecTool,
@@ -62,6 +70,10 @@ export interface Config {
    * shadow = log remote decisions but execute locally; enforce = route.
    */
   routingMode?: RoutingMode
+  /** Per-command timeout for git work on a remote host (ms). */
+  gitTimeoutMs?: number
+  /** Per-read timeout for remote file reads (ms). */
+  readTimeoutMs?: number
 }
 
 /** The stable reference a `volatile()` config field resolves to. */
@@ -76,17 +88,29 @@ export interface ResolvedConfig {
   announceToAgent?: ConfigField<boolean>
   enabled?: ConfigField<boolean>
   routingMode?: ConfigField<RoutingMode>
+  gitTimeoutMs?: ConfigField<number>
+  readTimeoutMs?: ConfigField<number>
 }
 
 /**
  * Plugin config schema. Under the 0.1.7 settings model this schema IS the
  * entry's settings page; every field is `volatile()` so edits reach the
  * running instance without a remount.
+ *
+ * The two timeout fields exist because "large project" is host-specific: a cold
+ * `git status` on a big monorepo outlived the old fixed 45 s client deadline,
+ * so the limit is a setting rather than a constant. Both are clamped into
+ * [MIN_TIMEOUT_MS, MAX_TIMEOUT_MS] (see `timeouts.ts`) on every read, so a bad
+ * value degrades to the default instead of disabling the explorer.
  */
 export const Config = z.object({
   announceToAgent: z.boolean().default(false).volatile(),
   enabled: z.boolean().default(true).volatile(),
   routingMode: z.union(['off', 'shadow', 'enforce'] as const).default('off').volatile(),
+  gitTimeoutMs: z.number().step(1).min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS)
+    .default(DEFAULT_GIT_TIMEOUT_MS).volatile(),
+  readTimeoutMs: z.number().step(1).min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS)
+    .default(DEFAULT_READ_TIMEOUT_MS).volatile(),
 })
 
 function readField<T>(field: ConfigField<T> | undefined, fallback: T): T {
@@ -210,7 +234,22 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     enabled: readField(config?.enabled, true),
   })
 
-  const { routes, upgrade, terminalSessions } = makeRoutes({ store, pool, worlds, ctx })
+  // Read on every request, never captured: a `volatile()` edit must change the
+  // timeouts of the running instance without a remount (same contract as the
+  // routing mode). Clamped inside `resolveTimeouts`, so an out-of-range value
+  // from a hand-edited patch cannot disable the explorer.
+  const resolveTimeoutsNow = (): RemoteTimeouts => resolveTimeouts({
+    gitTimeoutMs: readField(config?.gitTimeoutMs, DEFAULT_GIT_TIMEOUT_MS),
+    readTimeoutMs: readField(config?.readTimeoutMs, DEFAULT_READ_TIMEOUT_MS),
+  })
+
+  const { routes, upgrade, terminalSessions } = makeRoutes({
+    store,
+    pool,
+    worlds,
+    ctx,
+    timeouts: resolveTimeoutsNow,
+  })
   let disposeRoutes: (() => void) | undefined
 
   const tools = [

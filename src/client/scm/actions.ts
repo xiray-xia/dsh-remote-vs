@@ -53,7 +53,8 @@ import {
   statusDetailCommand,
   unstageCommand,
 } from '../../git-ops.ts'
-import { api } from '../api.ts'
+import { api, gitTimeoutMs } from '../api.ts'
+import { DEFAULT_GIT_TIMEOUT_MS, MAX_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
 
 /** Error carrying a message already fit for the UI. */
 export class GitOpError extends Error {}
@@ -65,15 +66,25 @@ export function joinRemote(dir: string, rel: string): string {
   return clean === '' ? base : `${base}/${clean}`
 }
 
-const LONG = 300_000
-const NORMAL = 120_000
+/**
+ * Per-command budgets.
+ *
+ * These were fixed (120 s normal / 300 s network) and were the reason a large
+ * remote repository reported "git timed out" while git was still working: the
+ * explorer's own client deadline cut in even earlier. Both now follow the
+ * configured `gitTimeoutMs` (default 300 s), and the network verbs get double
+ * that (capped by the Host route's ceiling), because fetch/pull/push on a big
+ * tree legitimately outlast a status read.
+ */
+const normalTimeoutMs = (): number => gitTimeoutMs()
+const longTimeoutMs = (): number => Math.min(MAX_TIMEOUT_MS, Math.max(DEFAULT_GIT_TIMEOUT_MS, gitTimeoutMs() * 2))
 
 /** Run one command, raising a readable error on a non-zero exit. */
-async function run(alias: string, command: string, timeoutMs = NORMAL): Promise<RemoteExecResult> {
+async function run(alias: string, command: string, timeoutMs = normalTimeoutMs()): Promise<RemoteExecResult> {
   const result = await api.exec(alias, command, timeoutMs)
   if (result.success) return result
   if (result.timedOut) {
-    throw new GitOpError(`git timed out after ${Math.round(timeoutMs / 1000)}s — the repository may be large or the host busy`)
+    throw new GitOpError(`git timed out after ${timeoutSeconds(timeoutMs)} — the repository may be large or the host busy; raise gitTimeoutMs in the plugin settings`)
   }
   const hint = gitErrorHint(result.stderr) ?? gitErrorHint(result.stdout)
   const detail = result.stderr.trim() !== '' ? result.stderr.trim() : (result.stdout.trim() !== '' ? result.stdout.trim() : '')
@@ -81,7 +92,7 @@ async function run(alias: string, command: string, timeoutMs = NORMAL): Promise<
 }
 
 /** Run one command tolerating failure (returns '' instead). */
-async function tryRun(alias: string, command: string, timeoutMs = NORMAL): Promise<string> {
+async function tryRun(alias: string, command: string, timeoutMs = normalTimeoutMs()): Promise<string> {
   try {
     const result = await api.exec(alias, command, timeoutMs)
     return result.success ? result.stdout : ''
@@ -275,11 +286,11 @@ export async function lastCommitMessage(alias: string, root: string): Promise<st
 
 /** fetch / pull / push / sync. */
 export async function syncRepo(alias: string, root: string, kind: 'fetch' | 'pull' | 'push' | 'sync'): Promise<string> {
-  if (kind === 'fetch') return (await run(alias, fetchCommand(root), LONG)).stdout
-  if (kind === 'pull') return (await run(alias, pullCommand(root), LONG)).stdout
-  if (kind === 'push') return (await run(alias, pushCommand(root), LONG)).stdout
-  const pulled = (await run(alias, pullCommand(root), LONG)).stdout
-  const pushed = (await run(alias, pushCommand(root), LONG)).stdout
+  if (kind === 'fetch') return (await run(alias, fetchCommand(root), longTimeoutMs())).stdout
+  if (kind === 'pull') return (await run(alias, pullCommand(root), longTimeoutMs())).stdout
+  if (kind === 'push') return (await run(alias, pushCommand(root), longTimeoutMs())).stdout
+  const pulled = (await run(alias, pullCommand(root), longTimeoutMs())).stdout
+  const pushed = (await run(alias, pushCommand(root), longTimeoutMs())).stdout
   return `${pulled}\n${pushed}`.trim()
 }
 
@@ -295,12 +306,12 @@ export async function branchOp(
     | { kind: 'publish'; name: string; remote: string },
 ): Promise<string> {
   switch (op.kind) {
-    case 'checkout': return (await run(alias, checkoutCommand(root, op.ref), LONG)).stdout
-    case 'create': return (await run(alias, createBranchCommand(root, op.name, op.from), LONG)).stdout
+    case 'checkout': return (await run(alias, checkoutCommand(root, op.ref), longTimeoutMs())).stdout
+    case 'create': return (await run(alias, createBranchCommand(root, op.name, op.from), longTimeoutMs())).stdout
     case 'delete': return (await run(alias, deleteBranchCommand(root, op.name, op.force), 60_000)).stdout
     case 'rename': return (await run(alias, renameBranchCommand(root, op.from, op.to), 60_000)).stdout
-    case 'merge': return (await run(alias, mergeCommand(root, op.ref), LONG)).stdout
-    case 'publish': return (await run(alias, publishBranchCommand(root, op.name, op.remote), LONG)).stdout
+    case 'merge': return (await run(alias, mergeCommand(root, op.ref), longTimeoutMs())).stdout
+    case 'publish': return (await run(alias, publishBranchCommand(root, op.name, op.remote), longTimeoutMs())).stdout
     default: return ''
   }
 }
@@ -341,7 +352,7 @@ export async function stashOp(
 
 /** Check out one commit (detached HEAD; the UI warns first). */
 export async function checkoutCommit(alias: string, root: string, hash: string): Promise<string> {
-  return (await run(alias, checkoutCommand(root, assertRef(hash)), LONG)).stdout
+  return (await run(alias, checkoutCommand(root, assertRef(hash)), longTimeoutMs())).stdout
 }
 
 // ------------------------------------------------------------------ search

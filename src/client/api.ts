@@ -17,8 +17,10 @@ import {
   type RemoteProbe,
   type RemoteRead,
   type RemoteRoutingStatus,
+  type RemoteTimeouts,
   type RemoteWorkspaceBinding,
 } from '../protocol.ts'
+import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
 import {
   branchesCommand,
   gitFailed,
@@ -69,10 +71,38 @@ function post<T>(path: string, body: unknown): Promise<T> {
 function throwIfGitFailed(r: RemoteExecResult, timeoutMs: number): void {
   if (r.success) return
   if (r.timedOut) {
-    throw new RemoteApiError(502, `git timed out after ${Math.round(timeoutMs / 1000)}s (big/slow repo — retry, it may be warm now)`)
+    throw new RemoteApiError(502, `git timed out after ${timeoutSeconds(timeoutMs)} (big/slow repo — retry, it may be warm now; raise gitTimeoutMs in the plugin settings)`)
   }
   const friendly = gitFailed(r.stderr)
   throw new RemoteApiError(502, friendly ?? (r.stderr.trim() || r.error || `git failed [exit code: ${r.exitCode}]`))
+}
+
+/**
+ * Effective remote timeouts (see `src/timeouts.ts`).
+ *
+ * Module state on purpose: the numbers come from the Host's workspaces answer
+ * (a `volatile()` config edit) and every git/read call site reads them at call
+ * time, so a settings change applies to the next command without any remount.
+ * Before the first answer — or against an older Host that omits the field —
+ * the shared defaults stand, and they are the RAISED ones, so a big repository
+ * no longer dies at the old 45 s client deadline.
+ */
+let effectiveTimeouts: RemoteTimeouts = DEFAULT_TIMEOUTS
+
+/** Apply the Host-provided pair (clamped; a malformed answer keeps defaults). */
+export function configureTimeouts(value: unknown): RemoteTimeouts {
+  effectiveTimeouts = normalizeTimeouts(value)
+  return effectiveTimeouts
+}
+
+/** Current per-git-command timeout in milliseconds. */
+export function gitTimeoutMs(): number {
+  return effectiveTimeouts.gitMs
+}
+
+/** Current per-file-read timeout in milliseconds. */
+export function fileReadTimeoutMs(): number {
+  return effectiveTimeouts.readMs
 }
 
 export interface HostForm {
@@ -156,30 +186,36 @@ export const api = {
   // -- terminal
   terminalClose: (id: string) => post<{ ok: boolean }>(REMOTE_API.terminalClose, { id }),
   // -- git (over the exec route; parsed in the browser, no host changes)
-  // Generous timeout: status/log on huge trees (cold cache) routinely exceed 30s.
+  // Timeouts come from the effective setting: status/log on a huge cold tree
+  // routinely exceed the old fixed 120 s, and the client deadline used to cut
+  // in even earlier (see timeouts.ts).
   git: {
     async status(alias: string, path: string): Promise<GitStatus> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statusCommand(path), timeoutMs: 120_000 })
-      throwIfGitFailed(r, 120_000)
+      const timeoutMs = gitTimeoutMs()
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statusCommand(path), timeoutMs })
+      throwIfGitFailed(r, timeoutMs)
       return parseStatus(r.stdout)
     },
     async log(alias: string, path: string, max: number, branch?: string): Promise<GitCommit[]> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: logCommand(path, max, branch), timeoutMs: 120_000 })
-      throwIfGitFailed(r, 120_000)
+      const timeoutMs = gitTimeoutMs()
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: logCommand(path, max, branch), timeoutMs })
+      throwIfGitFailed(r, timeoutMs)
       return parseLog(r.stdout)
     },
     async branches(alias: string, path: string, current: string): Promise<GitBranch[]> {
-      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: branchesCommand(path), timeoutMs: 60_000 })
-      throwIfGitFailed(r, 60_000)
+      const timeoutMs = gitTimeoutMs()
+      const r = await post<RemoteExecResult>(REMOTE_API.exec, { alias, command: branchesCommand(path), timeoutMs })
+      throwIfGitFailed(r, timeoutMs)
       return parseBranches(r.stdout, current)
     },
     async show(alias: string, path: string, ref: string): Promise<GitShow> {
+      const timeoutMs = gitTimeoutMs()
       const [message, stat] = await Promise.all([
-        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: messageCommand(path, ref), timeoutMs: 60_000 }),
-        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statCommand(path, ref), timeoutMs: 60_000 }),
+        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: messageCommand(path, ref), timeoutMs }),
+        post<RemoteExecResult>(REMOTE_API.exec, { alias, command: statCommand(path, ref), timeoutMs }),
       ])
-      throwIfGitFailed(message, 60_000)
-      throwIfGitFailed(stat, 60_000)
+      throwIfGitFailed(message, timeoutMs)
+      throwIfGitFailed(stat, timeoutMs)
       return parseShow(ref, message.stdout, stat.stdout)
     },
   },

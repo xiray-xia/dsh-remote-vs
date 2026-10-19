@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { readJsonBody, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
-import { REMOTE_API, type ImportReport } from './protocol.ts'
+import { REMOTE_API, type ImportReport, type RemoteTimeouts } from './protocol.ts'
 import type { HostPayload, RemoteStore } from './store.ts'
 import type { RemotePool } from './pool.ts'
 import type { RemoteWorlds } from './p2/worlds.ts'
@@ -21,6 +21,7 @@ import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
 import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport } from './importers.ts'
 import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts'
+import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 
 /** One noServer WebSocket server for terminal upgrades (RFC 6455). */
 // `maxPayload` is the authoritative frame bound: without it ws buffers up to its
@@ -71,6 +72,11 @@ export interface RemoteRoutesDeps {
   worlds: RemoteWorlds
   /** Host context (soft reads only: loader/settings for the routing route). */
   ctx: Context
+  /**
+   * Effective timeouts, read per request so a `volatile()` config edit applies
+   * live. Absent in tests and older wiring: the shared defaults then stand.
+   */
+  timeouts?: () => RemoteTimeouts
 }
 
 /** Package name our loader row is mounted from (ns discovery key). */
@@ -107,6 +113,8 @@ function ownSettingsNs(ctx: Context): string | undefined {
 
 export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrade: WebUpgradeRoute; terminalSessions: TerminalSessionRegistry } {
   const { store, pool, worlds, ctx } = deps
+  /** Timeouts for this request (a volatile config edit must apply live). */
+  const timeouts = (): RemoteTimeouts => deps.timeouts?.() ?? DEFAULT_TIMEOUTS
   const files = new RemoteFiles(pool)
   const terminalSessions = new TerminalSessionRegistry(pool)
 
@@ -264,9 +272,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 400, { error: 'alias and a non-empty command are required' })
           return
         }
-        const timeoutMs = typeof body.timeoutMs === 'number' && Number.isFinite(body.timeoutMs)
-          ? Math.min(Math.max(Math.floor(body.timeoutMs), 1000), 600_000)
-          : undefined
+        const timeoutMs = clampExecTimeout(body.timeoutMs)
         writeJson(res, 200, await pool.exec(body.alias, body.command, timeoutMs === undefined ? {} : { timeoutMs }))
       },
     },
@@ -363,6 +369,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
             aliasPaths,
             tombstones: store.listTombstones(),
             version: pluginVersion(),
+            // The client's own deadlines must match what this Host would allow,
+            // otherwise a raised `gitTimeoutMs` still died at the client's 45 s
+            // deadline (2026-10-19: large-repo `git status` looked like a hang).
+            timeouts: timeouts(),
           })
           return
         }

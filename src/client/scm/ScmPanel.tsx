@@ -385,10 +385,14 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
             {/* A failed refresh has to say WHY. Keying this purely off
                 repoMissing/repoRoot meant a failing `git status` (huge repo,
                 dubious ownership, locked index) rendered "Loading…" forever
-                while the reason sat unread in store.gitError. */}
+                while the reason sat unread in store.gitError. The budget is
+                part of that honesty: on a large remote tree the wait is
+                minutes, and a bare "Loading…" reads as a hang. */}
             {store.gitError !== undefined
               ? store.gitError
-              : store.repoMissing ? t('git.hint') : t('common.loading')}
+              : store.repoMissing
+                ? t('git.hint')
+                : `${t('common.loading')} ${store.gitBusy ? `— ${t('scm.loadingSlow')} (≤${Math.round(store.gitDeadlineMs / 1000)}s)` : ''}`}
             {store.repoMissing && (
               <div className="rvs-repo-bar-fix">
                 <button type="button" className="rvs-chip" onClick={() => setPicker(true)}>{t('scm.browse')}</button>

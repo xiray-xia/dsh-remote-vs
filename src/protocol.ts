@@ -100,6 +100,20 @@ export interface RemoteRoutingStatus {
 export interface RemotePluginMeta {
   /** Version from the shipped package.json ('unknown' when unreadable). */
   version: string
+  /**
+   * Effective per-operation timeouts, in milliseconds. Served so the browser
+   * can apply the same numbers the Host enforces; an older Host omits it and
+   * the client keeps its own (identical) defaults.
+   */
+  timeouts?: RemoteTimeouts
+}
+
+/** One timeout per kind of remote round trip. */
+export interface RemoteTimeouts {
+  /** One git command (status/log/branches/diff over the exec route). */
+  gitMs: number
+  /** One SFTP file read (editor, diff sides, document preview). */
+  readMs: number
 }
 
 /** Remote OS probe outcome. */
