@@ -20,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import './vsc/vsc.css'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
 import { registerNativeExplorer } from './NativeExplorer.tsx'
+import { installRemoteFileOpen } from './remote-file-open.ts'
 import { RemoteEditorView } from './RemoteEditorView.tsx'
 import { RemoteRoot } from './RemoteRoot.tsx'
 import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
@@ -177,6 +178,13 @@ export function apply(ctx: Context): void {
       }, RemoteDirectoryFlow)
     }),
   ), 'dsh-remote-vs: directory flow')
+  // Click routing for file references inside remote sessions: the chat's file
+  // chips / deliverables / files-tree clicks all pass through
+  // `ctx.sidebarRight.openResource`, and DSH's own preview resolves them
+  // against the session workspace root — an empty alias dir for us. Install
+  // the wrapper early (it polls for the service) so every surface is covered;
+  // local sessions and unknown addresses keep the native behaviour.
+  ctx.effect(() => installRemoteFileOpen(ctx), 'dsh-remote-vs: remote file click routing')
   // Host management lives in the Settings dialog (list slot: additive, order
   // 20 lands after the stock sections). Self-fetching section, no inject face.
   const settingsT = makeT(detectLang())

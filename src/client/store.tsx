@@ -720,6 +720,45 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
   })()
 }
 
+/**
+ * Binding table for the click interceptor (`remote-file-open.ts`).
+ *
+ * A plain snapshot read, not a hook: the interceptor runs inside a service
+ * method call (no React render), so it needs the current bindings and alias
+ * directories synchronously. Unknown/empty state answers empty tables.
+ */
+export function remoteOpenBindings(): {
+  bindings: RemoteWorkspaceBinding[]
+  aliasPaths: Record<string, string>
+} {
+  return { bindings: state.workspaces, aliasPaths: state.routing.aliasPaths }
+}
+
+/**
+ * Open one file that belongs to a SPECIFIC remote binding (the click
+ * interceptor already resolved it), switching the explorer's selected
+ * workspace when the on-screen one differs.
+ *
+ * @returns true when the file was handed to the editor; false when the binding
+ *   is unknown (the caller then keeps the native preview).
+ */
+export function openRemoteFileInBinding(
+  bindingId: string,
+  remotePath: string,
+  options: { line?: number } = {},
+): boolean {
+  const binding = state.workspaces.find(item => item.id === bindingId)
+  if (binding === undefined || remotePath === '') return false
+  if (state.workspaceId !== binding.id) selectWorkspace(binding.id)
+  openFile(remotePath, options)
+  return true
+}
+
+/** Whether the editor tab is mounted in the centre conversation view. */
+export function isEditorCentered(): boolean {
+  return state.editorSurface === 'center'
+}
+
 /** Open (or focus) a working-tree diff of one repository path. */
 export function openDiff(rel: string, staged: boolean, untracked = false): void {
   const workspace = currentWorkspace()

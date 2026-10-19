@@ -48,7 +48,7 @@ function mountedSessionId(ctx: Context): string | undefined {
 }
 
 /** Host-confirmed workspace path for one session (exact membership). */
-function workspacePathOf(ctx: Context, sessionId: string): string | undefined {
+export function workspacePathOf(ctx: Context, sessionId: string): string | undefined {
   try {
     const get = (ctx as unknown as { get?(name: string): unknown }).get
     if (typeof get !== 'function') return undefined

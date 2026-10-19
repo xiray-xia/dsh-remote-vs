@@ -413,6 +413,49 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         writeJson(res, 200, { ok: true })
       },
     },
+    // ------------------------------------- session cwd (click resolution)
+    // A file reference the model prints is usually relative to the directory
+    // the model actually worked in, while DSH resolves the click against the
+    // SESSION WORKSPACE ROOT — one cd away and the click misses. The client
+    // interceptor asks for the live session's current directory here so it can
+    // try the model-relative spelling as a second candidate. Reads are soft:
+    // a non-live/unknown session answers an empty body, and the client keeps
+    // the plain workspace-root base (the previous behaviour).
+    {
+      kind: 'exact',
+      path: REMOTE_API.sessionCwd,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if ((req.method ?? 'GET') !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
+          return
+        }
+        const body = (await readJsonBody(req, { objectOnly: true })) as { sessionId?: unknown } | null
+        const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
+        if (sessionId === '') {
+          writeJson(res, 400, { error: 'sessionId must be a non-empty string' })
+          return
+        }
+        let cwd: string | undefined
+        try {
+          const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
+          const workingDirectory = ctx.get('workingDirectory') as
+            | { get?: (session: unknown) => unknown }
+            | undefined
+          const agent = agents?.get?.(sessionId) as { session?: unknown } | undefined
+          if (agent?.session !== undefined && typeof workingDirectory?.get === 'function') {
+            const value = workingDirectory.get(agent.session)
+            if (typeof value === 'string' && value !== '') cwd = value
+          }
+        } catch {
+          // Soft read: any composition without these services answers no cwd.
+        }
+        writeJson(res, 200, { cwd })
+      },
+    },
     // --------------------------------------------- routing mode (volatile)
     // The Settings UI flips off/shadow/enforce here instead of editing the
     // profile patch by hand. The write goes through the official settings

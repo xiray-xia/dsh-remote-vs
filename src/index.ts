@@ -132,6 +132,11 @@ function workspaceMappingText(worlds: RemoteWorlds, store: RemoteStore, cwd: str
     `- host: ${host}`,
     `- remote root: ${route.remotePath}`,
     'Relative paths and POSIX absolutes run on the remote host; the alias dir holds no real files.',
+    // Clickable file references resolve against the workspace root, so a path
+    // quoted relative to the model's CURRENT directory misses by whatever
+    // segment the session cd'ed into (2026-10-19 user report: final-answer file
+    // chips 404'd one directory away).
+    '- File paths in your reply: use the remote absolute path (e.g. /home/...) or a path relative to the remote root above — never a path relative to your current directory; a click resolves against the remote root.',
   ].join('\n')
 }
 

@@ -130,6 +130,15 @@ export const api = {
     call<{ workspace: RemoteWorkspaceBinding; aliasPath: string }>(REMOTE_API.workspaces, { method: 'POST', body: JSON.stringify(payload) }),
   deleteWorkspace: (id: string) =>
     call<{ ok: boolean }>(`${REMOTE_API.workspaces}?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /**
+   * Current working directory of one live session, for click resolution.
+   *
+   * A model quotes files relative to where it actually worked; the workspace
+   * root alone misses that (see `remote-file-open-target.ts`). Unknown or
+   * non-live sessions answer `undefined` and the caller keeps the root base.
+   */
+  sessionCwd: (sessionId: string) =>
+    call<{ cwd?: string }>(REMOTE_API.sessionCwd, { method: 'POST', body: JSON.stringify({ sessionId }) }),
   // -- routing mode (volatile, persists to the profile patch)
   setRoutingMode: (mode: 'off' | 'shadow' | 'enforce') =>
     post<{ mode: 'off' | 'shadow' | 'enforce' }>(REMOTE_API.routing, { mode }).then((r) => r.mode),

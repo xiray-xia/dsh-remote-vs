@@ -18,6 +18,8 @@ export const REMOTE_API = {
   terminal: '/api/dsh-remote/terminal',
   terminalClose: '/api/dsh-remote/terminal-close',
   routing: '/api/dsh-remote/routing',
+  /** Current working directory of one live session (click resolution helper). */
+  sessionCwd: '/api/dsh-remote/session-cwd',
 } as const
 
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */
