@@ -4,12 +4,17 @@
  * living in the DSH Settings dialog instead of the Remote tab.
  * Self-contained: each section fetches its own data so they work without any
  * injected face or sidebar.
+ *
+ * They also feed the sidebar's shared store after a mutation (see `reload`):
+ * the two surfaces list the same hosts/bindings, and a workspace created here
+ * used to stay invisible in the Remote tab until the whole page reloaded.
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { HostsView } from './HostsView.tsx'
+import { refreshAll as refreshSidebarStore } from './store.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
@@ -36,6 +41,21 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
 
   useEffect(() => {
     refresh()
+  }, [refresh])
+
+  /**
+   * Reload this section AND the sidebar's shared store.
+   *
+   * Both surfaces list the same data, but this section keeps PRIVATE state (it
+   * must work when the Remote tab was never mounted). A host changed here used
+   * to stay invisible in the sidebar until the page reloaded — the reverse of
+   * why the sidebar is a module singleton. `refreshSidebarStore` is a no-op
+   * before the sidebar bootstraps (its ctx is unset), so the standalone path
+   * is unchanged.
+   */
+  const reload = useCallback(() => {
+    refresh()
+    refreshSidebarStore()
   }, [refresh])
 
   const changeMode = (next: 'off' | 'shadow' | 'enforce'): void => {
@@ -73,7 +93,7 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
         <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>{t('route.hint')}</div>
       </div>
       {error !== undefined && <Notice kind="error">{error}</Notice>}
-      <HostsView t={t} hosts={hosts} onChanged={refresh} />
+      <HostsView t={t} hosts={hosts} onChanged={reload} />
     </div>
   )
 }
@@ -101,10 +121,16 @@ export function SettingsWorkspacesSection(_props: SettingsSectionOwnerProps): Re
     refresh()
   }, [refresh])
 
+  /** Same cross-surface sync as the hosts section: see the note there. */
+  const reload = useCallback(() => {
+    refresh()
+    refreshSidebarStore()
+  }, [refresh])
+
   return (
     <div style={{ padding: '4px 2px', fontSize: 13, lineHeight: 1.5 }}>
       {error !== undefined && <Notice kind="error">{error}</Notice>}
-      <WorkspacesView t={t} hosts={hosts} workspaces={workspaces} routing={routing} onChanged={refresh} />
+      <WorkspacesView t={t} hosts={hosts} workspaces={workspaces} routing={routing} onChanged={reload} />
     </div>
   )
 }

@@ -179,8 +179,19 @@ body[data-ds-dark-theme] .rvs-root {
   overflow: hidden;
 }
 
-/** Padding for the legacy views (workspaces / terminal) that draw no chrome. */
+/**
+ * Padding for the legacy views (workspaces / terminal) that draw no chrome.
+ *
+ * It MUST be a flex column: the workspaces view scroller is its child and gets
+ * its bounded height only from a flex parent (`flex:1; min-height:0`). As a
+ * plain block it grew with its content instead, so the panel clipped at the
+ * viewslot's `overflow:hidden` and the binding list could not scroll at all —
+ * a seventh workspace (and the wizard under it) was simply unreachable.
+ */
 .rvs-viewpad {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   padding: 10px 12px 14px;
   box-sizing: border-box;
 }
