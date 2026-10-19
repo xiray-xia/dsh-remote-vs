@@ -35,7 +35,7 @@ dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
 ```
 
 Requires DSH `0.2.1-alpha.3` or newer (`engines.dsh` enforces the range; **the tested
-baseline is `0.2.1-alpha.5`**). `--profile web` selects which profile to install into —
+baseline is `0.2.1-rc.2`**). `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). On first install, allow the printed build
 scripts in that profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
