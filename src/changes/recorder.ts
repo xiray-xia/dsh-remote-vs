@@ -187,7 +187,11 @@ export class SessionChanges {
       added: ledger.added,
       deleted: ledger.deleted,
       at: ledger.at,
-      pending: ledger.pending,
+      // The slow scan counts as pending too. Without it, a turn whose only
+      // product is a NEW file would look like "nothing changed" for the minute
+      // the untracked walk needs — the panel would hide and the user would
+      // conclude the feature is broken, right up to the moment the row appears.
+      pending: ledger.pending || ledger.untrackedJob !== undefined,
       ...(ledger.truncated === true ? { truncated: true as const } : {}),
       ...(ledger.unavailable === undefined ? {} : { unavailable: ledger.unavailable }),
     }

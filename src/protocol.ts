@@ -365,10 +365,10 @@ export interface RemoteChangedFile {
 /**
  * What one session changed on its remote host since the session's baseline.
  *
- * The baseline is the first snapshot taken after the session began (its git
- * tree), so the list answers "what did this session touch" rather than "what is
- * uncommitted" — the difference matters when the working tree already carried
- * user edits before the session started.
+ * The baseline is the content of every file git already reported as dirty when
+ * the ledger first looked, so the list answers "what did this session touch"
+ * rather than "what is uncommitted" — the difference matters when the working
+ * tree already carried user edits before the session started.
  */
 export interface RemoteChangesSummary {
   /** Remote host alias the session is routed to. */
@@ -384,7 +384,7 @@ export interface RemoteChangesSummary {
   at: number
   /** More files than the cap: `files` is truncated but the totals are whole. */
   truncated?: true
-  /** A snapshot is running right now; the list will refresh. */
+  /** A scan is running right now (the slow one counts); the list will refresh. */
   pending: boolean
   /** Why this session has no ledger (local session, no git, timeout, …). */
   unavailable?: string

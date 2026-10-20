@@ -245,17 +245,18 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   })
 
   // Session change ledger (the Cursor-style review panel). Fed from turn
-  // boundaries, never from the request path: a snapshot on a monorepo can take
-  // tens of seconds, and a turn must never wait for it. `cwd` is resolved here
-  // because the recorder deliberately knows nothing about cordis.
+  // boundaries, never from the request path: the git scans it runs cost
+  // milliseconds in a small repository and over a minute in a monorepo, and a
+  // turn must never wait for them. `cwd` is resolved here because the recorder
+  // deliberately knows nothing about cordis.
   /**
    * Which sessions get a ledger.
    *
    * Subagent sessions are skipped on purpose, the same policy DSH's own
    * recorder uses: a delegated session writes into the same workspace, so its
-   * files show up in the parent's snapshot diff anyway, while recording it
-   * separately would run a snapshot per subagent turn (a Team run fans out and
-   * a monorepo snapshot is the expensive one).
+   * files show up in the parent session's diff anyway, while recording it
+   * separately would run the scans once per subagent turn (a Team run fans out,
+   * and the scan is the expensive part).
    */
   const ledgerTarget = (session: {
     id: string
