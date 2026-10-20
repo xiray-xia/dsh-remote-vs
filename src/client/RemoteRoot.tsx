@@ -17,7 +17,7 @@ import { HistoryPanel } from './scm/HistoryPanel.tsx'
 import { ScmPanel } from './scm/ScmPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
-import { useBootstrap, useExplorer, followSessionWorkspace } from './store.tsx'
+import { useBootstrap, useExplorer, followSessionWorkspace, setFollowSession } from './store.tsx'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { DialogHost } from './vsc/kit.tsx'
 import {
@@ -138,14 +138,23 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    * source (`useRemoteChatTarget`), and it is a soft read: while it answers
    * nothing the current selection stands.
    *
+   * The policy itself lives in the store (`followSessionWorkspace`), not here:
+   * the sidebar is one TRIGGER, and a conversation whose sidebar was never
+   * opened must follow all the same (the change panel registers and triggers
+   * the same capability). Registering the session here keeps both surfaces on
+   * one subject; when the seat answers nothing the registration is left alone,
+   * because the other surface may be the one that knows the session.
+   *
    * The binding table arrives asynchronously, so the effect also re-runs when
-   * the table (or its alias dirs) lands; `followSessionWorkspace` is idempotent
-   * per session, so the extra runs cost one array scan and never fight a
-   * manual pick made afterwards.
+   * the table (or its alias dirs) lands; the capability is idempotent per
+   * session (and shares one in-flight resolution), so the extra runs cost
+   * nothing and never fight a manual pick made afterwards.
    */
   const target = useRemoteChatTarget(props.ctx)
   useEffect(() => {
-    followSessionWorkspace({
+    if (target.sessionId === undefined) return
+    setFollowSession(target.sessionId)
+    void followSessionWorkspace({
       sessionId: target.sessionId,
       workspacePath: target.sessionWorkspacePath,
     })

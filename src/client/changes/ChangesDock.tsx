@@ -24,9 +24,11 @@ import {
   followSessionWorkspace,
   openRemoteFileInBinding,
   refreshAll,
-  readRepoSubdir,
   remoteOpenBindings,
+  sessionRepoSubdir,
+  setFollowSession,
   useExplorer,
+  workspaceMatchesSession,
 } from '../store.tsx'
 import { bindingForChangedFile } from '../remote-file-open-target.ts'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
@@ -38,6 +40,15 @@ import './changes.css'
 
 /** How often an open panel re-reads the ledger (the host refreshes it per turn). */
 const POLL_MS = 3000
+
+/**
+ * How many polls between two follow retries (5 × 3 s = one probe every 15 s).
+ *
+ * The follow is one cheap HTTP call and it is retried until it resolves, so it
+ * must NOT ride the ledger's 3 s cadence: a session whose workspace cannot be
+ * resolved would otherwise cost a probe per poll, forever.
+ */
+const FOLLOW_RETRY_TICKS = 5
 
 /**
  * Props the composer dock hands us.
@@ -99,10 +110,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   // the user's explicit answer to "which repository in this workspace", and it
   // outranks the host's one-level guess. A ref (not a value) so a change made
   // while this panel is open is picked up by the next poll.
-  const repoSubdirOf = (): string => {
-    const id = explorer.workspaceId
-    return id === undefined || id === '' ? '' : readRepoSubdir(id)
-  }
+  //
+  // It is stored PER BINDING, so it may only be sent while the sidebar's
+  // selection can be PROVEN to be THIS session's binding (see the store's
+  // `sessionRepoSubdir`). Otherwise the host is told to `cd` into
+  // `session root + another workspace's sub-directory`, answers `session
+  // directory is missing on the host` (exit 90), the panel never gets a summary
+  // and repeats the same wrong guess on the next poll — the reported loop. `''`
+  // is always a truthful instruction (session root + the host's own
+  // unique-candidate probe); a foreign directory never is.
+  const repoSubdirOf = (): string => sessionRepoSubdir(sessionId)
 
   const load = useCallback(async (force = false): Promise<void> => {
     if (sessionId === undefined || sessionId === '') return
@@ -144,20 +161,60 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   useEffect(() => () => { setUndoContext(undefined) }, [])
 
   /**
+   * Register this session and start the follow — with no help from the sidebar.
+   *
+   * The follow used to be driven only by surfaces that already HELD evidence
+   * (the sidebar's workspace membership, this panel's own summary). Before the
+   * panel's FIRST successful scan neither exists, so the session's workspace
+   * stayed unknown while the panel still had to name a repository directory:
+   * it sent the selected workspace's sub-directory, the host answered exit 90,
+   * no summary arrived, and the next poll repeated it. The store now resolves
+   * the session's own cwd (available from the first paint) and the panel
+   * retries on a SLOW timer, so a resolution that needs the workspace table to
+   * land is picked up without a probe per poll.
+   */
+  useEffect(() => {
+    setFollowSession(sessionId)
+    if (sessionId === undefined || sessionId === '') return
+    void followSessionWorkspace({ sessionId })
+    let ticks = 0
+    const timer = window.setInterval(() => {
+      ticks += 1
+      if (ticks % FOLLOW_RETRY_TICKS !== 0) return
+      // Resolved — or the user picked a workspace by hand, which stands: stop
+      // probing entirely rather than re-asking a settled question.
+      if (workspaceMatchesSession()) {
+        window.clearInterval(timer)
+        return
+      }
+      void followSessionWorkspace({ sessionId })
+    }, POLL_MS)
+    return () => { window.clearInterval(timer) }
+  }, [sessionId])
+
+  // The binding table arrives asynchronously (the bootstrap above), and a follow
+  // attempted before it landed resolves nothing. Retry the moment it does,
+  // instead of waiting out the slow timer.
+  useEffect(() => {
+    if (sessionId === undefined || sessionId === '') return
+    void followSessionWorkspace({ sessionId })
+  }, [sessionId, explorer.ready, explorer.workspaces, explorer.aliasPaths])
+
+  /**
    * Follow the session's workspace from the panel's own evidence.
    *
    * The panel holds the host's alias + remote root for THIS session, so it can
    * point the sidebar (and the editor's workspace selector, which reads the same
-   * store) at the right binding even when the sidebar's own follow found nothing
-   * yet — and it is the surface that is mounted whenever a conversation is.
-   * Only the session actually on screen may steer the selector, and only once
-   * per session (the store's policy), so a parked dock cannot move it.
+   * store) at the right binding even when the cwd probe found nothing — and it
+   * is the surface that is mounted whenever a conversation is. Only the session
+   * actually on screen may steer the selector, and only once per session (the
+   * store's policy), so a parked dock cannot move it.
    */
   const chatTarget = useRemoteChatTarget(explorer.ctx)
   useEffect(() => {
     if (sessionId === undefined || summary === null || summary.root === '') return
     if (chatTarget.sessionId === undefined || chatTarget.sessionId !== sessionId) return
-    followSessionWorkspace({ sessionId, alias: summary.alias, remoteRoot: summary.root })
+    void followSessionWorkspace({ sessionId, alias: summary.alias, remoteRoot: summary.root })
   }, [sessionId, summary, chatTarget.sessionId])
 
   /** Open one listed file in the remote editor with its change marks. */

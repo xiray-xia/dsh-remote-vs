@@ -31,7 +31,7 @@ import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
-import { planWorkspaceFollow } from './remote-file-open-target.ts'
+import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 
@@ -536,6 +536,10 @@ export function requestSearch(request: { mode: 'name' | 'content'; query?: strin
 /** Select the binding every view works against. */
 export function selectWorkspace(id: string): void {
   if (state.workspaceId === id) return
+  // Anything that is not the follow itself is a CHOICE (the dropdown, a click in
+  // the change panel, the workspace wizard): remember it for the session on
+  // screen so a resolution that lands later cannot undo it.
+  noteManualPick()
   patch({
     workspaceId: id,
     tabs: [],
@@ -565,8 +569,73 @@ let searchSeq = 0
 let followedSession: string | undefined
 
 /**
+ * The binding resolved for `followedSession` (module state, same reason).
+ *
+ * Kept beside `followedSession` because the two are only meaningful together:
+ * `workspaceMatchesSession()` trusts this id only while the session it was
+ * resolved FOR is still the one being followed.
+ */
+let followedBindingId: string | undefined
+
+/**
+ * The registered session whose selection the user took over by hand.
+ *
+ * "Follow once, then the user's choice stands" cannot be decided from
+ * `followedSession` alone: a session whose workspace never resolved (a probe
+ * that failed, a host that answers nothing) has no follow to remember, and the
+ * retry keeps asking — so a resolution landing later would yank a selection the
+ * user made in the meantime. Recorded when a selection moves that the follow
+ * did not make, cleared when the session changes (a new seat re-follows).
+ */
+let manualPickSession: string | undefined
+
+/** Set while the follow itself moves the selection (see `noteManualPick`). */
+let applyingFollow = false
+
+/**
+ * Remember a selection the follow did not make.
+ *
+ * Called from `selectWorkspace`; the two `let`s above live with the follow
+ * narrative rather than next to the selector, so this stays a hoisted call.
+ */
+function noteManualPick(): void {
+  if (applyingFollow) return
+  if (followSessionId !== undefined) manualPickSession = followSessionId
+}
+
+/**
+ * The session the surfaces are showing — the subject of every follow.
+ *
+ * Module state, and deliberately not a React ref: this is what makes the
+ * session→workspace resolution work with NO UI mounted at all. The change panel
+ * registers the session it renders (see `ChangesDock`), so a conversation whose
+ * sidebar was never opened still resolves its own workspace — and a first scan
+ * can never be handed another workspace's repository directory.
+ */
+let followSessionId: string | undefined
+
+/**
+ * Register the session every follow call is about.
+ *
+ * Called by the surfaces that know which session is on screen. Clearing it is a
+ * real state — "no session on screen" — and every consumer then answers "not
+ * this session" instead of guessing.
+ */
+export function setFollowSession(sessionId: string | undefined): void {
+  const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
+  if (followSessionId === next) return
+  followSessionId = next
+  // A new seat re-follows: the previous session's manual pick was about that
+  // session's workspace, not this one's.
+  manualPickSession = undefined
+}
+
+/** One resolution in flight, so the same session is never probed twice at once. */
+let followFlight: { sessionId: string; promise: Promise<string | undefined> } | undefined
+
+/**
  * Point the workspace selector (and with it the tree, the editor's dropdown and
- * the git panel) at the binding the session on screen works in.
+ * the git panel) at the binding the registered session works in.
  *
  * The user's complaint this exists for: opening a session in one remote
  * workspace showed the sidebar on another — the selector kept whatever
@@ -574,43 +643,162 @@ let followedSession: string | undefined
  * the change panel matched its binding by alias alone, which is ambiguous as
  * soon as one host carries two workspaces (repo-a and repo-b share `alias-a`).
  *
- * Resolution order, strongest evidence first:
- *  1. `workspacePath` — the host's own workspace path for the session, which IS
- *     the alias dir of exactly one binding (`bindingForWorkspacePath`);
- *  2. `alias` + `remoteRoot` — what the change panel holds for the session
- *     (`bindingForRemoteFile`), which disambiguates by REMOTE path.
+ * Resolution order, strongest evidence first (all of it inside
+ * `planWorkspaceFollow`, so the policy has exactly one home):
+ *  1. `workspacePath` — the host's own workspace membership for the session,
+ *     which IS the alias dir of exactly one binding;
+ *  2. `alias` + `remoteRoot` — what the change panel holds once it has a
+ *     summary (`bindingForRemoteFile`), which disambiguates by REMOTE path;
+ *  3. the session's own cwd, asked of the host (`api.sessionCwd`) — the only
+ *     source available BEFORE the panel's first successful scan, which is
+ *     precisely the state that used to send a foreign repository directory.
  *
- * Called with neither, it does nothing: an unknown session must never move the
- * selection, and must never fall back to "the first binding".
+ * Idempotent and re-entrant by construction:
+ *  - once the session has been followed, later calls answer the recorded
+ *    binding without touching the network, so a manual pick stands;
+ *  - a pick the user made BEFORE anything resolved stands just the same (see
+ *    `manualPickSession`), so the retry can never undo a choice;
+ *  - while a resolution is in flight, concurrent callers share that one
+ *    promise (the sidebar and the panel both trigger this);
+ *  - an answer that arrives after the session changed is discarded.
  *
- * Once per session: after the follow, a manual pick stands until another
- * session takes the seat (see `decideWorkspaceFollow`).
+ * Called with no evidence at all it does nothing rather than guessing: an
+ * unknown session must never move the selection, and must never fall back to
+ * "the first binding".
  *
  * @returns the binding id that was selected, or `undefined` when nothing moved.
  */
 export function followSessionWorkspace(options: {
-  sessionId: string | undefined
+  /** The session the caller's evidence belongs to; defaults to the registered one. */
+  sessionId?: string | undefined
   /** The session's host workspace path (the local alias dir), when known. */
   workspacePath?: string | undefined
   /** Host alias the session is routed to, when known. */
   alias?: string | undefined
   /** Absolute remote root of the session's workspace, when known. */
   remoteRoot?: string | undefined
-}): string | undefined {
-  // The resolution + policy are pure (`planWorkspaceFollow`), so the gate drives
-  // the real thing; this applier is deliberately three lines.
-  const decision = planWorkspaceFollow({
+} = {}): Promise<string | undefined> {
+  const asked = options.sessionId
+  if (asked !== undefined && asked !== '') {
+    if (followSessionId === undefined) setFollowSession(asked)
+    // Evidence for one session must never steer another: the surface that owns
+    // the session on screen follows it, and this one is stale.
+    else if (followSessionId !== asked) return Promise.resolve(undefined)
+  }
+  const sessionId = followSessionId
+  if (sessionId === undefined) return Promise.resolve(undefined)
+  // Already followed: the user's manual pick stands, and no round trip is spent
+  // re-deciding what was already decided. A manual pick made BEFORE anything
+  // resolved (see `manualPickSession`) is the same promise, kept even though
+  // there is no follow to remember.
+  if (followedSession === sessionId) return Promise.resolve(followedBindingId)
+  if (manualPickSession === sessionId) return Promise.resolve(undefined)
+  const inFlight = followFlight
+  if (inFlight !== undefined && inFlight.sessionId === sessionId) return inFlight.promise
+  const promise = resolveSessionWorkspace(sessionId, options).finally(() => {
+    if (followFlight?.promise === promise) followFlight = undefined
+  })
+  followFlight = { sessionId, promise }
+  return promise
+}
+
+/**
+ * Resolve one session's binding and apply it (the applier behind the API above).
+ *
+ * The cwd probe is a LAST resort, and only when the caller's own evidence
+ * resolved nothing: it is an HTTP round trip per attempt, and the panel retries
+ * on a slow timer — evidence that already answers must not cost one. A probe
+ * that fails (or answers nothing usable) leaves the selection exactly as it
+ * was; the caller retries later, and `workspaceMatchesSession()` keeps saying
+ * "not proven" in the meantime, so nothing wrong is ever sent.
+ */
+async function resolveSessionWorkspace(
+  sessionId: string,
+  options: { workspacePath?: string | undefined; alias?: string | undefined; remoteRoot?: string | undefined },
+): Promise<string | undefined> {
+  const plan = (cwd?: string): WorkspaceFollowDecision => planWorkspaceFollow({
     table: remoteOpenBindings(),
-    sessionId: options.sessionId,
+    sessionId,
     workspacePath: options.workspacePath,
     alias: options.alias,
     remoteRoot: options.remoteRoot,
+    sessionCwd: cwd,
     followedSession,
   })
+  let decision = plan()
+  if (decision.action === 'keep' && decision.reason === 'unresolved') {
+    let cwd: string | undefined
+    try {
+      const answer = await api.sessionCwd(sessionId)
+      cwd = answer.cwd
+    } catch {
+      // A failed probe resolves nothing: the selection stands, nothing is sent.
+      return undefined
+    }
+    // The session may have changed while the host was answering; its evidence
+    // must not be applied to the new one.
+    if (followSessionId !== sessionId) return undefined
+    if (cwd !== undefined && cwd !== '') decision = plan(cwd)
+  }
   if (decision.action === 'keep') return undefined
+  // The user may have moved the selector WHILE this resolution was in flight:
+  // a choice beats a late answer.
+  if (followSessionId !== sessionId || manualPickSession === sessionId) return undefined
   followedSession = decision.followedSession
-  if (state.workspaceId !== decision.bindingId) selectWorkspace(decision.bindingId)
+  followedBindingId = decision.bindingId
+  if (state.workspaceId !== decision.bindingId) {
+    applyingFollow = true
+    try {
+      selectWorkspace(decision.bindingId)
+    } finally {
+      applyingFollow = false
+    }
+  }
   return decision.bindingId
+}
+
+/**
+ * Whether the views' CURRENT selection is the binding resolved for the followed
+ * session. `false` whenever that cannot be proven (no session, nothing resolved
+ * yet, or a manual pick moved the selection elsewhere) — see
+ * `selectionIsSessionBinding`, which owns the comparison.
+ */
+export function workspaceMatchesSession(): boolean {
+  return selectionIsSessionBinding({
+    table: remoteOpenBindings(),
+    sessionId: followSessionId,
+    followedSession,
+    followedBindingId,
+    selectedId: currentWorkspace()?.id,
+  })
+}
+
+/**
+ * The repository sub-directory to hand the host for one session, or `''` when
+ * the selection cannot be proven to be that session's binding.
+ *
+ * `''` is not "no answer": it tells the host to use the SESSION ROOT (and its
+ * own unique-candidate probe), which is the only correct instruction when the
+ * caller cannot name the session's repository. Sending the selected binding's
+ * directory instead is what produced the reported loop — the host ran `cd` on
+ * `session root + another workspace's subdir`, answered `session directory is
+ * missing on the host` (exit 90), the panel lost its summary and asked again
+ * three seconds later, forever.
+ *
+ * @param sessionId - the session the caller is about to ask the host about.
+ *   Omitted, the registered session is used; given, a registration that is
+ *   about a DIFFERENT session answers `''` — a panel listing one conversation
+ *   must never describe another one's repository.
+ */
+export function sessionRepoSubdir(sessionId?: string | undefined): string {
+  if (sessionId !== undefined && sessionId !== '' && sessionId !== followSessionId) return ''
+  if (!workspaceMatchesSession()) return ''
+  return readRepoSubdir(activeBinding().key)
+}
+
+/** The binding id the views are on (the dropdown/tree's answer), plain read. */
+export function selectedWorkspaceId(): string {
+  return currentWorkspace()?.id ?? ''
 }
 
 /**

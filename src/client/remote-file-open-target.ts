@@ -140,10 +140,15 @@ function remoteJoin(base: string, rel: string): string {
   return root === '/' ? `/${rel}` : `${root}/${rel}`
 }
 
+/** The local alias directory of one binding id, normalized for comparison. */
+function aliasDirById(table: RemoteOpenBindings, bindingId: string): string | undefined {
+  const dir = table.aliasPaths[bindingId]
+  return typeof dir === 'string' && dir !== '' ? trimTrailing(slashes(dir)) : undefined
+}
+
 /** The local alias directory of one binding, normalized for comparison. */
 function aliasDirOf(table: RemoteOpenBindings, binding: RemoteOpenBinding): string | undefined {
-  const dir = table.aliasPaths[binding.id]
-  return typeof dir === 'string' && dir !== '' ? trimTrailing(slashes(dir)) : undefined
+  return aliasDirById(table, binding.id)
 }
 
 /**
@@ -295,6 +300,9 @@ export function decideWorkspaceFollow(options: {
  * @param options.workspacePath - the session's host workspace path (alias dir).
  * @param options.alias - host alias the session is routed to, when known.
  * @param options.remoteRoot - absolute remote root of the session's workspace.
+ * @param options.sessionCwd - the session's CURRENT working directory (either
+ *   spelling), when known; it is the last resort, for a caller that holds no
+ *   workspace membership at all (the change panel before its first scan).
  * @param options.followedSession - the session already followed, if any.
  */
 export function planWorkspaceFollow(options: {
@@ -303,21 +311,68 @@ export function planWorkspaceFollow(options: {
   workspacePath?: string | undefined
   alias?: string | undefined
   remoteRoot?: string | undefined
+  sessionCwd?: string | undefined
   followedSession: string | undefined
 }): WorkspaceFollowDecision {
   // The host's own workspace path is the strongest evidence (it IS the alias
   // dir of exactly one binding). Without it, the remote root the caller holds
-  // still separates two bindings sharing an alias. With NEITHER, nothing is
-  // resolved — never "the first binding".
+  // still separates two bindings sharing an alias. With NEITHER, the session's
+  // own working directory is consulted (it may be a sub-directory of the alias
+  // dir, or the remote spelling) — and with that also unknown, nothing is
+  // resolved: never "the first binding".
   const binding = bindingForWorkspacePath(options.table, options.workspacePath)
     ?? (options.alias === undefined && options.remoteRoot === undefined
       ? undefined
       : bindingForRemoteFile(options.table, { alias: options.alias, remoteRoot: options.remoteRoot }))
+    ?? bindingForSessionCwd(options.table, options.sessionCwd)
   return decideWorkspaceFollow({
     sessionId: options.sessionId,
     followedSession: options.followedSession,
     bindingId: binding?.id,
   })
+}
+
+/**
+ * Whether the views' CURRENT selection is the binding resolved for the session
+ * being followed.
+ *
+ * This is the gate the change panel asks before it hands the host a repository
+ * sub-directory: that string is stored PER BINDING, so sending the selected
+ * workspace's sub-directory while the selection is not (or not yet known to be)
+ * the session's own binding describes a repository that does not exist under
+ * the session root — which the host answers with `session directory is missing
+ * on the host` (exit 90), the panel loses its summary, and the retry loop
+ * repeats the same wrong guess forever.
+ *
+ * Conservative by construction: without a session, without a resolved binding
+ * for THAT session, or without a selection, the answer is `false` (so the
+ * caller sends nothing and the host falls back to its own probing).
+ *
+ * @param options.table - client bindings plus their alias directories.
+ * @param options.sessionId - the session on screen, when known.
+ * @param options.followedSession - the session a binding was resolved for.
+ * @param options.followedBindingId - that binding's id.
+ * @param options.selectedId - the binding the views are on right now.
+ */
+export function selectionIsSessionBinding(options: {
+  table: RemoteOpenBindings
+  sessionId: string | undefined
+  followedSession: string | undefined
+  followedBindingId: string | undefined
+  selectedId: string | undefined
+}): boolean {
+  const sessionId = options.sessionId
+  if (sessionId === undefined || sessionId === '') return false
+  if (options.followedSession !== sessionId) return false
+  const followedBindingId = options.followedBindingId
+  if (followedBindingId === undefined || followedBindingId === '') return false
+  const selectedId = options.selectedId
+  if (selectedId === undefined || selectedId === '') return false
+  if (selectedId === followedBindingId) return true
+  // A binding re-created under a new id still names the same alias directory.
+  const followed = aliasDirById(options.table, followedBindingId)
+  const selected = aliasDirById(options.table, selectedId)
+  return followed !== undefined && selected !== undefined && samePath(followed, selected)
 }
 
 /** Binding whose local alias directory CONTAINS the given host path. */
@@ -333,6 +388,45 @@ function bindingForHostPath(
     if (best === undefined || dir.length > best.length) best = { binding, length: dir.length }
   }
   return best?.binding
+}
+
+/**
+ * The binding a session's CURRENT working directory belongs to.
+ *
+ * `bindingForWorkspacePath` answers only for the workspace path ITSELF (exact
+ * alias-dir match). A session cwd is weaker evidence: the model cd'ed into a
+ * project sub-directory, and the host commits whichever spelling the session
+ * ran in — the local alias (`C:\…\aliases\aliasdir-a\src`) or the REMOTE path
+ * (`/srv/repo-a/src`). Both are still inside exactly
+ * one binding, so the deepest containing alias dir / remote root decides.
+ *
+ * No fallback to "the first binding": a cwd that names no known binding answers
+ * `undefined`, and the caller then keeps the selection it already had.
+ *
+ * @param table - client bindings plus their alias directories.
+ * @param cwd - the session's working directory, either spelling, when known.
+ */
+export function bindingForSessionCwd(
+  table: RemoteOpenBindings,
+  cwd: string | undefined,
+): RemoteOpenBinding | undefined {
+  if (cwd === undefined || cwd === '') return undefined
+  const exact = bindingForWorkspacePath(table, cwd)
+  if (exact !== undefined) return exact
+  const path = slashes(cwd)
+  if (isRemoteAbsolute(path)) {
+    // A remote spelling: the deepest binding root that contains it.
+    const target = trimTrailing(path)
+    let best: { binding: RemoteOpenBinding; length: number } | undefined
+    for (const binding of table.bindings) {
+      const root = trimTrailing(binding.remotePath)
+      if (!contains(root, target)) continue
+      if (best === undefined || root.length > best.length) best = { binding, length: root.length }
+    }
+    return best?.binding
+  }
+  // A local spelling: the deepest alias directory that contains it.
+  return bindingForHostPath(table, path)
 }
 
 /** POSIX single-quote a word for a remote `bash -c` style command line. */
