@@ -12,7 +12,7 @@ import { api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { sameLocalDir } from './composer.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
-import { useExplorer, type EditorTab } from './store.tsx'
+import { useExplorer, gotoChange, markChangeStale, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
@@ -428,11 +428,16 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       addLabel={t('files.addToConversation')}
                       {...(activeTab.line === undefined ? {} : { revealLine: activeTab.line })}
                       {...(activeTab.lineNonce === undefined ? {} : { revealNonce: activeTab.lineNonce })}
+                      {...(activeTab.changeSet === undefined ? {} : { changeSet: activeTab.changeSet })}
+                      {...(activeTab.revealHunkLine === undefined ? {} : { revealHunkLine: activeTab.revealHunkLine })}
+                      {...(activeTab.revealHunkNonce === undefined ? {} : { revealHunkNonce: activeTab.revealHunkNonce })}
                       {...(viewStates.current.get(activeTab.id) === undefined
                         ? {}
                         : { viewState: viewStates.current.get(activeTab.id) })}
                       onTokens={setTokenCount}
                       onViewState={rememberViewState}
+                      onStepHunk={(dir) => { gotoChange(activeTab.id, dir) }}
+                      onChangeStale={() => { markChangeStale(activeTab.id) }}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}
                     />

@@ -5,7 +5,7 @@
  * ALREADY mounted — clicking a second hit in the same file must re-jump, not
  * silently do nothing (which is what a mount-only reveal does).
  */
-import { StateEffect, StateField } from '@codemirror/state'
+import { EditorSelection, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
 
 /** Set (or clear) the landing highlight on one line. */
@@ -87,4 +87,56 @@ function lineElement(view: EditorView, line: number): HTMLElement | null {
     node = node.parentNode
   }
   return null
+}
+
+/**
+ * 选中一个行区间并把它带到视野中央（「上一个/下一个改动点」用）。
+ *
+ * 与 `revealLine` 的差别只有两点：用 `EditorSelection.range` 把整段选起来（一个
+ * 改动块常常有好几行，只放一个 caret 看不出这次改动有多大），以及**不**点灯 —
+ * 改动块本身已经有自己的绿/红背景，再叠一层 landing 蓝只会糊成第三种颜色。
+ *
+ * `from` / `to` 都是 **1-based 行号**（与 `revealLine` 同一套语义），越界夹到文件
+ * 首尾，`from > to` 时自动对调。`lit` 与 `revealLine` 同义，给那些需要额外提示
+ * 的调用方留口子（传 null 收灯，`LIT_MS` 后自动熄灭）。
+ */
+export function revealRange(
+  view: EditorView,
+  from: number,
+  to: number,
+  lit?: (position: number | null) => void,
+): void {
+  let line = 0
+  try {
+    const total = view.state.doc.lines
+    const firstNumber = Math.min(Math.max(1, Math.round(Math.min(from, to))), total)
+    const lastNumber = Math.min(Math.max(firstNumber, Math.round(Math.max(from, to))), total)
+    const first = view.state.doc.line(firstNumber)
+    const last = view.state.doc.line(lastNumber)
+    line = firstNumber
+    view.dispatch({
+      selection: EditorSelection.range(first.from, last.to),
+      effects: EditorView.scrollIntoView(first.from, { y: 'center' }),
+    })
+    lit?.(first.from)
+  } catch {
+    // A stale line number or a disposed view: nothing to reveal.
+    return
+  }
+  view.focus()
+  // 与 revealLine 同理：祖先滚动容器也要走一遍，否则选中的块可能整个在视野外。
+  window.setTimeout(() => {
+    try {
+      lineElement(view, line)?.scrollIntoView({ block: 'center', inline: 'nearest' })
+    } catch {
+      // No layout: the CodeMirror scroll already did its best.
+    }
+  }, 30)
+  window.setTimeout(() => {
+    try {
+      lit?.(null)
+    } catch {
+      // Disposed.
+    }
+  }, LIT_MS)
 }

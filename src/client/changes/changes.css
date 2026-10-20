@@ -1,0 +1,203 @@
+/**
+ * Session change panel (above the composer).
+ *
+ * Scoped under `.rvs-changes` — this surface renders OUTSIDE `.rvs-root` (it is
+ * a composer dock, not part of the explorer), so it cannot borrow that block's
+ * custom properties and states every colour with a shell token plus a literal
+ * fallback. Light theme is the `body:not([data-ds-dark-theme])` override, the
+ * same convention the rest of this plugin's stylesheet uses.
+ */
+
+.rvs-changes {
+  --rvs-chg-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-chg-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-chg-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-chg-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .28));
+  --rvs-chg-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-chg-surface: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, .07));
+  --rvs-chg-add: #4ec9b0;
+  --rvs-chg-del: #f14c4c;
+  --rvs-chg-mod: #e2b714;
+  --rvs-chg-info: #58a6ff;
+
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 6px;
+  border: 1px solid var(--rvs-chg-border);
+  border-radius: 8px;
+  background-color: var(--rvs-chg-surface);
+  color: var(--rvs-chg-fg);
+  font-size: 12px;
+  line-height: 20px;
+  overflow: hidden;
+}
+
+.rvs-changes-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 2px 6px 2px 4px;
+}
+
+.rvs-changes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.rvs-changes-toggle:hover { background-color: var(--rvs-chg-hover); }
+
+.rvs-changes-chevron {
+  width: 10px;
+  color: var(--rvs-chg-fg3);
+  font-size: 10px;
+}
+
+.rvs-changes-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-changes-totals,
+.rvs-chg-counts {
+  display: inline-flex;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.rvs-chg-add { color: var(--rvs-chg-add); }
+.rvs-chg-del { color: var(--rvs-chg-del); }
+
+.rvs-changes-pending,
+.rvs-changes-stale {
+  color: var(--rvs-chg-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-changes-stale { color: var(--rvs-chg-mod); }
+
+.rvs-changes-spacer { flex: 1 1 auto; }
+
+.rvs-changes-nav {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.rvs-changes-nav button,
+.rvs-changes-refresh {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rvs-chg-fg2);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.rvs-changes-nav button:hover,
+.rvs-changes-refresh:hover {
+  background-color: var(--rvs-chg-hover);
+  color: var(--rvs-chg-fg);
+}
+
+.rvs-changes-body {
+  display: flex;
+  flex-direction: column;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 0 4px 4px;
+}
+
+.rvs-chg-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 22px;
+  padding: 1px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-chg-row:hover { background-color: var(--rvs-chg-hover); }
+
+.rvs-chg-row.rvs-chg-loading { opacity: .55; }
+
+.rvs-chg-flag {
+  flex: 0 0 auto;
+  width: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--rvs-chg-mod);
+}
+
+/* Status letters follow the git convention the rest of the plugin uses. */
+.rvs-chg-a { color: var(--rvs-chg-add); }
+.rvs-chg-m { color: var(--rvs-chg-mod); }
+.rvs-chg-d { color: var(--rvs-chg-del); }
+.rvs-chg-r { color: var(--rvs-chg-add); }
+.rvs-chg-c { color: var(--rvs-chg-info); }
+.rvs-chg-t { color: var(--rvs-chg-mod); }
+.rvs-chg-u { color: var(--rvs-chg-del); }
+
+.rvs-chg-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Paths are remote POSIX spellings: keep the leading slash where it belongs
+     even in a container whose direction the host skin may have changed. */
+  unicode-bidi: plaintext;
+}
+
+.rvs-chg-dir { color: var(--rvs-chg-fg3); }
+
+.rvs-chg-binary {
+  flex: 0 0 auto;
+  color: var(--rvs-chg-fg3);
+  font-size: 11px;
+}
+
+.rvs-changes-note {
+  padding: 4px 6px;
+  color: var(--rvs-chg-fg3);
+  font-size: 11px;
+}
+
+.rvs-changes-error { color: var(--rvs-chg-del); }
+
+body:not([data-ds-dark-theme]) .rvs-changes {
+  --rvs-chg-fg: var(--dsw-alias-label-primary, #1f2328);
+  --rvs-chg-fg2: var(--dsw-alias-label-secondary, #4d5358);
+  --rvs-chg-fg3: var(--dsw-alias-label-tertiary, #6e7781);
+  --rvs-chg-border: var(--dsw-alias-border-l1, rgba(31, 35, 40, .16));
+  --rvs-chg-hover: var(--dsw-alias-interactive-bg-hover, rgba(31, 35, 40, .07));
+  --rvs-chg-surface: var(--dsw-alias-bg-layer-2, rgba(31, 35, 40, .04));
+  --rvs-chg-add: #1a7f37;
+  --rvs-chg-del: #cf222e;
+  --rvs-chg-mod: #9a6700;
+  --rvs-chg-info: #0969da;
+}

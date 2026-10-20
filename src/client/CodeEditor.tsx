@@ -65,10 +65,28 @@ export interface CodeEditorHandle {
   getViewState: () => CodeEditorViewState | undefined
   /** Scroll back and put the caret where it was. */
   applyViewState: (state: CodeEditorViewState) => void
+  /** 选中一个行区间（1-based 行号）并滚到视野中央。 */
+  revealRange: (from: number, to: number) => void
+  /**
+   * 改动标记是否已被编辑作废（true = 屏幕上不再画任何改动点）。
+   *
+   * 暴露成独立的一个布尔查询、而不是把 `EditorView` 交出去：外部唯一需要知道的
+   * 就是"这份数据还准不准"，拿到了整个 view 则能改文档、改配置，是另一回事。
+   */
+  getChangeStale: () => boolean
 }
 
 /** Compartment holding the fallback highlighter (armed only when needed). */
 const fallbackCompartment = new Compartment()
+
+/**
+ * Compartment holding the session-change marks.
+ *
+ * 初始为空：只有调用方真的传了 `changeSet` 才把整套扩展（行背景 + gutter）装进
+ * 来。这不是洁癖 —— gutter 一旦装上就会给每行行号左边腾出一条栏位，没传改动数据
+ * 的编辑器（diff 面板、只读预览）因此不会多出一列空白。
+ */
+const changeMarksCompartment = new Compartment()
 
 /** True while CodeMirror's own highlighter has produced token spans. */
 function primaryColored(host: Element): boolean {
@@ -80,7 +98,14 @@ function primaryColored(host: Element): boolean {
 
 import { langFor } from './vsc/editor-langs.ts'
 import { canFallbackHighlight, fallbackHighlight } from './vsc/fallback-highlight.ts'
-import { revealLine, revealLineField, setRevealLine } from './vsc/reveal-line.ts'
+import { revealLine, revealLineField, setRevealLine, revealRange } from './vsc/reveal-line.ts'
+import {
+  changeMarksExtension,
+  changeStaleField,
+  changeBlockAt,
+  setChangeSet,
+  type ChangeSet,
+} from './vsc/change-marks.ts'
 
 /**
  * The editor surface is OPAQUE and scrolls in the editor's own palette
@@ -103,6 +128,29 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   revealLine?: number
   /** Bumped per reveal request, so the same line can be jumped to twice. */
   revealNonce?: number
+  /**
+   * 本会话在这个文件里的改动（行号 1-based）。`undefined` = 不开启改动标记：
+   * 不装扩展、不出现 gutter —— 没传这个 prop 的调用方（diff 面板等）行为与
+   * 加入本功能之前完全一致。
+   */
+  changeSet?: ChangeSet | null
+  /** 改动点跳转的目标行（1-based），配合 `revealHunkNonce` 重跳同一行。 */
+  revealHunkLine?: number
+  /** 改动点跳转的 nonce（同 `revealNonce` 的道理）。 */
+  revealHunkNonce?: number
+  /**
+   * 用户按下「上一个/下一个改动点」快捷键时回调。
+   *
+   * 列表算在 store 那边（`gotoChange`），编辑器只转发方向：组件内自己维护一份
+   * hunk 列表会与 tab 上的 `activeHunk` 漂成两份。
+   */
+  onStepHunk?: (dir: 1 | -1) => void
+  /**
+   * 文档被编辑、改动标记已作废时回调一次（false→true 的跳变）。
+   *
+   * 用回调而不是让上层轮询 handle：这件事发生在一次按键里，轮询会漏。
+   */
+  onChangeStale?: () => void
   /** Reports how many token spans the grammar produced (diagnostics). */
   onTokens?: (count: number) => void
   /**
@@ -205,6 +253,64 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     return () => window.clearTimeout(timer)
     // `revealNonce` re-runs this for a repeat jump to the same line.
   }, [props.revealLine, props.revealNonce, view])
+
+  /**
+   * 把「本会话改了什么」喂进编辑器。
+   *
+   * 两件事分开做：扩展的装卸（Compartment）只在"有没有 `changeSet`"翻转时发生，
+   * 数据本身只在**对象身份**变化时下发。身份比较不是省事，是正确性：编辑作废后
+   * store 里的 `changeSet` 仍是原来那个对象（`markChangeStale` 不动它），若每次渲染
+   * 都重新 dispatch，屏幕上会把已经作废的行号上的标记又画回来。
+   */
+  const marksOnRef = useRef(false)
+  const pushedSetRef = useRef<ChangeSet | null | undefined>(undefined)
+  useEffect(() => {
+    const current = viewRef.current
+    if (current === undefined) return
+    const set = props.changeSet
+    const on = set !== undefined
+    if (on !== marksOnRef.current) {
+      marksOnRef.current = on
+      // 重装扩展会重建字段，之前下发过的数据随之消失，必须再喂一次。
+      pushedSetRef.current = undefined
+      try {
+        current.dispatch({ effects: changeMarksCompartment.reconfigure(on ? changeMarksExtension : []) })
+      } catch {
+        return // Disposed view.
+      }
+    }
+    if (set === undefined) return
+    if (set === pushedSetRef.current) return
+    pushedSetRef.current = set
+    try {
+      current.dispatch({ effects: setChangeSet.of(set) })
+    } catch {
+      // Disposed.
+    }
+  }, [props.changeSet, view])
+
+  /**
+   * 跳到某个改动点。
+   *
+   * 目标行由 store 写好（`gotoChange` 落 `revealHunkLine` + 递增的
+   * `revealHunkNonce`），组件只负责"选中整块 + 居中"：一个改动点常有几十行，
+   * 只放个 caret 看不出边界。
+   */
+  useEffect(() => {
+    const target = props.revealHunkLine
+    if (target === undefined || target <= 0) return
+    const current = viewRef.current
+    if (current === undefined) return
+    // 与 revealLine 一样等一帧：刚下发的装饰要先落进 state，改动块才量得准。
+    const timer = window.setTimeout(() => {
+      const block = changeBlockAt(current.state, target)
+      // 只放 caret、不选中整块：改动范围已经由行背景 + gutter 画出来了，而选中
+      // 非空会顺带弹出编辑器现成的「添加到对话」浮层，正好盖住刚跳过去的那几行。
+      revealLine(current, block.from, setLitPosition)
+    }, 40)
+    return () => window.clearTimeout(timer)
+    // `revealHunkNonce` re-runs this for a repeat jump to the same hunk.
+  }, [props.revealHunkLine, props.revealHunkNonce, view])
 
   /**
    * Anchor for the find widget: viewport coordinates of the editor's top-right
@@ -312,6 +418,12 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       scroller.scrollTop = state.scrollTop
       scroller.scrollLeft = state.scrollLeft
     },
+    revealRange: (from, to) => {
+      const current = viewRef.current
+      if (current === undefined) return
+      revealRange(current, from, to)
+    },
+    getChangeStale: () => viewRef.current?.state.field(changeStaleField, false) === true,
   }), [])
 
   // Shown again after being hidden: remeasure layout.
@@ -359,6 +471,38 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
         },
         { key: 'F3', run: (view) => { stepFind(view, true); return true }, preventDefault: true },
         { key: 'Shift-F3', run: (view) => { stepFind(view, false); return true }, preventDefault: true },
+        /**
+         * 上一个 / 下一个改动点。
+         *
+         * `Mod-Shift-Alt-ArrowUp/Down` 是挑出来的空位：`@codemirror/commands` 的
+         * defaultKeymap 里 `Mod-Alt-ArrowUp/Down`（多光标）、`Alt-ArrowUp/Down`
+         * （移动行）、`Shift-Alt-ArrowUp/Down`（复制行）都被占了，三者之上再加
+         * Shift 的这两个组合它没有用；浏览器侧 Ctrl+Shift+Alt+方向键也没有默认
+         * 行为（选中/滚动都落在更低的组合上）。
+         *
+         * 没有 `onStepHunk`（面板没开）时返回 false，按键照旧落回 CodeMirror 的
+         * 默认处理，不会平白吞掉一个组合键。
+         */
+        {
+          key: 'Mod-Shift-Alt-ArrowDown',
+          run: () => {
+            const step = propsRef.current.onStepHunk
+            if (step === undefined) return false
+            step(1)
+            return true
+          },
+          preventDefault: true,
+        },
+        {
+          key: 'Mod-Shift-Alt-ArrowUp',
+          run: () => {
+            const step = propsRef.current.onStepHunk
+            if (step === undefined) return false
+            step(-1)
+            return true
+          },
+          preventDefault: true,
+        },
         {
           key: 'Escape',
           run: () => {
@@ -389,6 +533,9 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // Fallback coloring, off until it is needed (see `armFallback`).
       fallbackCompartment.of([]),
       revealLineField,
+      // Session-change marks, off until a `changeSet` prop arrives (see
+      // `changeMarksCompartment`).
+      changeMarksCompartment.of([]),
       EditorView.lineWrapping,
       EditorState.readOnly.of(propsRef.current.readOnly === true),
       ...langFor(propsRef.current.path),
@@ -453,6 +600,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           rect.left - window.scrollX + (rect.right - rect.left) / 2,
           rect.top - window.scrollY,
         )
+      }),
+      /**
+       * 改动标记作废的报告。
+       *
+       * 用 state field 的 false→true 跳变判定，而不是自己记一个 ref：装饰的清空
+       * 就发生在 field 里（见 `change-marks.ts`），顺着同一个事实报告出去，绝不
+       * 会出现"屏幕上已经没标记了、上层却还认为它有效"的分叉。字段不在时
+       * （没传 `changeSet`）`field(..., false)` 给 undefined，这里自然什么都不做。
+       */
+      EditorView.updateListener.of((update) => {
+        if (!update.docChanged) return
+        const before = update.startState.field(changeStaleField, false)
+        const after = update.state.field(changeStaleField, false)
+        if (before === false && after === true) propsRef.current.onChangeStale?.()
       }),
       /**
        * Report selection changes upward (scroll is reported by a DOM listener,

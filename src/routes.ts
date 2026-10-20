@@ -21,6 +21,7 @@ import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
 import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport } from './importers.ts'
 import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts'
+import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 
 /** One noServer WebSocket server for terminal upgrades (RFC 6455). */
@@ -77,6 +78,8 @@ export interface RemoteRoutesDeps {
    * live. Absent in tests and older wiring: the shared defaults then stand.
    */
   timeouts?: () => RemoteTimeouts
+  /** Session change ledger, when the host half mounted one. */
+  changes?: SessionChanges
 }
 
 /** Package name our loader row is mounted from (ns discovery key). */
@@ -513,6 +516,51 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           // Soft read: any composition without these services answers no cwd.
         }
         writeJson(res, 200, { cwd })
+      },
+    },
+    // ------------------------------------------- session change ledger
+    // What one live session changed on its remote host. The ledger itself is
+    // fed by turn events (see index.ts); the browser only ever reads it, which
+    // is why both ops are side-effect free and answer null instead of 404 when
+    // the session has no ledger yet (the panel shows its pending/absent state).
+    {
+      kind: 'exact',
+      path: REMOTE_API.changes,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if ((req.method ?? 'GET') !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
+          return
+        }
+        const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+        const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
+        const op = typeof body?.op === 'string' ? body.op : ''
+        if (sessionId === '' || (op !== 'list' && op !== 'diff')) {
+          writeJson(res, 400, { error: 'op (list|diff) and a non-empty sessionId are required' })
+          return
+        }
+        const ledger = deps.changes
+        if (ledger === undefined) {
+          writeJson(res, 200, { summary: null, diff: null })
+          return
+        }
+        if (op === 'list') {
+          writeJson(res, 200, { summary: ledger.summary(sessionId) })
+          return
+        }
+        const path = typeof body?.path === 'string' ? body.path : ''
+        if (path === '') {
+          writeJson(res, 400, { error: 'path is required for op=diff' })
+          return
+        }
+        try {
+          writeJson(res, 200, { diff: await ledger.diff(sessionId, path) })
+        } catch (error) {
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
       },
     },
     // --------------------------------------------- routing mode (volatile)

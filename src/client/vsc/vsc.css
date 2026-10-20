@@ -1504,6 +1504,115 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
     inset 0 -1px 0 0 rgba(77, 107, 254, .35);
 }
 
+/* --------------------------------------------------------- session changes */
+
+/**
+ * 「本会话改了什么」：代码行背景 + 左侧改动栏（Cursor 风格）。
+ *
+ * 三种形态必须**一眼分得开**，光靠绿/红两个色相不够（色弱用户看新增行和删除行
+ * 会糊成同一片），所以每种的左侧色条宽度/花样的语义也不同：
+ * - 新增：实心绿条；
+ * - 修改：实心蓝条（不是绿：修改块里既有留下的行也有新写的行，用"中性的已变更"
+ *   色不会误导读者以为整块都是新内容）；
+ * - 删除：**斜纹**红底 + 更粗的红条 —— 这一行其实已经不存在了，只在中止位置上
+ *   留个锚点，斜纹是这一层"虚"的信息里最不容易被当成真内容的花样。
+ *
+ * 选择器带上 `.cm-line`：`.cm-activeLine` 由 CodeMirror 的主题注入（运行时
+ * `<style>`，通常排在本文档之后），只写 `.rvs-change-*` 两者同权重时会输给它，
+ * 光标所在的那一行改动就会消失。
+ */
+.rvs-edge .cm-line.rvs-change-add {
+  background-color: rgba(46, 160, 67, .17);
+  box-shadow:
+    inset 3px 0 0 0 #2ea043,
+    inset 0 -1px 0 0 rgba(46, 160, 67, .28);
+}
+
+.rvs-edge .cm-line.rvs-change-mod {
+  background-color: rgba(56, 139, 253, .15);
+  box-shadow:
+    inset 3px 0 0 0 #388bfd,
+    inset 0 -1px 0 0 rgba(56, 139, 253, .28);
+}
+
+.rvs-edge .cm-line.rvs-change-del {
+  background-color: rgba(248, 81, 73, .09);
+  background-image: repeating-linear-gradient(135deg, rgba(248, 81, 73, .17) 0 6px, transparent 6px 12px);
+  box-shadow: inset 4px 0 0 0 #f85149;
+}
+
+/* 改动栏本身：符号 + 一列与行背景同色的窄条，读起来才是一条"改动边"。 */
+.rvs-edge .cm-gutterElement.rvs-change-gutter-add {
+  box-shadow: inset 2px 0 0 0 #2ea043;
+}
+
+.rvs-edge .cm-gutterElement.rvs-change-gutter-mod {
+  box-shadow: inset 2px 0 0 0 #388bfd;
+}
+
+.rvs-edge .cm-gutterElement.rvs-change-gutter-del {
+  box-shadow: inset 2px 0 0 0 #f85149;
+}
+
+.rvs-edge .rvs-change-mark {
+  display: inline-block;
+  width: 12px;
+  font-family: var(--rvs-mono);
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+}
+
+.rvs-edge .rvs-change-mark-add { color: #2ea043; }
+.rvs-edge .rvs-change-mark-mod { color: #388bfd; }
+.rvs-edge .rvs-change-mark-del { color: #f85149; }
+
+/**
+ * 撑宽度的隐形符号：只用它占位，绝不显示（见 `change-marks.ts` 的 SpacerMarker，
+ * CodeMirror 会给这个 spacer 元素加 `visibility: hidden`，这里不重复声明）。
+ */
+.rvs-edge .rvs-change-spacer {
+  opacity: 0;
+}
+
+/* 浅色主题：同样的色相，压暗 + 提高不透明度，在近白底上才看得清。 */
+body:not([data-ds-dark-theme]) .rvs-edge .cm-line.rvs-change-add {
+  background-color: rgba(31, 136, 61, .13);
+  box-shadow:
+    inset 3px 0 0 0 #1f883d,
+    inset 0 -1px 0 0 rgba(31, 136, 61, .22);
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .cm-line.rvs-change-mod {
+  background-color: rgba(9, 105, 218, .12);
+  box-shadow:
+    inset 3px 0 0 0 #0969da,
+    inset 0 -1px 0 0 rgba(9, 105, 218, .22);
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .cm-line.rvs-change-del {
+  background-color: rgba(207, 34, 46, .07);
+  background-image: repeating-linear-gradient(135deg, rgba(207, 34, 46, .14) 0 6px, transparent 6px 12px);
+  box-shadow: inset 4px 0 0 0 #cf222e;
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .cm-gutterElement.rvs-change-gutter-add {
+  box-shadow: inset 2px 0 0 0 #1f883d;
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .cm-gutterElement.rvs-change-gutter-mod {
+  box-shadow: inset 2px 0 0 0 #0969da;
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .cm-gutterElement.rvs-change-gutter-del {
+  box-shadow: inset 2px 0 0 0 #cf222e;
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-add { color: #1f883d; }
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-mod { color: #0969da; }
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; }
+
 /**
  * CodeMirror's own search decorations, also stated here: the editor's theme is
  * injected by the library, and these must stay readable even when only this

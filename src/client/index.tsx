@@ -23,6 +23,7 @@ import { registerNativeExplorer } from './NativeExplorer.tsx'
 import { installRemoteFileOpen } from './remote-file-open.ts'
 import { RemoteEditorView } from './RemoteEditorView.tsx'
 import { RemoteRoot } from './RemoteRoot.tsx'
+import { ChangesDock, type ChangesDockProps } from './changes/ChangesDock.tsx'
 import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
 import { setEditorSurface } from './store.tsx'
 import { detectLang, makeT } from './i18n.ts'
@@ -178,6 +179,39 @@ export function apply(ctx: Context): void {
       }, RemoteDirectoryFlow)
     }),
   ), 'dsh-remote-vs: directory flow')
+  // Session change panel: the full-width seat above the composer card (the one
+  // the todo / goal / queue panels already use), so the files this session
+  // touched stay visible while the next instruction is typed. Soft-typed like
+  // `conversation.view` below — the slot contract lives in
+  // dsh-client-ui-conversation, which is not a dependency of this repo.
+  ctx.effect(() => {
+    let dispose: (() => void) | undefined
+    try {
+      const slots = ctx.slots as unknown as {
+        inject(slot: string, register: () => () => void): () => void
+        register(
+          options: { name: string; id: string; order: number },
+          component: (props: ChangesDockProps) => ReactNode,
+        ): () => void
+      }
+      dispose = slots.inject('conversation.input.dock', () => slots.register({
+        name: 'conversation.input.dock',
+        id: 'remote-changes',
+        // After todo (0), goal (10) and queue (20); before the git-graph entry.
+        order: 30,
+      }, ChangesDock))
+    } catch (error) {
+      console.warn('[dsh-remote-vs] conversation.input.dock registration failed:', error)
+      return () => {}
+    }
+    return () => {
+      try {
+        dispose?.()
+      } catch {
+        // Ignore.
+      }
+    }
+  }, 'dsh-remote-vs: session changes dock')
   // Click routing for file references inside remote sessions: the chat's file
   // chips / deliverables / files-tree clicks all pass through
   // `ctx.sidebarRight.openResource`, and DSH's own preview resolves them

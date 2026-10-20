@@ -9,6 +9,8 @@ import {
   type GitStatus,
   type HelperAvailability,
   type ImportReport,
+  type RemoteChangesDiff,
+  type RemoteChangesSummary,
   type RemoteDeployState,
   type RemoteExecResult,
   type RemoteFileEntry,
@@ -243,6 +245,21 @@ export const api = {
    */
   sessionCwd: (sessionId: string) =>
     call<{ cwd?: string }>(REMOTE_API.sessionCwd, { method: 'POST', body: JSON.stringify({ sessionId }) }),
+  /**
+   * What one live session changed on its remote host.
+   *
+   * `list` is cheap — the host already holds the ledger — so the dock polls it;
+   * `diff` costs one remote git run per file, so it is fetched only when a file
+   * is opened for review.
+   */
+  changes: {
+    list: (sessionId: string) =>
+      post<{ summary: RemoteChangesSummary | null }>(REMOTE_API.changes, { op: 'list', sessionId })
+        .then(r => r.summary ?? null),
+    diff: (sessionId: string, path: string) =>
+      post<{ diff: RemoteChangesDiff | null }>(REMOTE_API.changes, { op: 'diff', sessionId, path })
+        .then(r => r.diff ?? null),
+  },
   // -- routing mode (volatile, persists to the profile patch)
   setRoutingMode: (mode: 'off' | 'shadow' | 'enforce') =>
     post<{ mode: 'off' | 'shadow' | 'enforce' }>(REMOTE_API.routing, { mode }).then((r) => r.mode),

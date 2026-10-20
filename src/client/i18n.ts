@@ -320,6 +320,22 @@ const zh: Record<string, string> = {
   'editor.readTimeout': '读取超时（远端无响应）',
   'editor.needSource': '切回「源码」才能保存：预览态没有编辑器缓冲区，直接保存会把旧内容写回远端。',
   'git.notARepo': '当前远端工作区不是 git 仓库。',
+  // -- session change panel (above the composer)
+  'changes.title': '本次改动',
+  'changes.toggle': '展开或收起本次会话的改动文件',
+  'changes.empty': '本会话还没有改动文件。',
+  'changes.pending': '正在统计…',
+  'changes.unavailable': '无法统计改动',
+  'changes.failed': '改动列表读取失败',
+  'changes.diffFailed': '取改动内容失败',
+  'changes.binary': '二进制',
+  'changes.truncated': '文件过多，只列出前 500 个（统计数字仍为全部）。',
+  'changes.prev': '上一个修改点',
+  'changes.next': '下一个修改点',
+  'changes.refresh': '重新统计改动',
+  'changes.stale': '位置已过期',
+  'changes.staleHint': '编辑器内容已改动，改动位置可能不准。点击列表里的文件重新计算。',
+  'changes.noWorkspace': '找不到该主机对应的工作区，无法打开文件。',
 }
 
 const en: Record<string, string> = {
@@ -620,6 +636,22 @@ const en: Record<string, string> = {
   'editor.readTimeout': 'Read timed out (host not responding)',
   'editor.needSource': 'Switch back to Source to save: preview mode has no editor buffer, so saving would write the pre-edit text to the remote file.',
   'git.notARepo': 'This remote workspace is not a git repository.',
+  // -- session change panel (above the composer)
+  'changes.title': 'Changed files',
+  'changes.toggle': 'Show or hide the files this session changed',
+  'changes.empty': 'This session has not changed any file yet.',
+  'changes.pending': 'Computing…',
+  'changes.unavailable': 'Cannot list changes',
+  'changes.failed': 'Failed to read the change list',
+  'changes.diffFailed': 'Failed to read the change contents',
+  'changes.binary': 'binary',
+  'changes.truncated': 'Too many files: the first 500 are listed (totals cover all of them).',
+  'changes.prev': 'Previous change',
+  'changes.next': 'Next change',
+  'changes.refresh': 'Recompute changes',
+  'changes.stale': 'positions stale',
+  'changes.staleHint': 'The editor content changed, so the marked positions may be off. Click the file in the list to recompute.',
+  'changes.noWorkspace': 'No workspace is bound to that host, so the file cannot be opened.',
 }
 
 export type Lang = 'zh' | 'en'

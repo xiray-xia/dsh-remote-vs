@@ -25,6 +25,7 @@ import { api, RemoteApiError, configureTimeouts, fileReadTimeoutMs, gitTimeoutMs
 import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
 import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
+import type { ChangeSet } from './vsc/change-marks.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
@@ -65,6 +66,19 @@ export interface EditorTab {
    * jump to the line the caret is already on.
    */
   lineNonce?: number
+  /**
+   * 「本会话改了什么」的行标记（来自会话改动数据层，见 `vsc/change-marks.ts`）。
+   * `undefined` = 这个 tab 根本没有改动数据（编辑器连 gutter 都不会多装一栏）。
+   */
+  changeSet?: ChangeSet | null
+  /** 最近一次跳到的改动点在 `changeSet.hunks` 里的下标（0-based）；`<0` = 还没跳过。 */
+  activeHunk?: number
+  /** 编辑器报告文档已与 `changeSet` 脱钩（用户敲过字），上层该重新拉数据。 */
+  changeStale?: boolean
+  /** 改动点跳转目标行（1-based）。与 `line` 分开，两条跳转链路互不干扰。 */
+  revealHunkLine?: number
+  /** 改动点跳转的 nonce，语义同 `lineNonce`。 */
+  revealHunkNonce?: number
   diff: DiffPayload | undefined
   model: DiffModel | undefined
   view: 'split' | 'before' | 'after'
@@ -262,6 +276,12 @@ export interface ExplorerValue {
   activateTab: (id: string) => void
   closeTab: (id: string) => void
   updateTab: (id: string, patch: Partial<EditorTab>) => void
+  /** 换一份会话改动标记（`activeHunk` 归零）。 */
+  applyChangeSet: (tabId: string, set: ChangeSet | null) => void
+  /** 上一个 / 下一个改动点（绕回），返回目标行号并驱动编辑器跳过去。 */
+  gotoChange: (tabId: string, dir: 1 | -1) => number | undefined
+  /** 编辑器报告文档已脱钩：标记作废，等上层重新拉数据。 */
+  markChangeStale: (tabId: string) => void
   saveTab: (id: string, content: string) => Promise<void>
   reloadTab: (id: string) => Promise<void>
   info: (text: string) => void
@@ -355,6 +375,9 @@ function build(): ExplorerValue {
     activateTab,
     closeTab,
     updateTab,
+    applyChangeSet,
+    gotoChange,
+    markChangeStale,
     saveTab,
     reloadTab,
     info,
@@ -962,6 +985,58 @@ export async function reloadTab(id: string): Promise<void> {
 /** Note where the editor pane is mounted (set by the client entry). */
 export function setEditorSurface(surface: 'center' | 'sidebar'): void {
   patch({ editorSurface: surface })
+}
+
+/**
+ * 换一份「本会话改了什么」的标记。
+ *
+ * `activeHunk` 归零是刻意的：数据换了一份，上一份里"跳到第 3 处"的下标没有任何
+ * 意义。0 表示"当前停在第 1 处"（打开这个文件的调用方本来就会把 caret 放到
+ * `hunks[0]`），所以紧接着按"下一个"会走到第 2 处，不会把第 1 处跳过。
+ */
+export function applyChangeSet(tabId: string, set: ChangeSet | null): void {
+  patchTab(tabId, { changeSet: set, activeHunk: 0, changeStale: false })
+}
+
+/**
+ * 在改动点之间前后移动（到头绕回），返回目标行号（1-based）。
+ *
+ * `activeHunk` 是 `changeSet.hunks` 的 **0-based 下标**，`<0` / 缺省表示"这批数据
+ * 里还没跳过"：第一次向后跳落在第 1 处、向前跳落在最后一处 —— 用户按下快捷键期
+ * 待的是"带我去看改动"，而不是"从第 1 处跳到第 2 处、把第 1 处跳过"。
+ *
+ * 跳转目标顺手写进 tab（`revealHunkLine` + 递增的 `revealHunkNonce`），编辑器通过
+ * props 收到后自己选中并滚动；调用方（面板按钮、键盘）只需要调这一个函数。这与
+ * 面板里内联的那套步进算法是同一套下标语义，两边混用也不会错位。
+ */
+export function gotoChange(tabId: string, dir: 1 | -1): number | undefined {
+  const tab = state.tabs.find(item => item.id === tabId)
+  const hunks = tab?.changeSet?.hunks ?? []
+  if (tab === undefined || hunks.length === 0) return undefined
+  const current = tab.activeHunk ?? -1
+  const next = current < 0 || current >= hunks.length
+    ? (dir > 0 ? 0 : hunks.length - 1)
+    : (current + dir + hunks.length) % hunks.length
+  const line = hunks[next]
+  if (line === undefined) return undefined
+  patchTab(tabId, {
+    activeHunk: next,
+    revealHunkLine: line,
+    revealHunkNonce: (tab.revealHunkNonce ?? 0) + 1,
+  })
+  return line
+}
+
+/**
+ * 编辑器报告"文档已经和改动数据脱钩"（用户敲了字）。
+ *
+ * 只打标记、不做别的：标记本身已在编辑器内部被清空（见 `change-marks.ts`），
+ * 重新拉数据是上层的事，仓库在这一层不发起任何请求。
+ */
+export function markChangeStale(tabId: string): void {
+  const tab = state.tabs.find(item => item.id === tabId)
+  if (tab === undefined || tab.changeStale === true) return
+  patchTab(tabId, { changeStale: true })
 }
 
 /** Mount-time hook: boot the store for a given ctx. */

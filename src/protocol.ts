@@ -22,6 +22,8 @@ export const REMOTE_API = {
   routing: '/api/dsh-remote/routing',
   /** Current working directory of one live session (click resolution helper). */
   sessionCwd: '/api/dsh-remote/session-cwd',
+  /** What one live session changed on its remote host (the review panel). */
+  changes: '/api/dsh-remote/changes',
 } as const
 
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */
@@ -344,6 +346,62 @@ export interface UnifiedDiffFile {
   status: 'M' | 'A' | 'D' | 'R' | 'C' | 'U'
   binary: boolean
   hunks: UnifiedHunk[]
+}
+
+/** One file the session changed, as the review panel lists it. */
+export interface RemoteChangedFile {
+  /** Remote absolute POSIX path — the editor opens exactly this. */
+  path: string
+  /** Path relative to the session root (what the row shows), '' for an external file. */
+  display: string
+  added: number
+  deleted: number
+  /** Git reported the pair as binary (`-` in --numstat). */
+  binary?: true
+  /** Change kind from --name-status; undefined when git gave none. */
+  status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U'
+}
+
+/**
+ * What one session changed on its remote host since the session's baseline.
+ *
+ * The baseline is the first snapshot taken after the session began (its git
+ * tree), so the list answers "what did this session touch" rather than "what is
+ * uncommitted" — the difference matters when the working tree already carried
+ * user edits before the session started.
+ */
+export interface RemoteChangesSummary {
+  /** Remote host alias the session is routed to. */
+  alias: string
+  /** Remote absolute root the `display` paths are relative to. */
+  root: string
+  /** Highest turn recorded (0 while only the baseline exists). */
+  turn: number
+  files: RemoteChangedFile[]
+  added: number
+  deleted: number
+  /** Wall-clock ms when this summary was last recomputed. */
+  at: number
+  /** More files than the cap: `files` is truncated but the totals are whole. */
+  truncated?: true
+  /** A snapshot is running right now; the list will refresh. */
+  pending: boolean
+  /** Why this session has no ledger (local session, no git, timeout, …). */
+  unavailable?: string
+}
+
+/** One file's whole-session comparison, ready for editor decorations. */
+export interface RemoteChangesDiff {
+  kind: 'text' | 'binary' | 'missing'
+  /** Remote absolute POSIX path. */
+  path: string
+  display: string
+  /** Text hunks (empty for binary/missing). */
+  hunks: UnifiedHunk[]
+  /** File status at turn end (A/M/D/…), when git reported one. */
+  status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U'
+  /** The diff was cut at the byte cap: `hunks` is a prefix. */
+  truncated?: true
 }
 
 /** One row of the side-by-side diff projection. */

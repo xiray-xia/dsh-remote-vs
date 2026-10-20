@@ -27,6 +27,7 @@ import {
   resolveTimeouts,
 } from './timeouts.ts'
 import { RemoteWorlds, type RoutingMode, type WorldRoute } from './p2/worlds.ts'
+import { SessionChanges } from './changes/recorder.ts'
 import {
   remoteExecTool,
   remoteHostsTool,
@@ -243,13 +244,54 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     readTimeoutMs: readField(config?.readTimeoutMs, DEFAULT_READ_TIMEOUT_MS),
   })
 
+  // Session change ledger (the Cursor-style review panel). Fed from turn
+  // boundaries, never from the request path: a snapshot on a monorepo can take
+  // tens of seconds, and a turn must never wait for it. `cwd` is resolved here
+  // because the recorder deliberately knows nothing about cordis.
+  const ledgerTarget = (session: { id: string; header?: { cwd?: string } }): { sessionId: string; cwd: string } => {
+    let cwd = session.header?.cwd ?? ''
+    try {
+      const workingDirectory = ctx.get('workingDirectory') as { get?: (session: unknown) => unknown } | undefined
+      const current = workingDirectory?.get?.(session)
+      if (typeof current === 'string' && current !== '') cwd = current
+    } catch {
+      // Soft read: the header cwd is the fallback.
+    }
+    return { sessionId: session.id, cwd }
+  }
+  const changes = new SessionChanges({
+    pool,
+    worlds,
+    timeouts: resolveTimeoutsNow,
+    log: (level, message) => {
+      try {
+        if (level === 'warn') ctx.logger.warn(`[remote-vs] changes: ${message}`)
+        else ctx.logger.info(`[remote-vs] changes: ${message}`)
+      } catch {
+        // Logging must never break a turn.
+      }
+    },
+  })
+  ctx.on('session/event', (session, event) => {
+    try {
+      if (event.type === 'turn/start') changes.beginTurn(ledgerTarget(session))
+      else if (event.type === 'turn/end') changes.endTurn(ledgerTarget(session), event.data.turn)
+    } catch {
+      // Recording must never disturb the turn that is being recorded.
+    }
+  })
+  ctx.on('session/disposed', (session) => { changes.forget(session.id) })
+  ctx.effect(() => () => { changes.dispose() }, 'dsh-remote-vs: changes ledger')
+
   const { routes, upgrade, terminalSessions } = makeRoutes({
     store,
     pool,
     worlds,
     ctx,
     timeouts: resolveTimeoutsNow,
+    changes,
   })
+
   let disposeRoutes: (() => void) | undefined
 
   const tools = [
