@@ -131,24 +131,35 @@
 .rvs-changes-body {
   display: flex;
   flex-direction: column;
-  max-height: 168px;
+  max-height: 216px;
   overflow-y: auto;
   padding: 0 4px 4px;
 }
 
+/*
+ * One file per row: type icon, path, counts at the far right.
+ *
+ * Every part is nowrap and the path is the only flexible one, so a long remote
+ * path ellipsizes in the middle of the row instead of pushing the counts out of
+ * view or wrapping the row into a paragraph (which is what a row of inline
+ * <button>s does without this rule).
+ */
 .rvs-chg-row {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   width: 100%;
-  min-height: 22px;
+  min-height: 24px;
   padding: 1px 6px;
   border: none;
   border-radius: 5px;
   background: transparent;
   color: inherit;
   font: inherit;
+  line-height: 18px;
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -156,23 +167,16 @@
 
 .rvs-chg-row.rvs-chg-loading { opacity: .55; }
 
-.rvs-chg-flag {
+/* File-type icon: the host's icon theme when the shell provides one, else the
+   plugin's own SVG set (see vsc/kit.tsx FileIcon). */
+.rvs-chg-icon {
+  display: inline-flex;
   flex: 0 0 auto;
-  width: 10px;
-  font-size: 10px;
-  font-weight: 700;
-  text-align: center;
-  color: var(--rvs-chg-mod);
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
 }
-
-/* Status letters follow the git convention the rest of the plugin uses. */
-.rvs-chg-a { color: var(--rvs-chg-add); }
-.rvs-chg-m { color: var(--rvs-chg-mod); }
-.rvs-chg-d { color: var(--rvs-chg-del); }
-.rvs-chg-r { color: var(--rvs-chg-add); }
-.rvs-chg-c { color: var(--rvs-chg-info); }
-.rvs-chg-t { color: var(--rvs-chg-mod); }
-.rvs-chg-u { color: var(--rvs-chg-del); }
 
 .rvs-chg-path {
   flex: 1 1 auto;
@@ -187,8 +191,19 @@
 
 .rvs-chg-dir { color: var(--rvs-chg-fg3); }
 
-.rvs-chg-binary {
+.rvs-chg-name { color: var(--rvs-chg-fg); }
+
+.rvs-chg-counts {
+  display: inline-flex;
   flex: 0 0 auto;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "binary" / "too large": the two cases where no line counts exist. */
+.rvs-chg-note {
   color: var(--rvs-chg-fg3);
   font-size: 11px;
 }

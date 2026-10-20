@@ -358,6 +358,13 @@ export interface RemoteChangedFile {
   deleted: number
   /** Git reported the pair as binary (`-` in --numstat). */
   binary?: true
+  /**
+   * Too large to compare line by line, so the counts are unknown (0/0).
+   *
+   * The row still earns its place: time and size proved it moved since the
+   * session baseline. Clicking it opens the file, but no hunks can be painted.
+   */
+  oversized?: true
   /** Change kind from --name-status; undefined when git gave none. */
   status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U'
 }

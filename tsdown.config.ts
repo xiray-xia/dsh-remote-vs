@@ -85,11 +85,28 @@ function cssInlinePlugin(): BuildPlugin {
       const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
       this.addWatchFile(fileId)
       const css = await readFile(fileId, 'utf8')
+      // One <style> per SOURCE FILE, keyed by its own path.
+      //
+      // A single shared marker looked equivalent and was not: the first sheet the
+      // factory executed (vsc.css, imported by the entry) inserted its tag, and
+      // every later sheet then found that marker and skipped its own injection —
+      // so the change panel's stylesheet never reached the page and its rows
+      // rendered as bare inline buttons.
+      //
+      // The key is compared in JS rather than inside an attribute selector: the
+      // path is a Windows absolute one, and a backslash in a CSS selector opens
+      // an escape sequence, so the selector spelling of this key would never
+      // match the attribute it just wrote.
       return [
         `const css = ${JSON.stringify(css)};`,
-        `if (typeof document !== 'undefined' && document.querySelector('style[data-rvs-css]') === null) {`,
+        `const key = ${JSON.stringify(fileId)};`,
+        `const injected = typeof document === 'undefined' ? undefined : Array.prototype.find.call(`,
+        `  document.querySelectorAll('style[data-rvs-css]'),`,
+        `  (tag) => tag.dataset.rvsCss === key,`,
+        `);`,
+        `if (typeof document !== 'undefined' && injected === undefined) {`,
         `  const tag = document.createElement('style');`,
-        `  tag.dataset.rvsCss = '1';`,
+        `  tag.dataset.rvsCss = key;`,
         `  tag.textContent = css;`,
         `  document.head.appendChild(tag);`,
         `}`,

@@ -113,6 +113,10 @@ interface Ledger {
   baselineTaken: boolean
   /** Set once the untracked scan proves unusable on this host; stops retrying it. */
   untrackedGivenUp: boolean
+  /** Wall-clock ms this ledger appeared: the session's own start for mtime tests. */
+  startedAt: number
+  /** True once the first untracked result has been folded into the baseline. */
+  absorbed: boolean
   /** Latest tracked scan (cheap, refreshed every turn). */
   tracked: StatusEntry[]
   /** Latest untracked scan; undefined until the first one lands. */
@@ -145,6 +149,22 @@ function posixJoin(base: string, rel: string): string {
   const left = base.endsWith('/') ? base.slice(0, -1) : base
   const right = rel.startsWith('./') ? rel.slice(2) : rel
   return right === '' ? left : `${left}/${right}`
+}
+
+/**
+ * Whether two reads prove the file did not move between them.
+ *
+ * The last resort for a path whose bytes never crossed the wire (over the size
+ * cap, or binary): mtime and size are all that is left, and requiring BOTH keeps
+ * the claim honest. mtime has one-second resolution, so an edit inside the same
+ * second as the read is invisible here — which is why this is only ever used
+ * where a content comparison is impossible.
+ */
+function sameStat(before: ReadResult | undefined, after: ReadResult | undefined): boolean {
+  if (before === undefined || after === undefined) return false
+  if (before.mtime === undefined || after.mtime === undefined) return false
+  if (before.size === undefined || after.size === undefined) return false
+  return before.mtime === after.mtime && before.size === after.size
 }
 
 export class SessionChanges {
@@ -315,6 +335,8 @@ export class SessionChanges {
       baseline: undefined,
       baselineTaken: false,
       untrackedGivenUp: false,
+      startedAt: Date.now(),
+      absorbed: false,
       tracked: [],
       untracked: undefined,
       untrackedAt: 0,
@@ -424,11 +446,18 @@ export class SessionChanges {
       const binary = beforeSide?.binary === true || afterSide?.binary === true
       const fileTruncated = beforeSide?.truncated === true || afterSide?.truncated === true
       const gone = beforeSide?.absent === true && afterSide?.absent === true
-      // A path still listed by git but byte-identical to the session baseline is
-      // pre-existing dirt, not this session's work.
       if (gone) continue
+      // A path git still reports but that is byte-identical to the session
+      // baseline is pre-existing dirt, not this session's work.
       if (!binary && !fileTruncated && before === afterText) continue
-      const diff = binary ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
+      // For a file whose bytes were withheld (over the size cap, or binary) the
+      // content test above cannot run, and listing it on git's word alone is how
+      // the panel filled up with every big file the checkout already carried.
+      // Time and size are the evidence that survives the cap: identical on both
+      // sides means the session never wrote to it.
+      if ((binary || fileTruncated) && sameStat(beforeSide, afterSide)) continue
+      const oversized = fileTruncated && !binary
+      const diff = binary || oversized ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
       const status = panelStatus(entry.status)
       const absolute = posixJoin(ledger.root, entry.path)
       records.set(absolute, {
@@ -448,6 +477,7 @@ export class SessionChanges {
         added: diff.added,
         deleted: diff.deleted,
         ...(binary ? { binary: true as const } : {}),
+        ...(oversized ? { oversized: true as const } : {}),
         ...(status === undefined ? {} : { status }),
       })
     }
@@ -502,6 +532,7 @@ export class SessionChanges {
         return
       }
       ledger.untracked = parseUntrackedZ(scan.stdout)
+      await this.absorbPreExisting(ledger)
       // A completed scan is worth one more publish: it is the only source of
       // "a file appeared" rows.
       await this.publish(ledger)
@@ -526,6 +557,35 @@ export class SessionChanges {
     const last = ledger.untrackedMs
     if (last === undefined) return 0
     return Math.max(5_000, Math.min(last * 4, 120_000))
+  }
+
+  /**
+   * Fold files that already existed when the session began into the baseline.
+   *
+   * The untracked walk is slow enough (a minute on a monorepo) that the baseline
+   * refresh publishes before it lands, so its first result arrives without a
+   * "before" side. Without this, every file the checkout already had — the
+   * user's own scratch files, a build's leftovers — would be announced as this
+   * session's work, complete with a full-file addition count.
+   *
+   * mtime decides: strictly older than the ledger's own start means the session
+   * cannot have created it, and its present content is therefore its baseline.
+   */
+  private async absorbPreExisting(ledger: Ledger): Promise<void> {
+    if (ledger.untracked === undefined || ledger.absorbed) return
+    ledger.absorbed = true
+    const baseline = ledger.baseline ?? new Map<string, ReadResult>()
+    ledger.baseline = baseline
+    const unknown = ledger.untracked
+      .map(entry => entry.path)
+      .filter(path => !baseline.has(path))
+    if (unknown.length === 0) return
+    const reads = await this.readPaths(ledger, unknown, 'worktree')
+    if (ledger.disposed) return
+    for (const [path, read] of reads) {
+      if (read.mtime === undefined) continue
+      if (read.mtime * 1000 < ledger.startedAt) baseline.set(path, read)
+    }
   }
 
   /** Read a batch of files, capped per file and in total. */

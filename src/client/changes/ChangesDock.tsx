@@ -30,6 +30,7 @@ import {
 import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
 import { setUndoContext } from './undo-context.ts'
+import { FileIcon } from '../vsc/kit.tsx'
 import './changes.css'
 
 /** How often an open panel re-reads the ledger (the host refreshes it per turn). */
@@ -49,10 +50,12 @@ export interface ChangesDockProps {
   sessionId?: string
 }
 
-/** One row's status letter → the colour class the CSS paints. */
-function statusClass(file: RemoteChangedFile): string {
-  if (file.status === undefined) return 'rvs-chg-m'
-  return `rvs-chg-${file.status.toLowerCase()}`
+/** One row's status, spelled out for the tooltip (the row itself shows counts). */
+function statusWord(file: RemoteChangedFile, t: (key: string) => string): string {
+  if (file.status === 'A') return t('changes.statusAdded')
+  if (file.status === 'D') return t('changes.statusDeleted')
+  if (file.status === 'R') return t('changes.statusRenamed')
+  return t('changes.statusModified')
 }
 
 /** Split a display path into its directory prefix and file name. */
@@ -222,19 +225,26 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
                 type="button"
                 key={file.path}
                 className={`rvs-chg-row${busy === file.path ? ' rvs-chg-loading' : ''}`}
-                title={file.path}
+                title={`${file.path}\n${statusWord(file, t)}`}
                 onClick={() => { void openChanged(file) }}
               >
-                <span className={`rvs-chg-flag ${statusClass(file)}`} aria-hidden="true">{file.status ?? 'M'}</span>
-                <span className="rvs-chg-path"><span className="rvs-chg-dir">{dir}</span>{name}</span>
-                {file.binary === true
-                  ? <span className="rvs-chg-binary">{t('changes.binary')}</span>
-                  : (
-                    <span className="rvs-chg-counts">
-                      <span className="rvs-chg-add">+{file.added}</span>
-                      <span className="rvs-chg-del">−{file.deleted}</span>
-                    </span>
-                    )}
+                <span className="rvs-chg-icon" aria-hidden="true"><FileIcon path={file.display} size={14} /></span>
+                <span className="rvs-chg-path">
+                  <span className="rvs-chg-dir">{dir}</span>
+                  <span className="rvs-chg-name">{name}</span>
+                </span>
+                <span className="rvs-chg-counts">
+                  {file.oversized === true
+                    ? <span className="rvs-chg-note">{t('changes.oversized')}</span>
+                    : file.binary === true
+                      ? <span className="rvs-chg-note">{t('changes.binary')}</span>
+                      : (
+                        <>
+                          <span className="rvs-chg-add">+{file.added}</span>
+                          <span className="rvs-chg-del">−{file.deleted}</span>
+                        </>
+                        )}
+                </span>
               </button>
             )
           })}

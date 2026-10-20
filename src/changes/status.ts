@@ -77,6 +77,17 @@ export interface ReadResult {
   binary: boolean
   /** Not there, or unreadable. */
   absent: boolean
+  /**
+   * Modification time in whole seconds (worktree reads only).
+   *
+   * A large file whose bytes were withheld can still be compared by mtime: two
+   * equal mtimes mean the session did not touch it, which is the difference
+   * between a clean list and one padded with every big file the checkout
+   * happens to carry. Zero when the host could not answer.
+   */
+  mtime?: number
+  /** Size in bytes, when known (`0` for a missing path). */
+  size?: number
 }
 
 /** Exit statuses of the read commands (git's own statuses pass through as-is). */
@@ -258,11 +269,15 @@ export function readWorktreeCommand(
     '    esac',
     '  fi',
     '  if [ "$rvs_src" = missing ]; then',
-    '    printf \'@@RVS-FILE %s absent@@\\n\' "$rvs_b"',
+    '    printf \'@@RVS-FILE %s %s 0 0@@\\n\' "$rvs_b" absent',
     '    return 0',
     '  fi',
+    '  # mtime is what lets a caller rule out "unchanged" for a file whose bytes',
+    '  # were withheld by the caps below.',
+    '  rvs_m=$(stat -c %Y -- "$rvs_p" 2>/dev/null || echo 0)',
+    '  case $rvs_m in ""|*[!0-9]*) rvs_m=0 ;; esac',
     '  if [ "$rvs_n" -gt "$rvs_cap" ] || [ "$((rvs_total + rvs_n))" -gt "$rvs_ttl" ]; then',
-    '    printf \'@@RVS-FILE %s big@@\\n\' "$rvs_b"',
+    '    printf \'@@RVS-FILE %s %s %s %s@@\\n\' "$rvs_b" big "$rvs_m" "$rvs_n"',
     '    return 0',
     '  fi',
     '  if [ "$rvs_src" = symlink ]; then',
@@ -271,11 +286,11 @@ export function readWorktreeCommand(
     '    rvs_e=$(base64 < "$rvs_p" 2>/dev/null | tr -d "\\n")',
     '    # A non-empty file that produced no bytes vanished under us.',
     '    if [ -z "$rvs_e" ] && [ "$rvs_n" -gt 0 ]; then',
-    '      printf \'@@RVS-FILE %s absent@@\\n\' "$rvs_b"',
+    '      printf \'@@RVS-FILE %s %s 0 0@@\\n\' "$rvs_b" absent',
     '      return 0',
     '    fi',
     '  fi',
-    '  printf \'@@RVS-FILE %s ok@@\\n%s\\n\' "$rvs_b" "$rvs_e"',
+    '  printf \'@@RVS-FILE %s %s %s %s@@\\n%s\\n\' "$rvs_b" ok "$rvs_m" "$rvs_n" "$rvs_e"',
     '  rvs_total=$((rvs_total + rvs_n))',
     '  return 0',
     '}',
@@ -318,27 +333,29 @@ export function readHeadCommand(
     '  rvs_p=$2',
     '  rvs_n=',
     '  if ! rvs_n=$(git cat-file -s "HEAD:$rvs_p" 2>/dev/null); then',
-    '    printf \'@@RVS-FILE %s absent@@\\n\' "$rvs_b"',
+    '    printf \'@@RVS-FILE %s absent 0 0@@\\n\' "$rvs_b"',
     '    return 0',
     '  fi',
     '  rvs_n=$(printf "%s" "$rvs_n" | tr -d " ")',
     '  case $rvs_n in',
     '    ""|*[!0-9]*)',
-    '      printf \'@@RVS-FILE %s absent@@\\n\' "$rvs_b"',
+    '      printf \'@@RVS-FILE %s absent 0 0@@\\n\' "$rvs_b"',
     '      return 0',
     '      ;;',
     '  esac',
     '  if [ "$rvs_n" -gt "$rvs_cap" ] || [ "$((rvs_total + rvs_n))" -gt "$rvs_ttl" ]; then',
-    '    printf \'@@RVS-FILE %s big@@\\n\' "$rvs_b"',
+    '    printf \'@@RVS-FILE %s big 0 %s@@\\n\' "$rvs_b" "$rvs_n"',
     '    return 0',
     '  fi',
     '  rvs_e=$(git cat-file blob "HEAD:$rvs_p" 2>/dev/null | base64 | tr -d "\\n")',
     '  # Non-empty blob but no bytes decoded: not a blob (a tree or a gitlink).',
     '  if [ -z "$rvs_e" ] && [ "$rvs_n" -gt 0 ]; then',
-    '    printf \'@@RVS-FILE %s absent@@\\n\' "$rvs_b"',
+    '    printf \'@@RVS-FILE %s absent 0 0@@\\n\' "$rvs_b"',
     '    return 0',
     '  fi',
-    '  printf \'@@RVS-FILE %s ok@@\\n%s\\n\' "$rvs_b" "$rvs_e"',
+    // A blob carries no mtime: the 0 means "this side cannot prove anything by
+    // time", which is exactly how the ledger reads it.
+    '  printf \'@@RVS-FILE %s ok 0 %s@@\\n%s\\n\' "$rvs_b" "$rvs_n" "$rvs_e"',
     '  rvs_total=$((rvs_total + rvs_n))',
     '  return 0',
     '}',
@@ -366,15 +383,23 @@ export function parseReads(stdout: string): Map<string, ReadResult> {
     const fields = line.slice(FILE_MARKER.length)
     if (!fields.endsWith('@@')) continue
     const parts = fields.slice(0, -2).split(' ')
-    if (parts.length !== 2) continue
+    if (parts.length < 2) continue
     const token = parts[0] ?? ''
     const flags = parts[1] ?? ''
     const path = Buffer.from(token, 'base64').toString('utf8')
     if (path === '') continue
+    // `<mtime> <size>` are optional so a reply from an older half still parses;
+    // a missing pair simply means "no evidence from time or size".
+    const mtime = parts.length > 3 ? Number.parseInt(parts[2] ?? '', 10) : Number.NaN
+    const size = parts.length > 3 ? Number.parseInt(parts[3] ?? '', 10) : Number.NaN
+    const stats = {
+      ...(Number.isSafeInteger(mtime) && mtime > 0 ? { mtime } : {}),
+      ...(Number.isSafeInteger(size) && size >= 0 ? { size } : {}),
+    }
     if (flags !== 'ok') {
       results.set(path, flags === 'big'
-        ? { text: null, truncated: true, binary: false, absent: false }
-        : { text: null, truncated: false, binary: false, absent: true })
+        ? { text: null, truncated: true, binary: false, absent: false, ...stats }
+        : { text: null, truncated: false, binary: false, absent: true, ...stats })
       continue
     }
     const encoded = lines[index + 1]
@@ -382,16 +407,16 @@ export function parseReads(stdout: string): Map<string, ReadResult> {
     // a block whose content line is the very last element was cut short: an
     // aborted read must never masquerade as an empty file.
     if (encoded === undefined || index + 1 === lines.length - 1) {
-      results.set(path, { text: null, truncated: true, binary: false, absent: false })
+      results.set(path, { text: null, truncated: true, binary: false, absent: false, ...stats })
       break
     }
     index += 1
     const bytes = Buffer.from(encoded, 'base64')
     if (bytes.includes(0)) {
-      results.set(path, { text: null, truncated: false, binary: true, absent: false })
+      results.set(path, { text: null, truncated: false, binary: true, absent: false, ...stats })
       continue
     }
-    results.set(path, { text: bytes.toString('utf8'), truncated: false, binary: false, absent: false })
+    results.set(path, { text: bytes.toString('utf8'), truncated: false, binary: false, absent: false, ...stats })
   }
   return results
 }
