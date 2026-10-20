@@ -31,7 +31,7 @@ import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
-import { bindingForRemoteFile, bindingForWorkspacePath, decideWorkspaceFollow } from './remote-file-open-target.ts'
+import { planWorkspaceFollow } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 
@@ -597,15 +597,15 @@ export function followSessionWorkspace(options: {
   /** Absolute remote root of the session's workspace, when known. */
   remoteRoot?: string | undefined
 }): string | undefined {
-  const table = remoteOpenBindings()
-  const binding = bindingForWorkspacePath(table, options.workspacePath)
-    ?? (options.alias === undefined && options.remoteRoot === undefined
-      ? undefined
-      : bindingForRemoteFile(table, { alias: options.alias, remoteRoot: options.remoteRoot }))
-  const decision = decideWorkspaceFollow({
+  // The resolution + policy are pure (`planWorkspaceFollow`), so the gate drives
+  // the real thing; this applier is deliberately three lines.
+  const decision = planWorkspaceFollow({
+    table: remoteOpenBindings(),
     sessionId: options.sessionId,
+    workspacePath: options.workspacePath,
+    alias: options.alias,
+    remoteRoot: options.remoteRoot,
     followedSession,
-    bindingId: binding?.id,
   })
   if (decision.action === 'keep') return undefined
   followedSession = decision.followedSession

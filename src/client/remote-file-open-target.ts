@@ -282,6 +282,44 @@ export function decideWorkspaceFollow(options: {
   return { action: 'select', bindingId, followedSession: sessionId }
 }
 
+/**
+ * Resolve the session's binding from whatever the caller knows, then decide.
+ *
+ * The whole follow policy lives here — the store's `followSessionWorkspace` is
+ * a three-line applier around it (`selectWorkspace` + remembering the session),
+ * and the gate drives THIS function with stubs, so a policy change cannot pass
+ * the gate by being mirrored there.
+ *
+ * @param options.table - client bindings plus their alias directories.
+ * @param options.sessionId - the session on screen, when known.
+ * @param options.workspacePath - the session's host workspace path (alias dir).
+ * @param options.alias - host alias the session is routed to, when known.
+ * @param options.remoteRoot - absolute remote root of the session's workspace.
+ * @param options.followedSession - the session already followed, if any.
+ */
+export function planWorkspaceFollow(options: {
+  table: RemoteOpenBindings
+  sessionId: string | undefined
+  workspacePath?: string | undefined
+  alias?: string | undefined
+  remoteRoot?: string | undefined
+  followedSession: string | undefined
+}): WorkspaceFollowDecision {
+  // The host's own workspace path is the strongest evidence (it IS the alias
+  // dir of exactly one binding). Without it, the remote root the caller holds
+  // still separates two bindings sharing an alias. With NEITHER, nothing is
+  // resolved — never "the first binding".
+  const binding = bindingForWorkspacePath(options.table, options.workspacePath)
+    ?? (options.alias === undefined && options.remoteRoot === undefined
+      ? undefined
+      : bindingForRemoteFile(options.table, { alias: options.alias, remoteRoot: options.remoteRoot }))
+  return decideWorkspaceFollow({
+    sessionId: options.sessionId,
+    followedSession: options.followedSession,
+    bindingId: binding?.id,
+  })
+}
+
 /** Binding whose local alias directory CONTAINS the given host path. */
 function bindingForHostPath(
   table: RemoteOpenBindings,

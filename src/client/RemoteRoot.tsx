@@ -17,7 +17,8 @@ import { HistoryPanel } from './scm/HistoryPanel.tsx'
 import { ScmPanel } from './scm/ScmPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
-import { useBootstrap, useExplorer } from './store.tsx'
+import { useBootstrap, useExplorer, followSessionWorkspace } from './store.tsx'
+import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { DialogHost } from './vsc/kit.tsx'
 import {
   IconBranch,
@@ -125,6 +126,30 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   useEffect(() => {
     if (store.workspaces.length === 0 && view !== 'workspaces') go('workspaces')
   }, [store.workspaces.length, view, go])
+
+  /**
+   * The selector follows the SESSION, not the binding list.
+   *
+   * Without this the panel opened on whatever localStorage held — and on a
+   * fresh profile on `workspaces[0]` — so a session working in one remote
+   * workspace showed another workspace's tree until the user corrected it by
+   * hand (the reported bug: a repo-a session browsing repo-b). The host's own
+   * workspace membership for the on-screen session is the only sanctioned
+   * source (`useRemoteChatTarget`), and it is a soft read: while it answers
+   * nothing the current selection stands.
+   *
+   * The binding table arrives asynchronously, so the effect also re-runs when
+   * the table (or its alias dirs) lands; `followSessionWorkspace` is idempotent
+   * per session, so the extra runs cost one array scan and never fight a
+   * manual pick made afterwards.
+   */
+  const target = useRemoteChatTarget(props.ctx)
+  useEffect(() => {
+    followSessionWorkspace({
+      sessionId: target.sessionId,
+      workspacePath: target.sessionWorkspacePath,
+    })
+  }, [target.sessionId, target.sessionWorkspacePath, store.ready, store.workspaces, store.aliasPaths])
 
   /**
    * The mount surface owns the editor, so a persisted `view === 'editor'` is

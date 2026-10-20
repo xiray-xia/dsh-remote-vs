@@ -21,11 +21,14 @@ import { api } from '../api.ts'
 import {
   applyChangeSet,
   bootstrap,
+  followSessionWorkspace,
   openRemoteFileInBinding,
   refreshAll,
   remoteOpenBindings,
   useExplorer,
 } from '../store.tsx'
+import { bindingForChangedFile } from '../remote-file-open-target.ts'
+import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
 import { setUndoContext } from './undo-context.ts'
@@ -116,6 +119,23 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
 
   useEffect(() => () => { setUndoContext(undefined) }, [])
 
+  /**
+   * Follow the session's workspace from the panel's own evidence.
+   *
+   * The panel holds the host's alias + remote root for THIS session, so it can
+   * point the sidebar (and the editor's workspace selector, which reads the same
+   * store) at the right binding even when the sidebar's own follow found nothing
+   * yet — and it is the surface that is mounted whenever a conversation is.
+   * Only the session actually on screen may steer the selector, and only once
+   * per session (the store's policy), so a parked dock cannot move it.
+   */
+  const chatTarget = useRemoteChatTarget(explorer.ctx)
+  useEffect(() => {
+    if (sessionId === undefined || summary === null || summary.root === '') return
+    if (chatTarget.sessionId === undefined || chatTarget.sessionId !== sessionId) return
+    followSessionWorkspace({ sessionId, alias: summary.alias, remoteRoot: summary.root })
+  }, [sessionId, summary, chatTarget.sessionId])
+
   /** Open one listed file in the remote editor with its change marks. */
   const openChanged = useCallback(async (file: RemoteChangedFile): Promise<void> => {
     if (sessionId === undefined || summary === null) return
@@ -131,11 +151,17 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       // miss is worth one refresh before giving up on the click. Read through
       // the snapshot accessor, not the render-time props, so the retry actually
       // sees what the load wrote.
-      let binding = remoteOpenBindings().bindings.find(item => item.alias === summary.alias)
+      //
+      // Resolved by the session's REMOTE root, never by the alias alone: one
+      // alias carries several bindings (repo-a and repo-b both live on
+      // `alias-a`), and the alias-only form picked whichever came first —
+      // the file opened while the tree and the selector stayed on the other
+      // workspace. That was the reported bug.
+      let binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
       if (binding === undefined) {
         refreshAll()
         await new Promise(resolve => { window.setTimeout(resolve, 300) })
-        binding = remoteOpenBindings().bindings.find(item => item.alias === summary.alias)
+        binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
       }
       if (binding === undefined) {
         explorer.info(t('changes.noWorkspace'))
