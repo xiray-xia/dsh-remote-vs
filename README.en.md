@@ -50,6 +50,7 @@ open Settings → Remote hosts to configure.
 | Explorer | Lazy tree + expand/collapse + hidden-files toggle; context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference; git status colours and folder roll-up marks |
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line |
 | Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
+| Session change review | The **collapsible** panel above the composer: what THIS SESSION changed (one row per file, file-type icon, `+a −b` on the right); clicking a file opens it in the remote editor with **line shading plus character-level inline diff**, `n/N ↑↓` jumps between change points, and hovering a changed line offers **Undo this change** (remote `git apply -R`). See "Session change review" below |
 | Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers, **rendering only the rows inside the viewport** (a 3000-line file goes from 9000 row containers to ~174, with exactly the same scroll range as a full render); switch between "before / after", and the after side is editable and savable |
 | Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
 | Multi-tab editor | Open/save/reload, dirty marks, several files at once; image preview, Markdown/HTML preview (source vs preview) |
@@ -205,6 +206,48 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
     the UI shows **no marker at all** — only the host log line
     `listing <path> on <alias> shows 20000 of N entries`.
 
+## Session change review (Cursor style)
+
+The **collapsible** panel above the composer (titled "本次改动") answers, per **session**, "what did this turn
+change?". Its data comes from the plugin's own change ledger (`/api/dsh-remote/changes`), not from DSH's
+`workspaceChanges` — the latter cannot see a routed session at all (the probe measured 58 remote sessions
+with zero change events).
+
+- **The panel**: one row per file (file-type icon + relative path + `+a −b` on the right), aligned left and
+  right with the composer card; click the header to collapse/expand, `⟳` forces an immediate rescan. With no
+  changes it says "this session has not changed any file yet"; when it cannot compute, it states the
+  **specific reason** (see the limits below) instead of handing you an empty list to guess about.
+- **Clicking a file** opens it in the remote editor with change marks: added lines get a **green line
+  background**, deleted characters are drawn as an **inline struck-through chip** (a deleted character does
+  not exist in the new file, so it can only be an inserted widget), and the left gutter carries a change bar.
+- **Jumping between change points**: the floating `n/N ↑↓` control at the editor's top-right
+  (`Alt+Shift+Cmd/Ctrl+↓/↑`) cycles through them; typing in the editor invalidates the marks and says
+  "position may be out of date".
+- **Undo this change**: hover a changed line and click → remote `git apply -R`. When the context no longer
+  matches, the far end refuses outright (not one byte of the file changes); a tab with unsaved edits is
+  refused first, so a remote patch can never overwrite your buffer; on success the caret stays where it was
+  and the marks are re-read (they do not simply vanish because something was undone).
+- **Follow the session's workspace**: the sidebar, the editor's dropdown and the file tree all follow the
+  workspace the **current session** lives in; after a manual switch they are not pulled back within that
+  session, and a new session follows again. The capability lives in the store, so it works even when **the
+  sidebar was never opened**; clicking a changed file is "show me this result", not a manual switch.
+- **Repository directory**: the one the user picked under Source control → repository directory always wins;
+  when the session root is not a repository, a single candidate one level below is adopted automatically,
+  while several candidates produce an explicit hint to set it in Source control.
+
+**Known limits (stated honestly)**:
+
+- The baseline is the **session start**, not HEAD: untracked files that already existed before the session
+  began are not counted as this session's work.
+- Tracked files refresh when a **turn ends** (the panel polls every 3 seconds as a backstop, so the numbers
+  usually catch up within a second or two); **new files** created in a shell are found by a **slow scan**
+  whose single-run budget is up to **3 minutes**, re-run at a self-tuning interval (at least 5 seconds,
+  naturally longer on a huge checkout). `⟳` forces an immediate rescan.
+- A non-git workspace, or one holding several repositories with no repository directory set, shows the exact
+  reason (`no git repository at the workspace root, and N candidates below it — set the repository directory
+  in Source Control`) rather than an empty list.
+- Binary and oversized files are marked "binary / too large" on the row and get no character-level diff.
+
 ## P2 transparent remote execution (Windows native)
 
 Single-Host mixed routing: native tools dispatch by which world the session cwd lands in — remote aliases go
@@ -255,15 +298,20 @@ pnpm run build
 dsh plugin --profile web add link:<absolute path of this directory>
 ```
 
-**Restart `dsh web` after every change — the client half included.** The Host reads plugin bundles into
-memory at startup (`initialBundleSnapshot`; the served URL carries a `rev` and is `immutable` for a
-year), so a browser refresh — `Ctrl+Shift+R` included — only re-fetches the bytes captured at startup.
-How to tell:
+**How a change goes live: `pnpm run build`, then restart `dsh web` — for the host half and the client half alike.**
+The Host reads plugin bundles into memory at startup (`initialBundleSnapshot`: it stats mtime/ctime/size into a
+revision, then reads the bytes; the response carries `Cache-Control: public, max-age=31536000, immutable`), so a
+**client-only** change (`src/client/**`) behaves exactly the same way: a browser refresh — `Ctrl+Shift+R`
+included — only re-fetches the bytes captured at startup, under the same `rev`. How to tell:
 
 1. Each build injects a stamp (`MMDD-HHmm`) into `lib/client.js`, shown at the right of the editor info bar;
-2. Restart `dsh web` → refresh the page: **the stamp must change** for the change to be live;
+2. Restart `dsh web` → refresh the page: **the stamp must change** (if it does not, you are still on the bytes
+   captured at startup);
 3. For colour issues, read `tok N`: `0` means no grammar matched the extension AND the fallback colorer
    did not take over (the console line next to it names the file).
+
+> The one exception is DSH's own development watcher (`pnpm run dev:web`, via `ClientModuleRegistry.rebuilt`);
+> there is no watcher on a plugin user's side and `dsh web --help` has no watch option, so "restart" is the rule.
 
 Self-checks (no host, no DSH, a few seconds each):
 
