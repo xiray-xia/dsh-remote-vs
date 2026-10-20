@@ -77,6 +77,14 @@ export interface SessionChangesDeps {
   untrackedBudgetMs?: number
   /** How often the untracked scan may run again (default five seconds). */
   untrackedRefreshMs?: number
+  /**
+   * Override the per-exec budget outright.
+   *
+   * The timeouts setting is clamped to a sane range, which is right for a Host
+   * but useless for a check that must not wait five seconds to see a watchdog
+   * fire.
+   */
+  execBudgetMs?: number
 }
 
 /** A status letter the panel can paint (untracked has no git letter of its own). */
@@ -102,6 +110,11 @@ interface FileRecord {
   binary: boolean
   truncated: boolean
 }
+
+/** Grace added to an exec budget before the watchdog gives up on it. */
+const WATCHDOG_GRACE_MS = 5_000
+/** Sentinel for "the host call never came back". */
+const WATCHDOG_FIRED = 'watchdog-fired' as const
 
 /** One session's bookkeeping. */
 interface Ledger {
@@ -522,7 +535,12 @@ export class SessionChanges {
     ledger.added = added
     ledger.deleted = deleted
     ledger.truncated = truncated ? true : undefined
-    ledger.unavailable = undefined
+    // Ask for contents and get none back: the list is empty because the host did
+    // not answer, and saying so beats an empty panel that reads as "nothing
+    // changed". A genuinely empty list (nothing dirty) keeps the reason clear.
+    ledger.unavailable = listed.length > 0 && after.size === 0
+      ? 'file contents could not be read from the host'
+      : undefined
     ledger.at = Date.now()
   }
 
@@ -623,6 +641,35 @@ export class SessionChanges {
     }
   }
 
+  /**
+   * Race one host call against its own budget.
+   *
+   * A budget handed to `exec` is a request, not a guarantee: the transport may
+   * keep the promise open long after the command should have been killed (the
+   * remote process can even be gone while the channel stays). Awaiting such a
+   * promise blocks the ledger's whole queue, so the panel shows "computing…"
+   * for as long as the user is willing to stare at it. This bounds that wait.
+   */
+  private async withWatchdog<T>(call: Promise<T>, ms: number): Promise<T | typeof WATCHDOG_FIRED> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        call,
+        new Promise<typeof WATCHDOG_FIRED>(resolve => {
+          // Deliberately NOT unref'd: a watchdog that lets the loop drain is a
+          // watchdog that never fires — and a check process would exit with an
+          // unsettled await instead of reporting the timeout.
+          timer = setTimeout(() => resolve(WATCHDOG_FIRED), ms)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      // The abandoned call may still reject later; it must not surface as an
+      // unhandled rejection in the Host process.
+      void call.catch(() => undefined)
+    }
+  }
+
   /** Read a batch of files, capped per file and in total. */
   private async readPaths(
     ledger: Ledger,
@@ -650,7 +697,14 @@ export class SessionChanges {
     { ok: true; stdout: string } | { ok: false; reason: string }
   > {
     try {
-      const result = await this.deps.pool.exec(alias, command, { timeoutMs: budget })
+      const call = this.deps.pool.exec(alias, command, { timeoutMs: budget })
+      const result = await this.withWatchdog(call, budget + Math.min(WATCHDOG_GRACE_MS, budget))
+      if (result === WATCHDOG_FIRED) {
+        // The host call never came back. Measured: `git ls-files --others` on a
+        // monorepo outran a 60s exec and the promise simply never settled, which
+        // left `pending` true forever and froze the panel at "computing…".
+        return { ok: false, reason: 'git did not answer in time' }
+      }
       const stdout = typeof result.stdout === 'string' ? result.stdout : ''
       if (result.success) return { ok: true, stdout }
       const stderr = typeof result.stderr === 'string' ? result.stderr : ''
@@ -672,6 +726,8 @@ export class SessionChanges {
 
   /** One exec's budget: the git setting, clamped so a hung host cannot pile up work. */
   private execBudget(): number {
+    const override = this.deps.execBudgetMs
+    if (override !== undefined && Number.isFinite(override) && override > 0) return override
     return this.budget(this.deps.timeouts().gitMs, 5_000, 60_000)
   }
 
