@@ -86,6 +86,29 @@ export interface RemoteRoutesDeps {
 const REMOTE_PACKAGE_NAME = 'dsh-remote-vs'
 
 /**
+ * The working directory of one LIVE session, or undefined.
+ *
+ * Soft reads only: a composition without `agents`/`workingDirectory` answers
+ * undefined instead of throwing, and the callers treat that as "unknown".
+ */
+function liveSessionCwd(ctx: Context, sessionId: string): string | undefined {
+  try {
+    const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
+    const workingDirectory = ctx.get('workingDirectory') as
+      | { get?: (session: unknown) => unknown }
+      | undefined
+    const agent = agents?.get?.(sessionId) as { session?: unknown } | undefined
+    if (agent?.session !== undefined && typeof workingDirectory?.get === 'function') {
+      const value = workingDirectory.get(agent.session)
+      if (typeof value === 'string' && value !== '') return value
+    }
+  } catch {
+    // Soft read.
+  }
+  return undefined
+}
+
+/**
  * This plugin's own loader entry id (the settings-form namespace).
  *
  * Settings are addressed by profile entry id, which is a mount choice, not
@@ -501,20 +524,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 400, { error: 'sessionId must be a non-empty string' })
           return
         }
-        let cwd: string | undefined
-        try {
-          const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
-          const workingDirectory = ctx.get('workingDirectory') as
-            | { get?: (session: unknown) => unknown }
-            | undefined
-          const agent = agents?.get?.(sessionId) as { session?: unknown } | undefined
-          if (agent?.session !== undefined && typeof workingDirectory?.get === 'function') {
-            const value = workingDirectory.get(agent.session)
-            if (typeof value === 'string' && value !== '') cwd = value
-          }
-        } catch {
-          // Soft read: any composition without these services answers no cwd.
-        }
+        const cwd = liveSessionCwd(ctx, sessionId)
         writeJson(res, 200, { cwd })
       },
     },
@@ -548,6 +558,15 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (op === 'list') {
+          // A session with no ledger yet is not a dead end. The ledger is created
+          // by turn events, so a conversation that was already mid-turn when this
+          // Host started (or one resumed from an older process) has none — and
+          // the panel would then sit empty for the rest of that turn. Attaching
+          // here costs one `git status` and makes the panel work immediately.
+          if (ledger.summary(sessionId) === null) {
+            const cwd = liveSessionCwd(ctx, sessionId)
+            if (cwd !== undefined) ledger.beginTurn({ sessionId, cwd })
+          }
           // `force` runs the slow untracked scan now instead of waiting for the
           // cadence — which is what the panel's refresh button means. A plain
           // poll still self-heals data that has gone stale, so a missed turn

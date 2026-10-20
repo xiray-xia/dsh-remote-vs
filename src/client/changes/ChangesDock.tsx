@@ -76,7 +76,15 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   }, [explorer.ctx])
   const t = explorer.t
   const sessionId = props.sessionId ?? props.session?.sessionId ?? props.session?.id
-  const [summary, setSummary] = useState<RemoteChangesSummary | null>(null)
+  /**
+   * The last answer, TAGGED with the session it belongs to.
+   *
+   * One panel serves whichever session is on screen, so an untagged summary
+   * survives a session switch and keeps describing the previous conversation —
+   * which is exactly how a stale "computing…" from another session appeared in
+   * a session whose own ledger had not even been created yet.
+   */
+  const [data, setData] = useState<{ id: string; summary: RemoteChangesSummary | null } | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   // Collapsed by default: the header already carries the file count and the totals,
   // and the list is one click away — a turn that touched twenty files should not
@@ -84,19 +92,26 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const [collapsed, setCollapsed] = useState(true)
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const alive = useRef(true)
+  const currentSession = useRef(sessionId)
+  currentSession.current = sessionId
 
   const load = useCallback(async (force = false): Promise<void> => {
     if (sessionId === undefined || sessionId === '') return
+    const asked = sessionId
     try {
-      const next = await api.changes.list(sessionId, force)
-      if (!alive.current) return
-      setSummary(next)
+      const next = await api.changes.list(asked, force)
+      // Two guards: the panel may be gone, and the user may have switched
+      // sessions while this was in flight — a late answer for the old session
+      // must not be filed under the new one.
+      if (!alive.current || currentSession.current !== asked) return
+      setData({ id: asked, summary: next })
       setError(undefined)
     } catch (problem) {
-      if (!alive.current) return
+      if (!alive.current || currentSession.current !== asked) return
       setError(problem instanceof Error ? problem.message : String(problem))
     }
   }, [sessionId])
+  const summary = data !== null && data.id === sessionId ? data.summary : null
 
   useEffect(() => {
     alive.current = true
