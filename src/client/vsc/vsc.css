@@ -1627,28 +1627,37 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; 
   right: 14px;
   z-index: 5;
   display: flex;
+  align-items: center;
   gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--rvs-border);
-  border-radius: 6px;
+  padding: 3px 4px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
   background: Canvas;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .18);
-  opacity: .72;
-  transition: opacity .12s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .28);
   pointer-events: none;
 }
 
-.rvs-change-nav:hover { opacity: 1; }
+/* The counter is what makes this read as "3 of 7 changes" rather than two
+   anonymous arrows — and it keeps the buttons from looking like decoration. */
+.rvs-change-nav-count {
+  padding: 0 6px 0 4px;
+  color: var(--rvs-fg2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 22px;
+  white-space: nowrap;
+}
 
 .rvs-change-nav-btn {
-  width: 22px;
-  height: 20px;
+  width: 26px;
+  height: 22px;
   padding: 0;
-  border: none;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   background: transparent;
-  color: var(--rvs-fg2);
-  font-size: 12px;
+  color: var(--rvs-fg);
+  font-size: 13px;
+  font-weight: 600;
   line-height: 20px;
   text-align: center;
   cursor: pointer;
@@ -1656,9 +1665,12 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; 
 }
 
 .rvs-change-nav-btn:hover {
+  border-color: var(--rvs-border2);
   background: var(--rvs-hover);
-  color: var(--rvs-fg);
+  color: var(--rvs-brand);
 }
+
+.rvs-change-nav-btn:active { background: var(--rvs-active); }
 
 /**
  * 悬浮在改动行上出现的「撤销这处改动」按钮。

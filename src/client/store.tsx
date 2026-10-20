@@ -26,7 +26,8 @@ import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
 import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
-import { undoContext } from './changes/undo-context.ts'
+import { changeSetFromHunks } from './changes/model.ts'
+import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
@@ -1090,6 +1091,29 @@ export function markChangeStale(tabId: string): void {
  *    全部失效；重读让标签页的数字回到磁盘上的事实。
  * 5. 失败时**不清标记、不重读**：远端一个字节都没动，屏幕上那份标记仍然是事实。
  */
+/**
+ * Re-read one file's change set from the host and hand it to the editor.
+ *
+ * The host reads the worktree for every `diff` call, so the marks this installs
+ * describe the file as it is right now — which is what makes them survive a
+ * revert (or any other external write) without the user re-opening the file.
+ */
+async function refreshChangeSet(tabId: string, context: UndoContext): Promise<void> {
+  const tab = state.tabs.find(item => item.id === tabId)
+  if (tab === undefined || tab.kind !== 'file') return
+  try {
+    const diff = await api.changes.diff(context.sessionId, tab.fullPath)
+    if (diff === null || diff.kind !== 'text' || diff.hunks.length === 0) {
+      applyChangeSet(tabId, null)
+      return
+    }
+    applyChangeSet(tabId, changeSetFromHunks(diff.hunks, `${tab.fullPath}@${Date.now()}`))
+  } catch {
+    // A read that fails leaves no marks rather than wrong ones.
+    applyChangeSet(tabId, null)
+  }
+}
+
 export async function undoChange(tabId: string, mark: ChangeMark): Promise<void> {
   const tab = state.tabs.find(item => item.id === tabId)
   if (tab === undefined) {
@@ -1119,8 +1143,27 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
     info(detail === '' ? t('changes.undoConflict') : `${t('changes.undoConflict')} · ${detail}`)
     return
   }
-  applyChangeSet(tabId, null)
+  // Refresh the marks instead of dropping them, and put the caret back where the
+  // revert happened.
+  //
+  // Dropping them was the old behaviour and it broke the flow in three ways: the
+  // editor's floating prev/next control disappeared until the file was clicked
+  // again, the remount re-ran the "reveal line" the file was opened with (hunk
+  // one, i.e. the top of the file) so the caret jumped away from the revert, and
+  // the remaining changes lost their marks. The host re-reads the file for this
+  // call, so the set describes the file as it is now.
+  const anchor = mark.from
   await reloadTab(tabId)
+  await refreshChangeSet(tabId, context)
+  const after = state.tabs.find(item => item.id === tabId)
+  patchTab(tabId, {
+    // The line the tab was opened with no longer exists in this file's history;
+    // left in place it would drag the caret to the top on the next remount.
+    line: undefined,
+    lineNonce: undefined,
+    revealHunkLine: anchor,
+    revealHunkNonce: (after?.revealHunkNonce ?? 0) + 1,
+  })
   info(t('changes.undone'))
   // The host still holds the pre-revert comparison, so the panel would keep the
   // old counts (and re-opening the file would paint the OLD hunks against the

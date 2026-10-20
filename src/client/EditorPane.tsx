@@ -418,6 +418,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
             */}
             {activeTab.kind === 'file' && changeHunks.length > 0 && activeTab.changeStale !== true && (
               <div className="rvs-change-nav" role="group" aria-label={t('changes.navLabel')}>
+                <span className="rvs-change-nav-count" title={t('changes.navLabel')}>
+                  {Math.min((activeTab.activeHunk ?? 0) + 1, changeHunks.length)}/{changeHunks.length}
+                </span>
                 <button
                   type="button"
                   className="rvs-change-nav-btn"
