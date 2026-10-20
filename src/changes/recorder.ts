@@ -615,6 +615,24 @@ export class SessionChanges {
       ledger.unavailable = undefined
       return parseStatusZ(tracked.stdout)
     }
+    // The configured repository directory may belong to a DIFFERENT workspace
+    // (the panel reads it from whatever the explorer has selected), or the
+    // directory may simply be gone. Either way a missing root is not a reason to
+    // report nothing: fall back to the session root once and only then speak.
+    if (tracked.code === 90 && ledger.subdir !== '') {
+      this.warn(`repository directory "${ledger.subdir}" is missing on the host; falling back to the session root`)
+      ledger.subdir = ''
+      ledger.root = ledger.baseRoot
+      ledger.baseline = undefined
+      ledger.baselineTaken = false
+      const retry = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+      if (retry.ok) {
+        ledger.unavailable = undefined
+        return parseStatusZ(retry.stdout)
+      }
+      ledger.unavailable = retry.reason
+      return undefined
+    }
     if (!ledger.adoptedSubdir) {
       const found = await this.adoptRepositoryBelow(ledger)
       if (found !== undefined) {
@@ -798,7 +816,7 @@ export class SessionChanges {
 
   /** Run one command on the host, normalizing failure into a reason string. */
   private async run(alias: string, command: string, budget = this.execBudget()): Promise<
-    { ok: true; stdout: string } | { ok: false; reason: string }
+    { ok: true; stdout: string } | { ok: false; reason: string; code?: number | null }
   > {
     try {
       const call = this.deps.pool.exec(alias, command, { timeoutMs: budget })
@@ -812,7 +830,7 @@ export class SessionChanges {
       const stdout = typeof result.stdout === 'string' ? result.stdout : ''
       if (result.success) return { ok: true, stdout }
       const stderr = typeof result.stderr === 'string' ? result.stderr : ''
-      return { ok: false, reason: this.reasonOf(result.exitCode, stderr) }
+      return { ok: false, reason: this.reasonOf(result.exitCode, stderr), code: result.exitCode }
     } catch (error) {
       return { ok: false, reason: `host unreachable: ${messageOf(error)}` }
     }
