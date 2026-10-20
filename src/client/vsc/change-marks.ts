@@ -1,9 +1,10 @@
 /**
  * "What this session changed", painted into the file editor (Cursor style).
  *
- * 本模块只做三件事：把调用方算好的行号画成行背景、在左侧 gutter 上打三种标记、
- * 以及在文档一旦被编辑时把整份标记作废。数据全部从 `setChangeSet` 这个
- * StateEffect 进来 —— 这里不发任何请求，也不自己算 diff。
+ * 本模块只做四件事：把调用方算好的行号画成行背景、把行内片段画成"变了的字符"与
+ * 删除 chip、在左侧 gutter 上打三种标记、以及在文档一旦被编辑时把整份标记作废。
+ * 数据全部从 `setChangeSet` 这个 StateEffect 进来 —— 这里不发任何请求，也不自己
+ * 算 diff（字符级比较在 `changes/model.ts`，那边是纯函数，能脱离浏览器断言）。
  *
  * 关键取舍（为什么编辑后是"清空"而不是"跟着映射"）：改动点的行号来自"磁盘上
  * 那一刻"的基线。`value.map(tr.changes)` 只保证装饰不崩、位置不乱序，但不保证
@@ -32,6 +33,7 @@ import {
   EditorView,
   GutterMarker,
   ViewPlugin,
+  WidgetType,
   gutter,
   type DecorationSet,
   type ViewUpdate,
@@ -39,6 +41,41 @@ import {
 
 /** 改动点的三种形态。 */
 export type ChangeKind = 'add' | 'mod' | 'del'
+
+/**
+ * 新增/修改行里"真正变化的字符区间"：相对所属行的列偏移，**0-based、半开区间**。
+ *
+ * 行背景回答"哪几行变了"，这个回答"那一行的哪几个字变了" —— 只改一个词的编辑在
+ * 整行同色时根本看不出改了什么。
+ */
+export interface InlineRange {
+  from: number
+  to: number
+  /**
+   * 这个区间落在哪一行（1-based）。**省略 = 所属 mark 的 `from` 行**。
+   *
+   * 一个修改块是一条 mark 跨了它所有新增行，所以跨多行的块必须写出行号；单行改动
+   * 是绝大多数情况，那里省掉它，数据形状与"区间就在这条 mark 的行上"一致。
+   */
+  line?: number
+}
+
+/**
+ * 被删掉、在新文件里已经不存在的内容：挂在某一行的某一列上，用 widget 显示。
+ *
+ * 行内被删短的片段（`const a = 1 + 2` → `const a = 1`）和整行被删的块都用它 ——
+ * 新文件里没有这些字符，行背景画不出它们，只能把原文以"删除线 chip"钉在切口处。
+ */
+export interface RemovedChip {
+  /** 列偏移（0-based），chips 落在这一列上。 */
+  at: number
+  /** 被删文本（超过数据层的上限时已被截断，见 `truncated`）。 */
+  text: string
+  /** `text` 是否是截断后的结果（原文更长）。 */
+  truncated: boolean
+  /** 这个 chip 落在哪一行（1-based）。**省略 = 所属 mark 的 `from` 行**。 */
+  line?: number
+}
 
 /**
  * 一处改动：**1-based、闭区间**的行号。
@@ -57,6 +94,13 @@ export interface ChangeMark {
    * 只能由数据层在算 mark 时一起带下来。
    */
   hunk?: number
+  /**
+   * 行内变化区间（字符级）。数据层算不出/不该算时（超长行、配对过多、纯新增块）
+   * 就不带这个字段，此时只有整行标记 —— 这是**降级**，不是错误。
+   */
+  inline?: InlineRange[]
+  /** 该改动里"新文件已不存在"的内容，渲染成删除 chip。 */
+  removed?: RemovedChip[]
 }
 
 /** 一个文件的全部改动，由上层（会话改动数据层）算好送进来。 */
@@ -112,6 +156,117 @@ function lineDecoration(kind: ChangeKind): Decoration {
     lineDecorationCache.set(kind, decoration)
   }
   return decoration
+}
+
+/**
+ * 行内新增字符的背景（共享实例，所有区间同一个装饰）。
+ *
+ * **只给背景色，绝不给 `color`**：代码本身有语法着色，覆盖前景色会把关键字、
+ * 字符串、注释全染成同一种颜色 —— 那比不标还难读。CSS 在 `vsc.css` 的
+ * session changes 一节。
+ */
+const WORD_ADD = Decoration.mark({ class: 'rvs-change-word-add' })
+
+/** 删除 chip 的悬浮说明。与 gutter 的 `LABEL` 一样，是编辑器侧的固定文案。 */
+const CHIP_TITLE = '已删除的内容'
+
+/**
+ * 被删内容的零宽 widget。
+ *
+ * 用 widget 而不是 `Decoration.replace`：被删的字符在新文件里**不存在**，没有可
+ * 替换的区间，只能插一个"凭据"在切口上。`eq` 必须实现：滚动重建装饰时
+ * CodeMirror 靠它判断"还是同一个 widget"，否则每滚一次都会重建 DOM。
+ */
+class RemovedChipWidget extends WidgetType {
+  private readonly text: string
+  private readonly truncated: boolean
+
+  constructor(text: string, truncated: boolean) {
+    super()
+    this.text = text
+    this.truncated = truncated
+  }
+
+  eq(other: WidgetType): boolean {
+    return other instanceof RemovedChipWidget
+      && other.text === this.text
+      && other.truncated === this.truncated
+  }
+
+  toDOM(): HTMLElement {
+    const chip = document.createElement('span')
+    chip.className = 'rvs-change-word-del'
+    chip.textContent = this.truncated ? `${this.text}…` : this.text
+    chip.title = CHIP_TITLE
+    chip.setAttribute('aria-label', CHIP_TITLE)
+    return chip
+  }
+}
+
+/**
+ * `side: -1`（`InlineBefore`）而不是默认的 0：同一列上 chip 必须排在行装饰与字符
+ * 区间之前，`RangeSetBuilder` 只接受按 `from` + `startSide` 升序的输入（行装饰
+ * `-2e8`、chip `-1e8`、字符区间 `-1`）。
+ */
+function chipDecoration(chip: RemovedChip): Decoration {
+  return Decoration.widget({ widget: new RemovedChipWidget(chip.text, chip.truncated), side: -1 })
+}
+
+/** 一行的行内片段：新增字符区间 + 删除 chip。 */
+interface LineInline {
+  ranges: InlineRange[]
+  chips: RemovedChip[]
+}
+
+/**
+ * 把 marks 上的行内片段按行号收成索引，供视口内渲染直接查。
+ *
+ * 与 `spansOf` 分开做是刻意的：行段会被裁切合并（重叠的 mark 只留一个），而行内
+ * 片段不参与那个裁切 —— 它只按"行号 → 片段"查表，一行有没有行背景不影响它画不画。
+ */
+function inlineIndexOf(set: ChangeSet | null, doc: Text): Map<number, LineInline> {
+  const index = new Map<number, LineInline>()
+  if (set === null) return index
+  const maxLine = doc.lines
+  const entryOf = (line: number): LineInline => {
+    let entry = index.get(line)
+    if (entry === undefined) {
+      entry = { ranges: [], chips: [] }
+      index.set(line, entry)
+    }
+    return entry
+  }
+  for (const mark of set.marks) {
+    // 行号缺失时落在 mark 自己的锚点行上（见 `InlineRange.line` 的说明）。
+    const anchor = clampLine(mark.from, maxLine)
+    for (const range of mark.inline ?? []) {
+      const from = Math.max(0, Math.round(range.from))
+      const to = Math.max(from, Math.round(range.to))
+      if (to === from) continue
+      entryOf(clampLine(range.line ?? anchor, maxLine)).ranges.push({ from, to })
+    }
+    for (const chip of mark.removed ?? []) {
+      if (chip.text === '') continue
+      entryOf(clampLine(chip.line ?? anchor, maxLine)).chips.push({
+        at: Math.max(0, Math.round(chip.at)),
+        text: chip.text,
+        truncated: chip.truncated === true,
+      })
+    }
+  }
+  // 同一行可能被多条 mark 命中：区间排好并合并，避免同一个字符被两条 mark 叠加
+  // （两层半透明背景叠起来会明显比周围深，反而像是"这里改得更重"）。
+  for (const entry of index.values()) {
+    entry.ranges.sort((left, right) => left.from - right.from || left.to - right.to)
+    const merged: InlineRange[] = []
+    for (const range of entry.ranges) {
+      const last = merged[merged.length - 1]
+      if (last !== undefined && range.from <= last.to) last.to = Math.max(last.to, range.to)
+      else merged.push({ from: range.from, to: range.to })
+    }
+    entry.ranges = merged
+  }
+  return index
 }
 
 /**
@@ -205,13 +360,14 @@ function spansOf(set: ChangeSet | null, doc: Text): Span[] {
   return spans
 }
 
-/** 当前行段状态：原始数据 + 规整后的行段。行段随数据一次性算好，滚动不再重算。 */
+/** 当前标记状态：原始数据 + 规整后的行段 + 行内片段索引。三者随数据一次性算好，滚动不再重算。 */
 interface MarksState {
   set: ChangeSet | null
   spans: readonly Span[]
+  inline: ReadonlyMap<number, LineInline>
 }
 
-const EMPTY_STATE: MarksState = { set: null, spans: [] }
+const EMPTY_STATE: MarksState = { set: null, spans: [], inline: new Map() }
 
 /**
  * 一次事务之后该显示哪份改动数据。
@@ -226,14 +382,14 @@ function nextSet(value: ChangeSet | null, tr: Transaction): ChangeSet | null {
   return tr.docChanged ? null : value
 }
 
-/** 改动数据 + 规整后的行段。装饰与 gutter 都从这里读，状态只有一份。 */
+/** 改动数据 + 规整后的行段 + 行内片段。装饰与 gutter 都从这里读，状态只有一份。 */
 const marksField = StateField.define<MarksState>({
   create: () => EMPTY_STATE,
   update(value, tr) {
     const next = nextSet(value.set, tr)
     if (next === value.set) return value
     if (next === null) return EMPTY_STATE
-    return { set: next, spans: spansOf(next, tr.newDoc) }
+    return { set: next, spans: spansOf(next, tr.newDoc), inline: inlineIndexOf(next, tr.newDoc) }
   },
 })
 
@@ -287,7 +443,8 @@ function firstSpanFrom(spans: readonly Span[], line: number): number {
 }
 
 /**
- * 只给视口内的行加 `Decoration.line`。
+ * 只给视口内的行加装饰：行背景（`Decoration.line`）+ 行内字符区间
+ * （`Decoration.mark`）+ 删除 chip（`Decoration.widget`）。
  *
  * 每次滚动都重算（`viewportChanged`），所以成本是 `O(log n + 视口行数)`：1 万行
  * 文件里 500 个改动点，在任何一屏上都只建几十个装饰。
@@ -310,28 +467,46 @@ class ChangeMarkHighlighter {
 
   private rebuild(): void {
     const state = this.view.state
-    const spans = state.field(marksField, false)?.spans ?? []
-    if (spans.length === 0) {
+    const marks = state.field(marksField, false)
+    const spans = marks?.spans ?? []
+    const inline = marks?.inline
+    if (spans.length === 0 && (inline === undefined || inline.size === 0)) {
       this.decorations = Decoration.none
       return
     }
-    // `Decoration.line` 的装饰只能落在行首（from === to === line.from），同一行
-    // 只挂一个：行段已经在 `spansOf` 里规整成互不重叠，这里不会重复添加。
     const doc = state.doc
     const builder = new RangeSetBuilder<Decoration>()
     for (const range of this.view.visibleRanges) {
       const firstLine = doc.lineAt(range.from).number
       const lastLine = doc.lineAt(range.to).number
-      for (let index = firstSpanFrom(spans, firstLine); index < spans.length; index += 1) {
-        const span = spans[index]
-        if (span.first > lastLine) break
-        const start = Math.max(span.first, firstLine)
-        const end = Math.min(span.last, lastLine)
-        const decoration = lineDecoration(span.kind)
-        for (let number = start; number <= end; number += 1) {
-          const position = doc.line(number).from
-          builder.add(position, position, decoration)
+      // 行段按 `first` 升序，视口也升序，所以游标一路向前推即可（不回退）。
+      let cursor = firstSpanFrom(spans, firstLine)
+      for (let number = firstLine; number <= lastLine; number += 1) {
+        const line = doc.line(number)
+        while (cursor < spans.length && spans[cursor].last < number) cursor += 1
+        const span = cursor < spans.length && spans[cursor].first <= number ? spans[cursor] : undefined
+        const detail = inline?.get(number)
+        if (span === undefined && detail === undefined) continue
+        const pieces: { from: number; to: number; decoration: Decoration }[] = []
+        // `Decoration.line` 只能落在行首（from === to === line.from），同一行只挂一个。
+        if (span !== undefined) pieces.push({ from: line.from, to: line.from, decoration: lineDecoration(span.kind) })
+        if (detail !== undefined) {
+          // chip 的 `at` 是列偏移，越过行尾的（基线变了）夹到行尾，绝不越界。
+          for (const chip of detail.chips) {
+            const at = line.from + Math.min(chip.at, line.length)
+            pieces.push({ from: at, to: at, decoration: chipDecoration(chip) })
+          }
+          for (const word of detail.ranges) {
+            const from = line.from + Math.min(word.from, line.length)
+            const to = line.from + Math.min(word.to, line.length)
+            // `Decoration.mark` 不允许空区间（`MarkDecoration.range` 会抛）。
+            if (to > from) pieces.push({ from, to, decoration: WORD_ADD })
+          }
         }
+        // `RangeSetBuilder` 要求按 `from` + `startSide` 升序：行装饰 -2e8、chip -1e8、
+        // 字符区间 -1，三类混在一条线上必须显式排序，否则 builder 直接抛异常。
+        pieces.sort((left, right) => left.from - right.from || left.decoration.startSide - right.decoration.startSide)
+        for (const piece of pieces) builder.add(piece.from, piece.to, piece.decoration)
       }
     }
     this.decorations = builder.finish()

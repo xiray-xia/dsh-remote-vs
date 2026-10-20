@@ -1569,6 +1569,37 @@ body:not([data-ds-dark-theme]) .rvs-reveal-line {
 .rvs-edge .rvs-change-mark-del { color: #f85149; }
 
 /**
+ * 行内（字符级）差异：上面那三种底色回答"哪几行变了"，这两条回答"那一行的哪几个
+ * 字变了"。只改一个词的编辑，整行同色时完全看不出改了什么。
+ *
+ * `rvs-change-word-add` 刻意**只给背景、不给 `color`**：代码有自己的语法着色，
+ * 覆盖前景色会把关键字/字符串/注释染成同一种颜色，比不标还难读。透明度压在行
+ * 底色之上一点点，叠起来仍读得出"整块改动"的边界，又能看出块内哪几个字是新的。
+ */
+.rvs-edge .rvs-change-word-add {
+  background-color: rgba(46, 160, 67, .22);
+  border-radius: 2px;
+}
+
+/**
+ * 被删掉、在新文件里已经不存在的内容：零宽 widget，红底 + 删除线。
+ *
+ * 删除线画在 chip 自己身上（chip 是独立元素，不会波及周围代码）；`white-space:
+ * pre` 保留被删文本自己的缩进 —— 截断/去空白都会让 chip 谎报"删了什么"。
+ * 字号略小 + 降一点不透明度，是让它读起来像"残留物"而不是一行真代码。
+ */
+.rvs-edge .rvs-change-word-del {
+  padding: 0 3px;
+  margin: 0 1px;
+  border-radius: 3px;
+  background-color: rgba(248, 81, 73, .18);
+  font-size: .92em;
+  text-decoration: line-through;
+  opacity: .85;
+  white-space: pre;
+}
+
+/**
  * 撑宽度的隐形符号：只用它占位，绝不显示（见 `change-marks.ts` 的 SpacerMarker，
  * CodeMirror 会给这个 spacer 元素加 `visibility: hidden`，这里不重复声明）。
  */
@@ -1612,6 +1643,15 @@ body:not([data-ds-dark-theme]) .rvs-edge .cm-gutterElement.rvs-change-gutter-del
 body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-add { color: #1f883d; }
 body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-mod { color: #0969da; }
 body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; }
+
+/* 浅色主题的行内差异：同样的色相压暗，在近白底上才看得清（暗色那套会糊成一片）。 */
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-word-add {
+  background-color: rgba(26, 127, 55, .18);
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-word-del {
+  background-color: rgba(207, 34, 46, .14);
+}
 
 /**
  * 改动跳转按钮：浮在编辑器右上角。
