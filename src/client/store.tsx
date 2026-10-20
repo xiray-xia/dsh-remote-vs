@@ -1122,6 +1122,11 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
   applyChangeSet(tabId, null)
   await reloadTab(tabId)
   info(t('changes.undone'))
+  // The host still holds the pre-revert comparison, so the panel would keep the
+  // old counts (and re-opening the file would paint the OLD hunks against the
+  // NEW buffer). Force a scan now: the list is the user's evidence that the
+  // revert happened, and it must not lag the editor by a turn.
+  void api.changes.list(context.sessionId, true).catch(() => undefined)
 }
 
 /** Mount-time hook: boot the store for a given ctx. */

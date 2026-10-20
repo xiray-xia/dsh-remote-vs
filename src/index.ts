@@ -299,6 +299,18 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     }
   })
   ctx.on('session/disposed', (session) => { changes.forget(session.id) })
+  // A second guarantee that a turn gets recorded. This fires as the turn is
+  // about to close, so a `turn/end` this Host never delivered cannot leave the
+  // panel showing the previous turn's list; the panel's poll self-heals on top
+  // of that (see `SessionChanges.touch`).
+  ctx.on('agent/turn-stopping', (payload) => {
+    try {
+      const target = ledgerTarget(payload.agent.session)
+      if (target !== undefined) changes.endTurn(target, payload.turn)
+    } catch {
+      // Same rule as above: never disturb the turn being recorded.
+    }
+  })
   ctx.effect(() => () => { changes.dispose() }, 'dsh-remote-vs: changes ledger')
 
   const { routes, upgrade, terminalSessions } = makeRoutes({

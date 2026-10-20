@@ -1614,6 +1614,53 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-mod { color: #0969da; 
 body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; }
 
 /**
+ * 改动跳转按钮：浮在编辑器右上角。
+ *
+ * 放在编辑器上而不是面板里 —— 文件打开后光标就在这里，而面板可能被收起、被滚走。
+ * 容器 `.rvs-body` 已经是 `position: relative`（它本来用于挂 find 浮层），所以这里
+ * 只做绝对定位，不引入新的定位上下文。`pointer-events` 只开在按钮上：这块区域压在
+ * 编辑器文字上方，整块可点会把右上角那几行变成死区。
+ */
+.rvs-change-nav {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+  background: Canvas;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .18);
+  opacity: .72;
+  transition: opacity .12s ease;
+  pointer-events: none;
+}
+
+.rvs-change-nav:hover { opacity: 1; }
+
+.rvs-change-nav-btn {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rvs-fg2);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.rvs-change-nav-btn:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+/**
  * 悬浮在改动行上出现的「撤销这处改动」按钮。
  *
  * 它**不在编辑器的 DOM 里**：`undo-affordance.ts` 把它当 `position: fixed` 的元素挂到

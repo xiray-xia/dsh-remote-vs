@@ -121,6 +121,8 @@ function dropOversized(prev: Record<string, string>, keep: string | undefined): 
 export function EditorPane(props: { visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, tabs, activeTab, alias } = store
+  // Jump targets of the file on screen; empty when it carries no change data.
+  const changeHunks = activeTab?.changeSet?.hunks ?? []
   const chat = useRemoteChatTarget(store.ctx)
   const viewedAliasPath = store.workspace !== undefined ? store.aliasPaths[store.workspace.id] : undefined
   const chatEnabled = chat.sessionId !== undefined
@@ -409,6 +411,29 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
             )}
           </div>
           <div className="rvs-body">
+            {/*
+              Change navigation lives on the editor itself (top-right, floating)
+              rather than in the panel: once a file is open, that is where the
+              caret is, and the panel may be collapsed or scrolled away.
+            */}
+            {activeTab.kind === 'file' && changeHunks.length > 0 && activeTab.changeStale !== true && (
+              <div className="rvs-change-nav" role="group" aria-label={t('changes.navLabel')}>
+                <button
+                  type="button"
+                  className="rvs-change-nav-btn"
+                  title={t('changes.prev')}
+                  aria-label={t('changes.prev')}
+                  onClick={() => { gotoChange(activeTab.id, -1) }}
+                >↑</button>
+                <button
+                  type="button"
+                  className="rvs-change-nav-btn"
+                  title={t('changes.next')}
+                  aria-label={t('changes.next')}
+                  onClick={() => { gotoChange(activeTab.id, 1) }}
+                >↓</button>
+              </div>
+            )}
             {activeTab.loading && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
             {!activeTab.loading && activeTab.error !== undefined && <div className="rvs-banner error">{activeTab.error}</div>}
             {!activeTab.loading && activeTab.error === undefined && activeTab.kind === 'diff' && (

@@ -220,8 +220,11 @@ export class SessionChanges {
   /**
    * Compare one listed file across the whole session.
    *
-   * Both sides were read once at the last refresh, so this never touches the
-   * host: opening a listed file stays instant even on a slow link.
+   * The `before` side comes from the session baseline, which never moves. The
+   * `after` side is read from the host on every call rather than replayed from
+   * the last scan: a revert, a save from the editor or a shell command all
+   * change the file between scans, and replaying a cached copy against a fresh
+   * buffer is exactly how the painted lines end up at the wrong places.
    *
    * @param sessionId - live session owning the ledger.
    * @param path - the file's remote absolute path (as listed in the summary).
@@ -233,10 +236,24 @@ export class SessionChanges {
     const record = ledger.records.get(path)
     if (record === undefined) return null
     const status = record.status
-    if (record.binary) {
+
+    // Fresh "after" side; the cached one only covers a failed read.
+    let afterText = record.after
+    let binary = record.binary
+    let truncated = record.truncated
+    const fresh = await this.readPaths(ledger, [record.display], 'worktree')
+    if (ledger.disposed) return null
+    const side = fresh.get(record.display)
+    if (side !== undefined) {
+      binary = side.binary
+      truncated = side.truncated
+      afterText = side.absent ? null : side.text
+      if (afterText === null && !side.absent && !side.binary) afterText = record.after
+    }
+    if (binary) {
       return { kind: 'binary', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
     }
-    const result = diffText(record.before ?? '', record.after ?? '')
+    const result = diffText(record.before ?? '', afterText ?? '')
     const hunks: UnifiedHunk[] = result.hunks.map(hunk => ({
       oldStart: hunk.oldStart,
       oldCount: hunk.oldLines,
@@ -257,7 +274,7 @@ export class SessionChanges {
       display: record.display,
       hunks,
       ...(status === undefined ? {} : { status }),
-      ...(record.truncated ? { truncated: true as const } : {}),
+      ...(truncated ? { truncated: true as const } : {}),
     }
   }
 
@@ -303,6 +320,24 @@ export class SessionChanges {
     if (ledger === undefined || ledger.disposed) return
     ledger.untrackedAt = 0
     this.schedule(ledger)
+  }
+
+  /**
+   * Self-heal a ledger whose data has gone stale.
+   *
+   * The panel polls `list`, and a poll is the one moment we know a human is
+   * looking at the answer. If the data is older than `maxAgeMs`, re-scan — so a
+   * turn boundary this Host never delivered costs a few seconds of staleness
+   * instead of a manual refresh.
+   *
+   * @returns whether a refresh was queued.
+   */
+  touch(sessionId: string, maxAgeMs = 30_000): boolean {
+    const ledger = this.ledgers.get(sessionId)
+    if (ledger === undefined || ledger.disposed || ledger.pending) return false
+    if (ledger.at > 0 && Date.now() - ledger.at < maxAgeMs) return false
+    this.schedule(ledger)
+    return true
   }
 
   // ------------------------------------------------------------- internals

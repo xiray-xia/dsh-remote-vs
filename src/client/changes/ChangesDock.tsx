@@ -21,7 +21,6 @@ import { api } from '../api.ts'
 import {
   applyChangeSet,
   bootstrap,
-  gotoChange,
   openRemoteFileInBinding,
   refreshAll,
   remoteOpenBindings,
@@ -76,7 +75,10 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const sessionId = props.sessionId ?? props.session?.sessionId ?? props.session?.id
   const [summary, setSummary] = useState<RemoteChangesSummary | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [collapsed, setCollapsed] = useState(false)
+  // Collapsed by default: the header already carries the file count and the totals,
+  // and the list is one click away — a turn that touched twenty files should not
+  // push the composer off the screen.
+  const [collapsed, setCollapsed] = useState(true)
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const alive = useRef(true)
 
@@ -150,19 +152,8 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     }
   }, [explorer, sessionId, summary, t])
 
-  /** Move the caret to the previous/next change of the file on screen. */
-  const step = useCallback((direction: 1 | -1): void => {
-    const tab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
-    // One stepping implementation lives in the store so the panel buttons and
-    // the editor's own shortcut can never disagree about the index semantics.
-    if (tab !== undefined) gotoChange(tab.id, direction)
-  }, [explorer.activeTabId, explorer.tabs])
-
   const files = summary?.files ?? []
   const activeTab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
-  // Stepping is only meaningful while the marks still describe the buffer: once
-  // the editor reports drift, the line numbers point at whatever moved there.
-  const canStep = (activeTab?.changeSet?.hunks.length ?? 0) > 0 && activeTab?.changeStale !== true
   const visible = useMemo(() => {
     if (summary === null) return false
     return files.length > 0 || summary.pending === true || summary.unavailable !== undefined
@@ -196,12 +187,6 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
         {summary?.pending === true && <span className="rvs-changes-pending">{t('changes.pending')}</span>}
         <span className="rvs-changes-spacer" />
         {stale && <span className="rvs-changes-stale" title={t('changes.staleHint')}>{t('changes.stale')}</span>}
-        {canStep && (
-          <span className="rvs-changes-nav">
-            <button type="button" onClick={() => { step(-1) }} title={t('changes.prev')}>↑</button>
-            <button type="button" onClick={() => { step(1) }} title={t('changes.next')}>↓</button>
-          </span>
-        )}
         <button
           type="button"
           className="rvs-changes-refresh"
