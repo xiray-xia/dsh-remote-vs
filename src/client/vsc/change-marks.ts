@@ -50,6 +50,13 @@ export interface ChangeMark {
   from: number
   to: number
   kind: ChangeKind
+  /**
+   * 这块标记属于第几个 hunk（`ChangeSet.hunks` / `ChangeSet.patches` 的下标）。
+   *
+   * 悬浮撤销要精确到"这一处改动"，而行号会在 `spansOf` 里被裁切合并，所以归属
+   * 只能由数据层在算 mark 时一起带下来。
+   */
+  hunk?: number
 }
 
 /** 一个文件的全部改动，由上层（会话改动数据层）算好送进来。 */
@@ -59,6 +66,14 @@ export interface ChangeSet {
   hunks: number[]
   /** 数据快照标识（例如 mtime + 大小）。仅用于判定"是不是同一份数据"。 */
   stamp: string
+  /**
+   * 与 `hunks` 一一对应的 git hunk patch（`UnifiedHunk.patch`）。
+   *
+   * 「撤销这处改动」把它交给 `applyHunk(alias, root, patch, 'revert')`：反向应用
+   * 由 `git apply -R` 完成，上下文不匹配时它自己就会拒绝——这正是我们要的冲突
+   * 护栏，比在浏览器里重算一遍替换区间可靠。
+   */
+  patches?: string[]
 }
 
 /** 换一份改动标记；`null` = 清空（有改动数据，但没有任何要画的东西）。 */

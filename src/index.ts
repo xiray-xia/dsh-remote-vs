@@ -248,8 +248,22 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   // boundaries, never from the request path: a snapshot on a monorepo can take
   // tens of seconds, and a turn must never wait for it. `cwd` is resolved here
   // because the recorder deliberately knows nothing about cordis.
-  const ledgerTarget = (session: { id: string; header?: { cwd?: string } }): { sessionId: string; cwd: string } => {
-    let cwd = session.header?.cwd ?? ''
+  /**
+   * Which sessions get a ledger.
+   *
+   * Subagent sessions are skipped on purpose, the same policy DSH's own
+   * recorder uses: a delegated session writes into the same workspace, so its
+   * files show up in the parent's snapshot diff anyway, while recording it
+   * separately would run a snapshot per subagent turn (a Team run fans out and
+   * a monorepo snapshot is the expensive one).
+   */
+  const ledgerTarget = (session: {
+    id: string
+    header?: { cwd?: string; origin?: string; delegationDepth?: number }
+  }): { sessionId: string; cwd: string } | undefined => {
+    const header = session.header
+    if (header?.origin === 'subagent' || (header?.delegationDepth ?? 0) > 0) return undefined
+    let cwd = header?.cwd ?? ''
     try {
       const workingDirectory = ctx.get('workingDirectory') as { get?: (session: unknown) => unknown } | undefined
       const current = workingDirectory?.get?.(session)
@@ -257,7 +271,7 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     } catch {
       // Soft read: the header cwd is the fallback.
     }
-    return { sessionId: session.id, cwd }
+    return cwd === '' ? undefined : { sessionId: session.id, cwd }
   }
   const changes = new SessionChanges({
     pool,
@@ -274,8 +288,11 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   })
   ctx.on('session/event', (session, event) => {
     try {
-      if (event.type === 'turn/start') changes.beginTurn(ledgerTarget(session))
-      else if (event.type === 'turn/end') changes.endTurn(ledgerTarget(session), event.data.turn)
+      if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+      const target = ledgerTarget(session)
+      if (target === undefined) return
+      if (event.type === 'turn/start') changes.beginTurn(target)
+      else changes.endTurn(target, event.data.turn)
     } catch {
       // Recording must never disturb the turn that is being recorded.
     }

@@ -336,6 +336,14 @@ const zh: Record<string, string> = {
   'changes.stale': '位置已过期',
   'changes.staleHint': '编辑器内容已改动，改动位置可能不准。点击列表里的文件重新计算。',
   'changes.noWorkspace': '找不到该主机对应的工作区，无法打开文件。',
+  // -- 悬浮在改动行上撤销这一处改动
+  'changes.undoAction': '撤销这处改动',
+  'changes.undoActionDelete': '撤销这处删除',
+  'changes.undone': '已撤销这处改动',
+  'changes.undoDirty': '文件里有未保存的改动，撤销会盖掉它们；先保存或放弃这些改动再撤销。',
+  'changes.undoNoContext': '找不到这处改动所属的主机与仓库，无法撤销。',
+  'changes.undoConflict': '这处改动的上下文已经变了，远端拒绝了撤销（文件未被修改）。',
+  'changes.undoMissing': '这处改动没有可用的补丁内容，无法撤销。',
 }
 
 const en: Record<string, string> = {
@@ -652,6 +660,14 @@ const en: Record<string, string> = {
   'changes.stale': 'positions stale',
   'changes.staleHint': 'The editor content changed, so the marked positions may be off. Click the file in the list to recompute.',
   'changes.noWorkspace': 'No workspace is bound to that host, so the file cannot be opened.',
+  // -- reverting one change by hovering over its line
+  'changes.undoAction': 'Revert this change',
+  'changes.undoActionDelete': 'Revert this deletion',
+  'changes.undone': 'Change reverted',
+  'changes.undoDirty': 'This file has unsaved edits that a revert would overwrite. Save or discard them first.',
+  'changes.undoNoContext': 'The host and repository behind this change are unknown, so nothing was reverted.',
+  'changes.undoConflict': 'The surroundings of this change moved, so the host refused the revert (the file was not modified).',
+  'changes.undoMissing': 'No patch is available for this change, so nothing was reverted.',
 }
 
 export type Lang = 'zh' | 'en'

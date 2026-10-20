@@ -104,8 +104,10 @@ import {
   changeStaleField,
   changeBlockAt,
   setChangeSet,
+  type ChangeMark,
   type ChangeSet,
 } from './vsc/change-marks.ts'
+import { DEFAULT_UNDO_LABEL, undoAffordance } from './changes/undo-affordance.ts'
 
 /**
  * The editor surface is OPAQUE and scrolls in the editor's own palette
@@ -134,6 +136,16 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    * 加入本功能之前完全一致。
    */
   changeSet?: ChangeSet | null
+  /**
+   * 用户在某一处改动上按下「撤销这处改动」时回调。
+   *
+   * 收到的是 `changeSet.marks` 里的那个对象（`hunk` 是 `changeSet.patches` 的下标）。
+   * 不传就不装悬浮撤销那一整套（`undoAffordance`），编辑器行为与没有这个功能时
+   * 完全一致 —— 也就不会点出一个没人接的动作。
+   */
+  onUndoChange?: (mark: ChangeMark) => void
+  /** 悬浮按钮的文案（由调用方按 `kind` 给出它的 i18n 说法）。 */
+  undoLabel?: (mark: ChangeMark) => string
   /** 改动点跳转的目标行（1-based），配合 `revealHunkNonce` 重跳同一行。 */
   revealHunkLine?: number
   /** 改动点跳转的 nonce（同 `revealNonce` 的道理）。 */
@@ -255,26 +267,41 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   }, [props.revealLine, props.revealNonce, view])
 
   /**
-   * 把「本会话改了什么」喂进编辑器。
+   * 把「本会话改了什么」喂进编辑器（行背景 + 左侧 gutter），并按需带上悬浮撤销。
    *
-   * 两件事分开做：扩展的装卸（Compartment）只在"有没有 `changeSet`"翻转时发生，
-   * 数据本身只在**对象身份**变化时下发。身份比较不是省事，是正确性：编辑作废后
-   * store 里的 `changeSet` 仍是原来那个对象（`markChangeStale` 不动它），若每次渲染
-   * 都重新 dispatch，屏幕上会把已经作废的行号上的标记又画回来。
+   * 两件事分开做：扩展的装卸（Compartment）只在"能力"翻转时发生 —— 有没有 `changeSet`
+   * 决定装不装改动标记，有没有 `onUndoChange` 决定装不装悬浮撤销 —— 数据本身只在
+   * **对象身份**变化时下发。身份比较不是省事，是正确性：编辑作废后 store 里的
+   * `changeSet` 仍是原来那个对象（`markChangeStale` 不动它），若每次渲染都重新
+   * dispatch，屏幕上会把已经作废的行号上的标记又画回来。
+   *
+   * 撤销按钮的回调与文案都通过 `propsRef` 现读，所以它们换身份不需要重装扩展；
+   * 重装会丢掉正在进行的那次悬停，这是唯一要避开的副作用。
    */
-  const marksOnRef = useRef(false)
+  const armedRef = useRef('')
   const pushedSetRef = useRef<ChangeSet | null | undefined>(undefined)
+  const undoArmed = props.onUndoChange !== undefined
   useEffect(() => {
     const current = viewRef.current
     if (current === undefined) return
     const set = props.changeSet
-    const on = set !== undefined
-    if (on !== marksOnRef.current) {
-      marksOnRef.current = on
+    const marks = set !== undefined
+    const armed = `${marks ? 'm' : ''}${undoArmed ? 'u' : ''}`
+    if (armed !== armedRef.current) {
+      armedRef.current = armed
       // 重装扩展会重建字段，之前下发过的数据随之消失，必须再喂一次。
       pushedSetRef.current = undefined
+      const extension: Extension = [
+        ...(marks ? [changeMarksExtension] : []),
+        ...(undoArmed
+          ? [undoAffordance({
+            onUndo: (mark) => { propsRef.current.onUndoChange?.(mark) },
+            label: (mark) => propsRef.current.undoLabel?.(mark) ?? DEFAULT_UNDO_LABEL,
+          })]
+          : []),
+      ]
       try {
-        current.dispatch({ effects: changeMarksCompartment.reconfigure(on ? changeMarksExtension : []) })
+        current.dispatch({ effects: changeMarksCompartment.reconfigure(extension) })
       } catch {
         return // Disposed view.
       }
@@ -287,7 +314,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     } catch {
       // Disposed.
     }
-  }, [props.changeSet, view])
+  }, [props.changeSet, undoArmed, view])
 
   /**
    * 跳到某个改动点。

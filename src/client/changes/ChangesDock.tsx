@@ -18,9 +18,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.ts'
-import { applyChangeSet, gotoChange, openRemoteFileInBinding, useExplorer } from '../store.tsx'
+import {
+  applyChangeSet,
+  bootstrap,
+  gotoChange,
+  openRemoteFileInBinding,
+  refreshAll,
+  remoteOpenBindings,
+  useExplorer,
+} from '../store.tsx'
 import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
+import { setUndoContext } from './undo-context.ts'
 import './changes.css'
 
 /** How often an open panel re-reads the ledger (the host refreshes it per turn). */
@@ -54,6 +63,12 @@ function splitDisplay(display: string): { dir: string; name: string } {
 
 export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const explorer = useExplorer()
+  // The dock is a second surface of the same store as the explorer, and it can
+  // mount without the explorer ever being opened — without this the workspace
+  // list would be empty and a click could not resolve its binding.
+  useEffect(() => {
+    if (explorer.ctx !== undefined) bootstrap(explorer.ctx)
+  }, [explorer.ctx])
   const t = explorer.t
   const sessionId = props.sessionId ?? props.session?.sessionId ?? props.session?.id
   const [summary, setSummary] = useState<RemoteChangesSummary | null>(null)
@@ -85,6 +100,17 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     }
   }, [load])
 
+  // Keep the revert affordance pointed at the workspace this panel lists. It is
+  // written on every summary so a rebound workspace cannot leave a stale root
+  // behind, and cleared on unmount so an affordance in another session's editor
+  // can never act on this one.
+  useEffect(() => {
+    if (sessionId === undefined || summary === null || summary.root === '') return
+    setUndoContext({ sessionId, alias: summary.alias, root: summary.root })
+  }, [sessionId, summary])
+
+  useEffect(() => () => { setUndoContext(undefined) }, [])
+
   /** Open one listed file in the remote editor with its change marks. */
   const openChanged = useCallback(async (file: RemoteChangedFile): Promise<void> => {
     if (sessionId === undefined || summary === null) return
@@ -96,7 +122,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       const set: ChangeSet = diff !== null && diff.kind === 'text'
         ? changeSetFromHunks(diff.hunks, stamp)
         : { ...EMPTY_CHANGE_SET, stamp }
-      const binding = explorer.workspaces.find(item => item.alias === summary.alias)
+      // The store may still be loading its workspace table on a cold page, so a
+      // miss is worth one refresh before giving up on the click. Read through
+      // the snapshot accessor, not the render-time props, so the retry actually
+      // sees what the load wrote.
+      let binding = remoteOpenBindings().bindings.find(item => item.alias === summary.alias)
+      if (binding === undefined) {
+        refreshAll()
+        await new Promise(resolve => { window.setTimeout(resolve, 300) })
+        binding = remoteOpenBindings().bindings.find(item => item.alias === summary.alias)
+      }
       if (binding === undefined) {
         explorer.info(t('changes.noWorkspace'))
         return

@@ -32,9 +32,10 @@ export const EMPTY_CHANGE_SET: ChangeSet = { marks: [], hunks: [], stamp: 'empty
  *
  * @param hunk - one served hunk.
  * @param marks - destination list (mutated).
+ * @param index - this hunk's position in the served list (stamped onto每块).
  * @returns the hunk's first jumpable line, or undefined when it paints nothing.
  */
-function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[]): number | undefined {
+function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[], index: number): number | undefined {
   let line = hunk.newStart
   let first: number | undefined
   // A run of consecutive +/- lines is one block: a block with both signs is a
@@ -47,11 +48,11 @@ function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[]): number | undefined
     if (added.length > 0) {
       const from = added[0]
       const to = added[added.length - 1]
-      marks.push({ from, to, kind: deleted ? 'mod' : 'add' })
+      marks.push({ from, to, kind: deleted ? 'mod' : 'add', hunk: index })
       first ??= from
     } else if (deleted) {
       const anchor = Math.max(1, line)
-      marks.push({ from: anchor, to: anchor, kind: 'del' })
+      marks.push({ from: anchor, to: anchor, kind: 'del', hunk: index })
       first ??= anchor
     }
     added = []
@@ -85,16 +86,26 @@ function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[]): number | undefined
  * @returns the mark set the editor paints, or {@link EMPTY_CHANGE_SET}.
  */
 export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string): ChangeSet {
-  if (hunks.length === 0) return { marks: [], hunks: [], stamp }
+  if (hunks.length === 0) return { marks: [], hunks: [], stamp, patches: [] }
   const marks: ChangeMark[] = []
-  const anchors: number[] = []
-  for (const hunk of hunks) {
-    const first = collectHunk(hunk, marks)
-    if (first !== undefined) anchors.push(first)
-  }
+  // `hunks[i]` / `patches[i]` must stay in step with the mark's `hunk` index, so
+  // order is preserved: `hunks` is the jump order (ascending line), while
+  // `patches` keeps the served order the marks point into.
+  const anchors: { line: number; served: number }[] = []
+  const patches: string[] = []
+  hunks.forEach((hunk, served) => {
+    patches.push(hunk.patch)
+    const first = collectHunk(hunk, marks, served)
+    if (first !== undefined) anchors.push({ line: first, served })
+  })
   marks.sort((left, right) => left.from - right.from)
-  anchors.sort((left, right) => left - right)
-  // A hunk pair can collapse onto the same anchor line; the jump list only
-  // needs each line once.
-  return { marks, hunks: [...new Set(anchors)], stamp }
+  // Jump order is ascending by line; the mark's `hunk` is a key into `patches`,
+  // never into this list — that indirection is what keeps both orderings right.
+  const order = [...anchors].sort((left, right) => left.line - right.line)
+  return {
+    marks,
+    hunks: [...new Set(order.map(anchor => anchor.line))],
+    stamp,
+    patches,
+  }
 }

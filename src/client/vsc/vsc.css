@@ -1614,6 +1614,77 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-mod { color: #0969da; 
 body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-mark-del { color: #cf222e; }
 
 /**
+ * 悬浮在改动行上出现的「撤销这处改动」按钮。
+ *
+ * 它**不在编辑器的 DOM 里**：`undo-affordance.ts` 把它当 `position: fixed` 的元素挂到
+ * `document.body`（和「添加到对话」那个浮层同一套做法），所以这里的选择器不带
+ * `.rvs-edge` —— 带上了就一条都不生效。固定定位 + 高 z-index 是刻意的：宿主容器有
+ * `overflow: hidden`，挂在里面会被 CodeMirror 的滚动层裁掉。
+ *
+ * 颜色按"危险动作"给：默认红边红字、悬停实心红。底色不透明（不用半透明的 overlay
+ * token），否则后面的代码文字会透出来。
+ */
+.rvs-undo-affordance {
+  position: fixed;
+  z-index: 2100;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 9px;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  background-color: #1e2229;
+  color: #ffb4ae;
+  /* 按钮挂在 body 上，没有 .rvs-edge 的字体上下文：跟随宿主页面字体。 */
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  /* 纵向以悬停行的中线对齐（横向坐标由 JS 按行尾算好）。 */
+  transform: translateY(-50%);
+}
+
+.rvs-undo-affordance:hover {
+  background-color: #f85149;
+  border-color: #f85149;
+  color: #fff;
+}
+
+.rvs-undo-affordance:active {
+  transform: translateY(-50%) scale(.97);
+}
+
+.rvs-undo-affordance:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 1px;
+}
+
+/* 删除锚点：这一行其实已经不在了，虚线边框把它和"真实存在的行"分开。 */
+.rvs-undo-affordance[data-kind="del"] {
+  border-style: dashed;
+}
+
+body:not([data-ds-dark-theme]) .rvs-undo-affordance {
+  border-color: #cf222e;
+  background-color: #ffffff;
+  color: #a40e26;
+  box-shadow: 0 6px 18px rgba(31, 35, 40, .18);
+}
+
+body:not([data-ds-dark-theme]) .rvs-undo-affordance:hover {
+  background-color: #cf222e;
+  border-color: #cf222e;
+  color: #fff;
+}
+
+body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
+  outline-color: #4d6bfe;
+}
+
+/**
  * CodeMirror's own search decorations, also stated here: the editor's theme is
  * injected by the library, and these must stay readable even when only this
  * stylesheet is in play.

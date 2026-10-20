@@ -12,7 +12,7 @@ import { api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { sameLocalDir } from './composer.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
-import { useExplorer, gotoChange, markChangeStale, type EditorTab } from './store.tsx'
+import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
@@ -44,11 +44,40 @@ function tabStatusClass(tab: { loading: boolean; saving: boolean; dirty: boolean
   return tab.dirty ? 'dirty' : 'saved'
 }
 
+/**
+ * 悬浮撤销按钮的文案。
+ *
+ * 删除锚点那一行其实已经不在文件里了，说「撤销这处改动」会让人以为要改一行现存的内容，
+ * 所以它有自己的说法。措辞留在 i18n 里、由这里选 key：`undo-affordance` 只负责把
+ * `kind` 交出来，扩展本身不写文案。两条 key 都是字面量调用，`i18n-check` 才能把
+ * "字典里有、没人用" 也查出来（拼在模板串里或走运行时查表就查不到）。
+ */
+function undoActionLabel(t: (key: string) => string, kind: 'add' | 'mod' | 'del'): string {
+  return kind === 'del' ? t('changes.undoActionDelete') : t('changes.undoAction')
+}
+
 /** Tab icon: diffs, images and text files each get their own glyph. */
 function tabIcon(tab: { kind: string; image: boolean }): ReactNode {
   if (tab.kind === 'diff') return <IconDiff size={12} />
   if (tab.image) return <span>▣</span>
   return <span>▪</span>
+}
+
+/**
+ * The React `key` of one code editor — the tab's identity PLUS its reload nonce.
+ *
+ * `CodeEditor` reads `initial` exactly ONCE (on mount), so a re-read of the
+ * remote file can only reach the live buffer by remounting it. `store.reloadTab`
+ * bumps the nonce after it stores the new text, which turns "new bytes arrived"
+ * into a key change instead of a dead prop update: without it the mounted
+ * buffer kept showing the pre-reload content while the file on disk had the new
+ * one, and the next Ctrl+S wrote the stale bytes back over the file.
+ *
+ * Exported so a self-check can assert the key really moves (and that it moves
+ * only when a reload happened).
+ */
+export function editorKey(tab: { id: string; reloadNonce?: number }): string {
+  return `${tab.id}:${tab.reloadNonce ?? 0}`
 }
 
 /** How many decoded images stay cached; each entry is a whole file. */
@@ -414,7 +443,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   >
                     {activeTab.truncated && <div className="rvs-banner warn">{t('editor.truncated')}</div>}
                     <CodeEditor
-                      key={activeTab.id}
+                      key={editorKey(activeTab)}
                       ref={editorRef}
                       initial={activeTab.text}
                       path={activeTab.fullPath}
@@ -438,6 +467,8 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       onViewState={rememberViewState}
                       onStepHunk={(dir) => { gotoChange(activeTab.id, dir) }}
                       onChangeStale={() => { markChangeStale(activeTab.id) }}
+                      onUndoChange={(mark) => { void undoChange(activeTab.id, mark) }}
+                      undoLabel={(mark) => undoActionLabel(t, mark.kind)}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}
                     />

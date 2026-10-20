@@ -25,9 +25,10 @@ import { api, RemoteApiError, configureTimeouts, fileReadTimeoutMs, gitTimeoutMs
 import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
 import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
-import type { ChangeSet } from './vsc/change-marks.ts'
+import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
+import { undoContext } from './changes/undo-context.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
-import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, type DiffPayload } from './scm/actions.ts'
+import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
@@ -79,6 +80,14 @@ export interface EditorTab {
   revealHunkLine?: number
   /** 改动点跳转的 nonce，语义同 `lineNonce`。 */
   revealHunkNonce?: number
+  /**
+   * 重读（`reloadTab`）成功后递增的 nonce。
+   *
+   * 它存在的唯一理由：`CodeEditor` 的 `initial` **只在挂载时读一次**，所以
+   * "远端内容变了" 必须靠**重挂**才能进到编辑器缓冲区（详见 `reloadTab` 的注释）。
+   * `EditorPane` 把它拼进 `key`，这里的每次递增就是一次重挂。
+   */
+  reloadNonce?: number
   diff: DiffPayload | undefined
   model: DiffModel | undefined
   view: 'split' | 'before' | 'after'
@@ -282,6 +291,11 @@ export interface ExplorerValue {
   gotoChange: (tabId: string, dir: 1 | -1) => number | undefined
   /** 编辑器报告文档已脱钩：标记作废，等上层重新拉数据。 */
   markChangeStale: (tabId: string) => void
+  /**
+   * 撤销本会话在某个文件里的一处改动（悬浮按钮那一动作；`mark` 来自
+   * `changeSet.marks`，`hunk` 是 `patches` 的下标）。
+   */
+  undoChange: (tabId: string, mark: ChangeMark) => Promise<void>
   saveTab: (id: string, content: string) => Promise<void>
   reloadTab: (id: string) => Promise<void>
   info: (text: string) => void
@@ -378,6 +392,7 @@ function build(): ExplorerValue {
     applyChangeSet,
     gotoChange,
     markChangeStale,
+    undoChange,
     saveTab,
     reloadTab,
     info,
@@ -942,7 +957,24 @@ export async function saveTab(id: string, content: string): Promise<void> {
   }
 }
 
-/** Re-read one tab (file content or diff payload). */
+/**
+ * Re-read one tab (file content or diff payload).
+ *
+ * A FILE tab's content has to reach the mounted editor through a REMOUNT, which
+ * is why the nonce below exists: `CodeEditor` reads its `initial` prop once, on
+ * mount (`key` = tab identity), so patching `tab.text` alone leaves the live
+ * buffer on the OLD bytes — the screen would show content the remote file no
+ * longer has, and the next Ctrl+S would write those stale bytes back, silently
+ * undoing whatever changed the file (a hover-revert, a discard, another tool).
+ * `EditorPane` folds `reloadNonce` into the editor's `key`; bumping it here is
+ * what makes the re-read visible, and the remount restores scroll + caret from
+ * the per-tab view state (see `.spike/viewstate-check.mjs`).
+ *
+ * ORDER IS LOAD-BEARING: text and `dirty` are patched FIRST, the nonce SECOND.
+ * The remount reads `initial` from the tab, so a nonce bump that raced ahead of
+ * the new text would mount the editor on the old content — exactly the bug this
+ * is fixing, only harder to see.
+ */
 export async function reloadTab(id: string): Promise<void> {
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
@@ -958,6 +990,8 @@ export async function reloadTab(id: string): Promise<void> {
         truncated: read.truncated,
         dirty: false,
       })
+      // Only now: the new text must already be in the tab when the editor remounts.
+      patchTab(id, { reloadNonce: (tab.reloadNonce ?? 0) + 1 })
     } catch (error) {
       patchTab(id, { error: error instanceof Error ? error.message : String(error) })
     }
@@ -1037,6 +1071,57 @@ export function markChangeStale(tabId: string): void {
   const tab = state.tabs.find(item => item.id === tabId)
   if (tab === undefined || tab.changeStale === true) return
   patchTab(tabId, { changeStale: true })
+}
+
+/**
+ * 撤销「本会话在某个文件里的一处改动」（改动行上那个悬浮按钮点下去的动作）。
+ *
+ * 语义是**把远端工作区里这一块反向应用回去**，不是编辑器 buffer 的 undo：真正的反向
+ * 操作由 `applyHunk(..., 'revert')` 在主机上跑 `git apply -R` 完成，hunk 的上下文对
+ * 不上时它自己会拒绝 —— 那正是冲突护栏。这里绝不自己算文本替换：浏览器一侧没有基线
+ * 内容，重算出来的区间只会把别人的改动一起盖掉。
+ *
+ * 每一步的先后都不是随意的：
+ * 1. 编辑器里有未保存内容时**直接拒绝**：用远端补丁盖掉用户还没保存的编辑是最糟的
+ *    结果（既丢编辑，又让"撤销"变成"覆盖"）。
+ * 2. 没有撤销坐标就什么也不做：改动列表没在屏幕上时，"哪台主机、哪个仓库"是未知数。
+ * 3. 没有补丁（二进制文件、非文本 diff、`hunk` 下标对不上）同样什么也不做。
+ * 4. 成功后才作废这批标记、再重读文件：标记描述的是"撤销前那一刻"的行号，撤销后它们
+ *    全部失效；重读让标签页的数字回到磁盘上的事实。
+ * 5. 失败时**不清标记、不重读**：远端一个字节都没动，屏幕上那份标记仍然是事实。
+ */
+export async function undoChange(tabId: string, mark: ChangeMark): Promise<void> {
+  const tab = state.tabs.find(item => item.id === tabId)
+  if (tab === undefined) {
+    info(t('changes.undoMissing'))
+    return
+  }
+  if (tab.dirty === true) {
+    info(t('changes.undoDirty'))
+    return
+  }
+  const context = undoContext()
+  if (context === undefined) {
+    info(t('changes.undoNoContext'))
+    return
+  }
+  const patch = tab.changeSet?.patches?.[mark.hunk ?? -1]
+  if (patch === undefined || patch.trim() === '') {
+    info(t('changes.undoMissing'))
+    return
+  }
+  try {
+    // 'revert' = 远端 `git apply -R`；上下文不匹配它就抛错，这就是冲突护栏。
+    await applyHunk(context.alias, context.root, patch, 'revert')
+  } catch (error) {
+    // 可把 git 的说法附在后面（"patch does not apply" 之类），但**不动**标记与文件。
+    const detail = error instanceof Error ? error.message.trim() : String(error).trim()
+    info(detail === '' ? t('changes.undoConflict') : `${t('changes.undoConflict')} · ${detail}`)
+    return
+  }
+  applyChangeSet(tabId, null)
+  await reloadTab(tabId)
+  info(t('changes.undone'))
 }
 
 /** Mount-time hook: boot the store for a given ctx. */
