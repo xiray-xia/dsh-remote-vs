@@ -105,6 +105,80 @@ export function fileReadTimeoutMs(): number {
   return effectiveTimeouts.readMs
 }
 
+/** Progress of one upload, in bytes as the browser reports them. */
+export interface UploadProgress {
+  loaded: number
+  total: number
+}
+
+/**
+ * Upload one file's bytes to an absolute remote path.
+ *
+ * XHR rather than `fetch`: only XHR reports UPLOAD progress, and a drag & drop
+ * of a large file with no feedback is indistinguishable from a hang (the same
+ * lesson the git timeouts taught). The body is the raw bytes — the host route
+ * streams them into SFTP, so neither side buffers the whole file.
+ *
+ * @param options.alias - host alias.
+ * @param options.path - absolute remote destination path.
+ * @param options.blob - the file to send.
+ * @param options.overwrite - replace an existing file (the route answers 409
+ *   with `status === 409` otherwise, which the caller resolves per batch).
+ * @param options.signal - cancels the transfer.
+ * @param options.onProgress - called as the browser flushes body bytes.
+ * @returns the byte count the host wrote.
+ */
+export function uploadFile(options: {
+  alias: string
+  path: string
+  blob: Blob
+  overwrite?: boolean
+  signal?: AbortSignal
+  onProgress?: (progress: UploadProgress) => void
+}): Promise<{ size: number }> {
+  return new Promise<{ size: number }>((resolve, reject) => {
+    const query = new URLSearchParams({ alias: options.alias, path: options.path })
+    if (options.overwrite === true) query.set('overwrite', '1')
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${REMOTE_API.upload}?${query.toString()}`)
+    xhr.setRequestHeader('content-type', 'application/octet-stream')
+    if (options.signal !== undefined) {
+      if (options.signal.aborted) {
+        reject(new RemoteApiError(0, 'upload cancelled'))
+        return
+      }
+      options.signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    if (options.onProgress !== undefined) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) options.onProgress?.({ loaded: event.loaded, total: event.total })
+      }
+    }
+    xhr.onload = () => {
+      let body: unknown = null
+      try {
+        body = JSON.parse(xhr.responseText)
+      } catch {
+        // Keep the status-based message below.
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const size = typeof body === 'object' && body !== null && typeof (body as { size?: unknown }).size === 'number'
+          ? (body as { size: number }).size
+          : options.blob.size
+        resolve({ size })
+        return
+      }
+      const message = typeof body === 'object' && body !== null && typeof (body as { error?: unknown }).error === 'string'
+        ? (body as { error: string }).error
+        : `upload failed: HTTP ${xhr.status}`
+      reject(new RemoteApiError(xhr.status, message))
+    }
+    xhr.onerror = () => reject(new RemoteApiError(0, 'upload failed: connection error'))
+    xhr.onabort = () => reject(new RemoteApiError(0, 'upload cancelled'))
+    xhr.send(options.blob)
+  })
+}
+
 export interface HostForm {
   alias: string
   host: string

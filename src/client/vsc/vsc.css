@@ -357,6 +357,44 @@ body[data-ds-dark-theme] .rvs-root {
   outline-offset: -1px;
 }
 
+/* Where a file drag will land: a slip must not silently drop a tree into the
+   wrong directory. */
+.rvs-drop-hint {
+  margin: 2px 8px 4px;
+  padding: 3px 8px;
+  border: 1px dashed var(--rvs-brand);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--rvs-brand);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+}
+/* Upload progress: one line under the header. A multi-minute transfer with no
+   feedback is indistinguishable from a hung explorer, so the row names the
+   count and the file on the wire. */
+.rvs-upload-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 4px;
+  font-size: 11px;
+  color: var(--dsw-alias-text-secondary, rgba(127, 127, 127, .95));
+}
+
+.rvs-upload-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+}
+
 .rvs-node-icon {
   flex: none;
   width: 16px;

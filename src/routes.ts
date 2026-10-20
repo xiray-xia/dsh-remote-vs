@@ -344,6 +344,55 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         }
       },
     },
+    // ------------------------------------------------------------- upload
+    // Streaming binary upload for the explorer's drag & drop and "Upload…"
+    // actions. The body IS the file (no base64, no JSON envelope): a dropped
+    // file must not hit the 10 MiB JSON cap, pay the 33 % base64 tax, or be
+    // buffered whole in Host memory.
+    {
+      kind: 'exact',
+      path: REMOTE_API.upload,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = url.searchParams.get('alias') ?? ''
+        const path = url.searchParams.get('path') ?? ''
+        const overwrite = url.searchParams.get('overwrite') === '1'
+        if (alias === '' || path === '') {
+          writeJson(res, 400, { error: 'alias and path query parameters are required' })
+          return
+        }
+        if (!path.startsWith('/')) {
+          // The client joins absolute remote paths itself; anything else is a
+          // caller bug, and writing it would land relative to the SFTP home.
+          writeJson(res, 400, { error: `path must be absolute: ${path}` })
+          return
+        }
+        try {
+          if (!overwrite) {
+            // The client asks once per batch and then retries with overwrite=1;
+            // a 409 carrying `exists` lets it count conflicts without a second
+            // round trip per file.
+            const exists = await files.stat(alias, path).then(() => true, () => false)
+            if (exists) {
+              writeJson(res, 409, { error: `${path} already exists`, exists: true })
+              return
+            }
+          }
+          const written = await files.upload(alias, path, req, undefined, overwrite)
+          writeJson(res, 200, { ok: true, size: written.size })
+        } catch (error) {
+          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
     // -------------------------------------------------------- workspaces
     {
       kind: 'exact',

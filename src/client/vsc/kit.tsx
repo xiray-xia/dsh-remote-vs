@@ -205,6 +205,11 @@ export function IconSave(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M3 2.6h8l2.4 2.4v8.4H3zM5.4 2.6v4h5.2v-4M5.4 13.4V9.8h5.2v3.6" />, props.className)
 }
 
+/** Upload: an arrow into a tray (the explorer's drag & drop / upload affordance). */
+export function IconUpload(props: IconProps): ReactNode {
+  return svg(props.size ?? 14, <path d="M8 10.6V2.6M4.6 6 8 2.6 11.4 6M2.6 11.2v2.2h10.8v-2.2" />, props.className)
+}
+
 // ------------------------------------------------- better-sidebar icons
 
 /** The slice of the better-sidebar service this kit consumes. */

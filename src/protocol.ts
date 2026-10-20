@@ -11,6 +11,8 @@ export const REMOTE_API = {
   keygen: '/api/dsh-remote/keygen',
   exec: '/api/dsh-remote/exec',
   files: '/api/dsh-remote/files',
+  /** Streaming binary upload: raw request body, host and path in the query. */
+  upload: '/api/dsh-remote/upload',
   workspaces: '/api/dsh-remote/workspaces',
   deploy: '/api/dsh-remote/deploy',
   importSshConfig: '/api/dsh-remote/import-ssh-config',

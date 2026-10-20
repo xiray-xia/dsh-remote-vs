@@ -2,6 +2,7 @@
  * Remote file operations over SFTP. Paths are absolute POSIX paths on the
  * remote host; every entry point validates before touching the wire.
  */
+import { randomBytes } from 'node:crypto'
 import { posix } from 'node:path'
 import type { SFTPWrapper, Stats } from 'ssh2'
 import type { RemotePool } from './pool.ts'
@@ -19,6 +20,9 @@ export const READ_CAP = 8 * 1024 * 1024
  * (directories first, then by name), so which entries survive is deterministic.
  */
 export const LIST_ENTRY_CAP = 20000
+
+/** Largest single upload accepted (matches the client-side planner cap). */
+export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 /**
  * Cap for both per-path memory sets below (levels confirmed to exist, listings
@@ -150,6 +154,59 @@ export class RemoteFiles {
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
       }
       return { size: data.length }
+    })
+  }
+
+  /**
+   * Stream one upload into a remote file, atomically.
+   *
+   * Streaming, not `write()`: an upload is whatever the user dragged, so the
+   * body must never be buffered whole in Host memory (the JSON `write` op caps
+   * at 10 MiB of base64 for exactly that reason). Directories are created
+   * first — a drop can name a path several levels below the target — and the
+   * source is piped straight into the SFTP write stream.
+   *
+   * The bytes go to a SIDE file (`.part-<id>` next to the target) and are
+   * renamed into place only once the body ended cleanly. Writing the real path
+   * directly left a half file behind whenever the upload was cancelled, which
+   * then looked like a complete file in the explorer (2026-10-20 user report).
+   * On any failure the side file is removed, so a cancelled upload leaves the
+   * remote folder exactly as it was.
+   *
+   * @param alias - host alias.
+   * @param file - absolute remote destination path.
+   * @param source - request body stream (or any readable).
+   * @param maxBytes - hard ceiling; exceeding it destroys the stream and fails.
+   * @param overwrite - replace an existing target (the route already asked).
+   * @returns the number of bytes written.
+   */
+  async upload(
+    alias: string,
+    file: string,
+    source: NodeJS.ReadableStream,
+    maxBytes = UPLOAD_MAX_BYTES,
+    overwrite = true,
+  ): Promise<{ size: number }> {
+    const path = remotePath(file)
+    const dir = posix.dirname(path)
+    const partial = `${path}.part-${randomBytes(4).toString('hex')}`
+    return this.pool.withSftp(alias, async (sftp) => {
+      try {
+        await this.withDirRetry(alias, dir, async () => {
+          await this.ensureDir(sftp, alias, dir)
+        })
+        const size = await streamIntoFile(sftp, partial, source, maxBytes)
+        // Move into place. SFTP v3 `rename` refuses to clobber, so an overwrite
+        // removes the old file first — the same window a normal editor save has.
+        if (overwrite) await unlinkAsync(sftp, path).catch(() => undefined)
+        await renameAsync(sftp, partial, path)
+        this.remember(this.knownDirs, dirKey(alias, dir))
+        return { size }
+      } catch (error) {
+        // Never leave the side file: a cancelled upload must be invisible.
+        await unlinkAsync(sftp, partial).catch(() => undefined)
+        throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      }
     })
   }
 
@@ -470,6 +527,84 @@ function writeFileAsync(sftp: SFTPWrapper, path: string, data: Buffer): Promise<
       else resolve()
     })
   })
+}
+
+/**
+ * Pipe a readable request body into one remote file.
+ *
+ * Destroys the write stream on any failure so a half-written upload cannot sit
+ * on the wire after the response has already been sent, and counts bytes while
+ * they pass so the caller can report and cap the transfer.
+ *
+ * @param sftp - live SFTP session.
+ * @param path - absolute remote destination.
+ * @param source - request body stream.
+ * @param maxBytes - ceiling in bytes.
+ * @returns the byte count written.
+ */
+function streamIntoFile(
+  sftp: SFTPWrapper,
+  path: string,
+  source: NodeJS.ReadableStream,
+  maxBytes: number,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const out = sftp.createWriteStream(path)
+    let bytes = 0
+    let settled = false
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      try {
+        out.destroy()
+      } catch {
+        // Already closed: the original error is the one worth reporting.
+      }
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    source.on('data', (chunk: Buffer) => {
+      bytes += chunk.length
+      if (bytes > maxBytes) {
+        try {
+          source.pause()
+        } catch {
+          // A destroyed source is exactly what we want next.
+        }
+        fail(new Error(`upload exceeds the ${formatBytes(maxBytes)} limit`))
+      }
+    })
+    source.on('error', fail)
+    // A client that gives up (the explorer's ✕, a closed tab) never sends 'end',
+    // and without this the promise below never settles: the SFTP session stays
+    // held, every later operation on that host queues behind it, and the next
+    // `stat` looks like a dead host (2026-10-20: an aborted 64 MB upload made the
+    // following drop sit at "正在读取拖放内容…" forever).
+    const aborted = (): void => fail(new Error('upload aborted by the client'))
+    source.on('aborted', aborted)
+    source.on('close', () => {
+      // `complete` is false when the request ended before its body finished.
+      const complete = (source as unknown as { complete?: boolean }).complete
+      if (complete === false) aborted()
+    })
+    out.on('error', fail)
+    out.on('close', () => {
+      if (settled) return
+      settled = true
+      resolve(bytes)
+    })
+    source.pipe(out)
+  })
+}
+
+/** Human-facing size for an upload cap ("2 GiB", "16 KiB"). */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    const gib = bytes / (1024 * 1024 * 1024)
+    return `${gib % 1 === 0 ? gib : gib.toFixed(1)} GiB`
+  }
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MiB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`
+  return `${bytes} B`
 }
 
 /** Create (or truncate) an empty file without sending a zero-length WRITE. */
