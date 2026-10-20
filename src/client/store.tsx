@@ -272,6 +272,14 @@ export interface ExplorerValue {
   /** Switch to the search panel (optionally scoped to a folder) — the tree's
       "find in folder" entry point. */
   requestSearch: (request: { mode: 'name' | 'content'; query?: string; scope: string }) => void
+  /**
+   * The USER's pick — the workspace dropdowns and the wizard's "open files".
+   *
+   * Only this entry point records a choice: it is what lets a pending follow
+   * know the user has taken over. Switches the plugin makes on its own (opening
+   * a file that lives in another binding, the follow itself) go through the
+   * store's internal auto path instead and never claim to be a choice.
+   */
   selectWorkspace: (id: string) => void
   /** Point git at a directory inside the workspace (repositories often live in
       a subdirectory of the binding rather than at its root). */
@@ -533,13 +541,35 @@ export function requestSearch(request: { mode: 'name' | 'content'; query?: strin
   setView('search')
 }
 
-/** Select the binding every view works against. */
+/**
+ * Select the binding every view works against — the USER's choice.
+ *
+ * This is the entry point the snapshot hands to the views (`ExplorerValue.
+ * selectWorkspace`), so every dropdown and the workspace wizard land here. It
+ * records the pick for the session on screen, which is what stops a follow that
+ * has not resolved yet from undoing it.
+ */
 export function selectWorkspace(id: string): void {
+  applyWorkspaceSelection(id, true)
+}
+
+/**
+ * Select a binding on the PLUGIN's own initiative, claiming nothing.
+ *
+ * Two callers: opening a file that belongs to another binding (the change
+ * panel, the click interceptor) and the follow itself. Neither is a statement
+ * about where the user wants to browse — clicking a changed file is "show me
+ * this result", not "I moved my workspace" — so a pending follow stays free to
+ * put the selection back on the session's binding afterwards.
+ */
+function selectWorkspaceAuto(id: string): void {
+  applyWorkspaceSelection(id, false)
+}
+
+/** Move the selection; `byUser` decides whether it is remembered as a choice. */
+function applyWorkspaceSelection(id: string, byUser: boolean): void {
   if (state.workspaceId === id) return
-  // Anything that is not the follow itself is a CHOICE (the dropdown, a click in
-  // the change panel, the workspace wizard): remember it for the session on
-  // screen so a resolution that lands later cannot undo it.
-  noteManualPick()
+  if (byUser) noteManualPick()
   patch({
     workspaceId: id,
     tabs: [],
@@ -578,28 +608,31 @@ let followedSession: string | undefined
 let followedBindingId: string | undefined
 
 /**
- * The registered session whose selection the user took over by hand.
+ * The registered session whose selection the USER took over by hand.
  *
  * "Follow once, then the user's choice stands" cannot be decided from
  * `followedSession` alone: a session whose workspace never resolved (a probe
  * that failed, a host that answers nothing) has no follow to remember, and the
  * retry keeps asking — so a resolution landing later would yank a selection the
- * user made in the meantime. Recorded when a selection moves that the follow
- * did not make, cleared when the session changes (a new seat re-follows).
+ * user made in the meantime.
+ *
+ * Recorded ONLY for an explicit user switch (the dropdowns, the workspace
+ * wizard). A selection the plugin moved on its own — clicking a changed file
+ * that lives in another binding, opening it from the reference interceptor — is
+ * "show me this result", not a browsing decision, and must not cancel a follow
+ * that is still resolving. Cleared when the session changes (a new seat
+ * re-follows).
  */
 let manualPickSession: string | undefined
 
-/** Set while the follow itself moves the selection (see `noteManualPick`). */
-let applyingFollow = false
-
 /**
- * Remember a selection the follow did not make.
+ * Remember an explicit user choice of workspace.
  *
- * Called from `selectWorkspace`; the two `let`s above live with the follow
- * narrative rather than next to the selector, so this stays a hoisted call.
+ * Called from the user entry point (`selectWorkspace`) only; the `let` above
+ * lives with the follow narrative rather than next to the selector, so this
+ * stays a hoisted call.
  */
 function noteManualPick(): void {
-  if (applyingFollow) return
   if (followSessionId !== undefined) manualPickSession = followSessionId
 }
 
@@ -656,8 +689,8 @@ let followFlight: { sessionId: string; promise: Promise<string | undefined> } | 
  * Idempotent and re-entrant by construction:
  *  - once the session has been followed, later calls answer the recorded
  *    binding without touching the network, so a manual pick stands;
- *  - a pick the user made BEFORE anything resolved stands just the same (see
- *    `manualPickSession`), so the retry can never undo a choice;
+ *  - a pick the USER made before anything resolved stands just the same (see
+ *    `manualPickSession`), so the retry can never undo an explicit choice;
  *  - while a resolution is in flight, concurrent callers share that one
  *    promise (the sidebar and the panel both trigger this);
  *  - an answer that arrives after the session changed is discarded.
@@ -741,19 +774,12 @@ async function resolveSessionWorkspace(
     if (cwd !== undefined && cwd !== '') decision = plan(cwd)
   }
   if (decision.action === 'keep') return undefined
-  // The user may have moved the selector WHILE this resolution was in flight:
+  // The user may have chosen a workspace WHILE this resolution was in flight:
   // a choice beats a late answer.
   if (followSessionId !== sessionId || manualPickSession === sessionId) return undefined
   followedSession = decision.followedSession
   followedBindingId = decision.bindingId
-  if (state.workspaceId !== decision.bindingId) {
-    applyingFollow = true
-    try {
-      selectWorkspace(decision.bindingId)
-    } finally {
-      applyingFollow = false
-    }
-  }
+  if (state.workspaceId !== decision.bindingId) selectWorkspaceAuto(decision.bindingId)
   return decision.bindingId
 }
 
@@ -1061,7 +1087,9 @@ export function openRemoteFileInBinding(
 ): boolean {
   const binding = state.workspaces.find(item => item.id === bindingId)
   if (binding === undefined || remotePath === '') return false
-  if (state.workspaceId !== binding.id) selectWorkspace(binding.id)
+  // AUTO, not a user choice: clicking a result that lives in another binding
+  // must not cancel the session's pending follow (see `selectWorkspaceAuto`).
+  if (state.workspaceId !== binding.id) selectWorkspaceAuto(binding.id)
   openFile(remotePath, options)
   return true
 }
