@@ -227,11 +227,21 @@ export class SessionChanges {
       added: ledger.added,
       deleted: ledger.deleted,
       at: ledger.at,
-      // The slow scan counts as pending too. Without it, a turn whose only
-      // product is a NEW file would look like "nothing changed" for the minute
-      // the untracked walk needs — the panel would hide and the user would
-      // conclude the feature is broken, right up to the moment the row appears.
-      pending: ledger.pending || ledger.untrackedJob !== undefined,
+      /*
+       * What "pending" is allowed to mean to the panel.
+       *
+       * The slow scan counts even with an empty list: without it, a turn whose
+       * only product is a NEW file would look like "nothing changed" for the
+       * minutes the untracked walk needs, and the user would conclude the
+       * feature is broken right up to the moment the row appears.
+       *
+       * A quick scan does NOT count while there is nothing to show. The panel
+       * polls every few seconds and self-heals stale data, so counting it made
+       * the header flash "computing…" for two seconds every half minute in a
+       * session that had not touched a file yet, then vanish — a glitch with no
+       * information in it.
+       */
+      pending: ledger.untrackedJob !== undefined || (ledger.pending && ledger.files.length > 0),
       ...(ledger.truncated === true ? { truncated: true as const } : {}),
       ...(ledger.unavailable === undefined ? {} : { unavailable: ledger.unavailable }),
     }
