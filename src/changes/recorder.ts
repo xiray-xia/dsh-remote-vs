@@ -6,35 +6,52 @@
  * host path semantics and stages its scratch index through `node:fs`, so on a
  * routed session the first baseline snapshot fails and the recorder returns
  * before appending anything (measured: 58 remote-bound sessions, 390 fs
- * writes, zero `workspace/changes` events). This class is the same idea
- * re-expressed for a remote host: a session baseline tree, a current tree, and
- * `git diff <tree> <tree>` in between.
+ * writes, zero `workspace/changes` events).
  *
- * Two deliberate differences from the upstream recorder:
+ * This ledger re-expresses the idea for a remote host, and one measurement
+ * decided its shape. A first version snapshotted the worktree with `git add
+ * --all` into a private index; on a monorepo (AOSP, ~1M files) that never
+ * finished — it was still hashing two minutes in, and the panel sat at
+ * "computing…" forever. Everything here is therefore **read-only and
+ * proportional to the files that changed**, never to the size of the
+ * repository:
  *
- * - **Session baseline, not turn baseline.** The panel answers "what did this
- *   session touch", so it compares the first snapshot of the session with the
- *   latest one. A per-turn comparison is still available as `turn`.
- * - **Never on the turn's critical path.** Snapshots are queued in the
- *   background: a 40s `git add --all` on a monorepo must not delay a reply, and
- *   the panel already renders a "pending" state while one runs.
+ * 1. `git status --porcelain -uno` names the tracked files that differ (1.7s
+ *    measured), `git ls-files --others` names the new ones (11.3s measured,
+ *    run as its own best-effort exec).
+ * 2. Only those paths are read (their current text, and `HEAD:<path>` for the
+ *    ones the session started clean).
+ * 3. The diff itself is computed here, line by line, with no git call at all.
+ *
+ * Nothing in this file writes to the repository: no `git add`, no index, no
+ * object store, no temp files under the repo. "What changed" is answered by
+ * git's own stat cache; "what changed *since the session started*" is answered
+ * by keeping the pre-existing dirty files' contents at session start and
+ * treating an unchanged one as untouched.
  */
 
-import type { RemoteChangesDiff, RemoteChangedFile, RemoteChangesSummary, RemoteTimeouts } from '../protocol.ts'
+import type {
+  RemoteChangesDiff,
+  RemoteChangedFile,
+  RemoteChangesSummary,
+  RemoteTimeouts,
+  UnifiedHunk,
+} from '../protocol.ts'
 import type { RemotePool } from '../pool.ts'
 import type { RemoteWorlds, WorldRoute } from '../p2/worlds.ts'
-import { parseUnifiedDiff } from '../git-ops.ts'
 import {
-  SNAPSHOT_EXIT,
-  fileDiffCommand,
-  headTreeCommand,
-  parseNameStatus,
-  parseNumstat,
-  parseTreeId,
-  snapshotCommand,
-  splitDiffSections,
-  treeDiffCommand,
-} from './snapshot.ts'
+  parseReads,
+  parseStatusZ,
+  parseUntrackedZ,
+  readHeadCommand,
+  readWorktreeCommand,
+  trackedStatusCommand,
+  untrackedCommand,
+  type ChangeStatus,
+  type ReadResult,
+  type StatusEntry,
+} from './status.ts'
+import { diffText, hunkPatch } from './text-diff.ts'
 
 /** The two facts a turn boundary needs from a Session, kept cordis-free. */
 export interface LedgerTarget {
@@ -52,8 +69,38 @@ export interface SessionChangesDeps {
   log?: (level: 'info' | 'warn', message: string) => void
   /** Cap on listed files; the header totals stay whole. */
   maxFiles?: number
-  /** Cap on one file's git output, in bytes. */
-  maxDiffBytes?: number
+  /** Cap on one file's text, in bytes. */
+  maxFileBytes?: number
+  /** Cap on one refresh's total text, in bytes. */
+  maxTotalBytes?: number
+  /** Budget for the untracked scan, which is an order of magnitude slower. */
+  untrackedBudgetMs?: number
+  /** How often the untracked scan may run again (default five seconds). */
+  untrackedRefreshMs?: number
+}
+
+/** A status letter the panel can paint (untracked has no git letter of its own). */
+type PanelStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U'
+
+/**
+ * Map a scan entry onto the panel's vocabulary.
+ *
+ * `?` means "git does not track this path yet", which for a review panel is
+ * exactly a new file — the same thing `A` says for a staged addition.
+ */
+function panelStatus(status: ChangeStatus): PanelStatus | undefined {
+  return status === '?' ? 'A' : status
+}
+
+/** One file as the panel and the editor need it, with both sides kept for hunks. */
+interface FileRecord {
+  display: string
+  path: string
+  status: PanelStatus | undefined
+  before: string | null
+  after: string | null
+  binary: boolean
+  truncated: boolean
 }
 
 /** One session's bookkeeping. */
@@ -61,22 +108,33 @@ interface Ledger {
   sessionId: string
   alias: string
   root: string
-  scratch: string
-  /** Tree of the session's first snapshot (the comparison baseline). */
-  baseTree?: string
-  /** Tree of the latest snapshot. */
-  lastTree?: string
+  /** Content of every path that was ALREADY dirty when the session began. */
+  baseline: Map<string, ReadResult> | undefined
+  baselineTaken: boolean
+  /** Set once the untracked scan proves unusable on this host; stops retrying it. */
+  untrackedGivenUp: boolean
+  /** Latest tracked scan (cheap, refreshed every turn). */
+  tracked: StatusEntry[]
+  /** Latest untracked scan; undefined until the first one lands. */
+  untracked: StatusEntry[] | undefined
+  /** When the last untracked scan STARTED, for the cadence. */
+  untrackedAt: number
+  /** How long the last completed untracked scan took, for the cadence. */
+  untrackedMs: number | undefined
+  /** In-flight untracked scan, so a turn boundary cannot start a second one. */
+  untrackedJob: Promise<void> | undefined
   turn: number
   files: RemoteChangedFile[]
+  records: Map<string, FileRecord>
   added: number
   deleted: number
   truncated: true | undefined
   at: number
   unavailable: string | undefined
+  /** A scan is running right now; the list will refresh. */
   pending: boolean
   /** Serialized background work; a second schedule coalesces into one run. */
   queue: Promise<void>
-  /** A run was requested while one was queued/running. */
   dirty: boolean
   disposed: boolean
 }
@@ -87,11 +145,6 @@ function posixJoin(base: string, rel: string): string {
   const left = base.endsWith('/') ? base.slice(0, -1) : base
   const right = rel.startsWith('./') ? rel.slice(2) : rel
   return right === '' ? left : `${left}/${right}`
-}
-
-/** Trailing-slash-free absolute POSIX dir. */
-function posixDir(path: string): string {
-  return path.length > 1 && path.endsWith('/') ? path.replace(/\/+$/, '') : path
 }
 
 export class SessionChanges {
@@ -108,9 +161,9 @@ export class SessionChanges {
     if (this.disposed) return
     const ledger = this.ensure(target)
     if (ledger === undefined) return
-    // The baseline is only meaningful once per session; a failed attempt leaves
-    // `baseTree` unset and the next turn retries (a host may be briefly down).
-    if (ledger.baseTree === undefined) this.schedule(ledger)
+    // The baseline is only meaningful once per session. A failed attempt leaves
+    // it unset and the next turn retries (a host may be briefly down).
+    if (!ledger.baselineTaken) this.schedule(ledger)
   }
 
   /** Refresh the ledger at the end of a turn. */
@@ -143,6 +196,9 @@ export class SessionChanges {
   /**
    * Compare one listed file across the whole session.
    *
+   * Both sides were read once at the last refresh, so this never touches the
+   * host: opening a listed file stays instant even on a slow link.
+   *
    * @param sessionId - live session owning the ledger.
    * @param path - the file's remote absolute path (as listed in the summary).
    * @returns hunks for decorations, or null when the session/file is unknown.
@@ -150,53 +206,59 @@ export class SessionChanges {
   async diff(sessionId: string, path: string): Promise<RemoteChangesDiff | null> {
     const ledger = this.ledgers.get(sessionId)
     if (ledger === undefined) return null
-    const listed = ledger.files.find(file => file.path === path)
-    if (listed === undefined) return null
-    const base = ledger.baseTree
-    const last = ledger.lastTree
-    if (base === undefined || last === undefined) return null
-    const status = listed.status
-    if (listed.binary === true) {
-      return { kind: 'binary', path, display: listed.display, hunks: [], ...(status === undefined ? {} : { status }) }
+    const record = ledger.records.get(path)
+    if (record === undefined) return null
+    const status = record.status
+    if (record.binary) {
+      return { kind: 'binary', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
     }
-    const result = await this.run(ledger.alias, fileDiffCommand(ledger.root, ledger.scratch, base, last, listed.display))
-    if (!result.ok) return null
-    const capped = this.capBytes(result.stdout)
-    const files = parseUnifiedDiff(capped.text)
-    const block = files.find(file => file.path === listed.display || file.path === path) ?? files[0]
-    if (block === undefined) return { kind: 'missing', path, display: listed.display, hunks: [], ...(status === undefined ? {} : { status }) }
+    const result = diffText(record.before ?? '', record.after ?? '')
+    const hunks: UnifiedHunk[] = result.hunks.map(hunk => ({
+      oldStart: hunk.oldStart,
+      oldCount: hunk.oldLines,
+      newStart: hunk.newStart,
+      newCount: hunk.newLines,
+      heading: '',
+      lines: hunk.lines,
+      // The client hands this straight to `git apply -R` for "revert this
+      // change", so it must be a real patch, not a display artifact.
+      patch: hunkPatch(record.display, hunk),
+    }))
+    if (hunks.length === 0) {
+      return { kind: 'missing', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
+    }
     return {
       kind: 'text',
       path,
-      display: listed.display,
-      hunks: block.hunks,
+      display: record.display,
+      hunks,
       ...(status === undefined ? {} : { status }),
-      ...(capped.truncated ? { truncated: true as const } : {}),
+      ...(record.truncated ? { truncated: true as const } : {}),
     }
   }
 
-  /**
-   * Resolve once every queued refresh has settled, including work that was
-   * coalesced while one was running.
-   *
-   * The turn boundaries only ever queue background work, so this is what a test
-   * (or a shutdown path that wants quiescence) waits on.
-   */
+  /** Resolve once every queued refresh has settled, including coalesced work. */
   async settled(): Promise<void> {
     for (let guard = 0; guard < 100; guard += 1) {
       await Promise.all([...this.ledgers.values()].map(ledger => ledger.queue))
-      if (![...this.ledgers.values()].some(ledger => ledger.pending)) return
+      // The untracked scan deliberately runs outside the queue (it can take a
+      // minute); "settled" has to include it or a caller would read a list that
+      // is about to change.
+      const jobs = [...this.ledgers.values()]
+        .map(ledger => ledger.untrackedJob)
+        .filter((job): job is Promise<void> => job !== undefined)
+      if (jobs.length > 0) await Promise.all(jobs)
+      const busy = [...this.ledgers.values()].some(ledger => ledger.pending || ledger.untrackedJob !== undefined)
+      if (!busy) return
     }
   }
 
-  /** Drop one session's ledger and its remote scratch directory. */
-  forget(sessionId: string): void {    const ledger = this.ledgers.get(sessionId)
+  /** Drop one session's ledger. */
+  forget(sessionId: string): void {
+    const ledger = this.ledgers.get(sessionId)
     if (ledger === undefined) return
     this.ledgers.delete(sessionId)
     ledger.disposed = true
-    void this.deps.pool
-      .exec(ledger.alias, `rm -rf ${quote(ledger.scratch)} 2>/dev/null || true`, { timeoutMs: 10_000 })
-      .catch(() => undefined)
   }
 
   /** Release every ledger (plugin unmount). */
@@ -205,16 +267,27 @@ export class SessionChanges {
     for (const sessionId of [...this.ledgers.keys()]) this.forget(sessionId)
   }
 
+  /**
+   * Force a fresh pass, ignoring the untracked cadence.
+   *
+   * The panel's refresh button calls this: the cadence exists so a slow scan
+   * does not run on every turn, but "I clicked refresh" means the user wants
+   * the truth now — including files that appeared seconds ago.
+   */
+  rescan(sessionId: string): void {
+    const ledger = this.ledgers.get(sessionId)
+    if (ledger === undefined || ledger.disposed) return
+    ledger.untrackedAt = 0
+    this.schedule(ledger)
+  }
+
   // ------------------------------------------------------------- internals
 
   /** Resolve the routing target once per session, caching the ledger. */
   private ensure(target: LedgerTarget): Ledger | undefined {
     if (target.cwd.trim() === '') return undefined
     const existing = this.ledgers.get(target.sessionId)
-    if (existing !== undefined && !existing.disposed) {
-      if (existing.root !== '' && existing.alias !== '') return existing
-      this.ledgers.delete(target.sessionId)
-    }
+    if (existing !== undefined && !existing.disposed && existing.root !== '') return existing
     let route: WorldRoute
     try {
       route = this.deps.worlds.routeDir(target.cwd)
@@ -228,15 +301,24 @@ export class SessionChanges {
       this.ledgers.delete(target.sessionId)
       return undefined
     }
-    const root = posixDir(route.remotePath)
-    const scratch = `/tmp/dsh-rvsnap-${target.sessionId.replace(/[^A-Za-z0-9]/g, '').slice(-12)}`
+    const root = route.remotePath.length > 1 && route.remotePath.endsWith('/')
+      ? route.remotePath.replace(/\/+$/, '')
+      : route.remotePath
     const ledger: Ledger = {
       sessionId: target.sessionId,
       alias: route.alias,
       root,
-      scratch,
+      baseline: undefined,
+      baselineTaken: false,
+      untrackedGivenUp: false,
+      tracked: [],
+      untracked: undefined,
+      untrackedAt: 0,
+      untrackedMs: undefined,
+      untrackedJob: undefined,
       turn: 0,
       files: [],
+      records: new Map(),
       added: 0,
       deleted: 0,
       truncated: undefined,
@@ -271,161 +353,237 @@ export class SessionChanges {
       })
   }
 
-  /** Take the snapshots this ledger needs and recompute the file list. */
+  /**
+   * One refresh: the cheap scan first, then the slow one in the background.
+   *
+   * The split is not cosmetic. On the reference monorepo `git status -uno`
+   * answers in ~3s while `git ls-files --others` needs over a minute, so a
+   * single sequential refresh would leave the panel empty for that whole
+   * minute even though the tracked changes were known after three seconds.
+   * Phase one publishes, phase two adds the new files when (and if) it lands.
+   */
   private async refresh(ledger: Ledger): Promise<void> {
-    if (ledger.disposed || ledger.root === '' || ledger.alias === '') return
-    const budget = this.execBudget()
-    // 1. Baseline: the session's first tree. Degrades to HEAD so a repository
-    // whose working tree was already dirty still shows *something* useful, and
-    // only then reports "unavailable".
-    if (ledger.baseTree === undefined) {
-      const baseline = await this.snapshot(ledger, budget)
-      if (baseline.ok) {
-        // First observation of the session: the baseline IS the current state,
-        // so there is nothing to compare yet. Taking a second snapshot right
-        // after the first would double the first turn's round trips and could
-        // only ever report "no changes".
-        ledger.baseTree = baseline.tree
-        ledger.lastTree = baseline.tree
-        ledger.files = []
-        ledger.added = 0
-        ledger.deleted = 0
-        ledger.truncated = undefined
-        ledger.at = Date.now()
-        return
-      }
-      const head = await this.treeOfHead(ledger, budget)
-      if (head === undefined) {
-        ledger.unavailable = baseline.reason
-        return
-      }
-      ledger.baseTree = head
-      this.warn(`baseline snapshot failed (${baseline.reason}); comparing against HEAD instead`)
-    }
-    // 2. Current tree.
-    const current = await this.snapshot(ledger, budget)
+    if (ledger.disposed || ledger.root === '') return
+    const tracked = await this.scanTracked(ledger)
+    if (ledger.disposed || tracked === undefined) return
+    ledger.tracked = tracked
+    await this.publish(ledger)
+    void this.kickUntracked(ledger)
+  }
+
+  /** Recompute the panel's list from the scans currently known. */
+  private async publish(ledger: Ledger): Promise<void> {
     if (ledger.disposed) return
-    if (!current.ok) {
-      ledger.unavailable = current.reason
-      return
+    const merged = new Map<string, StatusEntry>()
+    for (const entry of ledger.tracked) merged.set(entry.path, entry)
+    for (const entry of ledger.untracked ?? []) {
+      if (!merged.has(entry.path)) merged.set(entry.path, entry)
     }
-    ledger.lastTree = current.tree
-    ledger.unavailable = undefined
-    if (ledger.baseTree === current.tree) {
+    const entries = [...merged.values()].sort((left, right) => left.path.localeCompare(right.path))
+    const cap = this.deps.maxFiles ?? 500
+    const listed = entries.slice(0, cap)
+    const truncated = entries.length > cap
+
+    if (!ledger.baselineTaken) {
+      // First observation: everything dirty RIGHT NOW predates this ledger, so
+      // it becomes the baseline rather than a change to report.
+      ledger.baseline = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
+      if (ledger.disposed) return
+      ledger.baselineTaken = true
       ledger.files = []
+      ledger.records = new Map()
       ledger.added = 0
       ledger.deleted = 0
-      ledger.truncated = undefined
+      ledger.truncated = truncated ? true : undefined
       ledger.at = Date.now()
       return
     }
-    // 3. What changed between the two trees.
-    const listed = await this.run(ledger.alias, treeDiffCommand(ledger.root, ledger.scratch, ledger.baseTree, current.tree))
-    if (!listed.ok) {
-      ledger.unavailable = listed.reason
-      return
-    }
-    this.applyListing(ledger, listed.stdout)
-  }
 
-  /** Convert one numstat/name-status reply into the ledger's file list. */
-  private applyListing(ledger: Ledger, stdout: string): void {
-    const sections = splitDiffSections(stdout)
-    const rows = parseNumstat(sections.numstat)
-    const statuses = parseNameStatus(sections.nameStatus)
+    const baseline = ledger.baseline ?? new Map<string, ReadResult>()
+    // `before` comes from the session baseline when the file was already dirty,
+    // and from HEAD when the session started with it clean; `after` is always
+    // the worktree as it is now.
+    const fromHead = listed.filter(entry => !baseline.has(entry.path)).map(entry => entry.path)
+    const head = fromHead.length === 0 ? new Map<string, ReadResult>() : await this.readPaths(ledger, fromHead, 'head')
+    const after = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
+    if (ledger.disposed) return
+
+    const records = new Map<string, FileRecord>()
     const files: RemoteChangedFile[] = []
     let added = 0
     let deleted = 0
-    for (const row of rows) {
-      added += row.added
-      deleted += row.deleted
-      const status = statuses.get(row.path)
+    for (const entry of listed) {
+      const beforeSide = baseline.get(entry.path) ?? head.get(entry.path)
+      const afterSide = after.get(entry.path)
+      const before = beforeSide?.text ?? null
+      const afterText = afterSide?.text ?? null
+      const binary = beforeSide?.binary === true || afterSide?.binary === true
+      const fileTruncated = beforeSide?.truncated === true || afterSide?.truncated === true
+      const gone = beforeSide?.absent === true && afterSide?.absent === true
+      // A path still listed by git but byte-identical to the session baseline is
+      // pre-existing dirt, not this session's work.
+      if (gone) continue
+      if (!binary && !fileTruncated && before === afterText) continue
+      const diff = binary ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
+      const status = panelStatus(entry.status)
+      const absolute = posixJoin(ledger.root, entry.path)
+      records.set(absolute, {
+        display: entry.path,
+        path: absolute,
+        status,
+        before,
+        after: afterText,
+        binary,
+        truncated: fileTruncated,
+      })
+      added += diff.added
+      deleted += diff.deleted
       files.push({
-        path: posixJoin(ledger.root, row.path),
-        display: row.path,
-        added: row.added,
-        deleted: row.deleted,
-        ...(row.binary ? { binary: true as const } : {}),
+        path: absolute,
+        display: entry.path,
+        added: diff.added,
+        deleted: diff.deleted,
+        ...(binary ? { binary: true as const } : {}),
         ...(status === undefined ? {} : { status }),
       })
     }
     files.sort((left, right) => left.display.localeCompare(right.display))
-    const cap = this.deps.maxFiles ?? 500
-    ledger.files = files.length > cap ? files.slice(0, cap) : files
-    ledger.truncated = files.length > cap ? true : undefined
+    ledger.records = records
+    ledger.files = files
     ledger.added = added
     ledger.deleted = deleted
+    ledger.truncated = truncated ? true : undefined
+    ledger.unavailable = undefined
     ledger.at = Date.now()
   }
 
-  /** Take one snapshot, mapping the script's exit codes to a reason. */
-  private async snapshot(ledger: Ledger, budget: number): Promise<{ ok: true; tree: string } | { ok: false; reason: string }> {
-    const result = await this.run(ledger.alias, snapshotCommand(ledger.root, ledger.scratch), budget)
-    if (!result.ok) return { ok: false, reason: result.reason }
-    const tree = parseTreeId(result.stdout)
-    if (tree === undefined) return { ok: false, reason: `snapshot produced no tree id${result.stderr === '' ? '' : ` (${firstLine(result.stderr)})`}` }
-    return { ok: true, tree }
+  /**
+   * The cheap scan: tracked files whose working-tree bytes differ from the
+   * index (1.4s measured on the reference monorepo).
+   *
+   * @returns entries relative to the session root, or undefined when the root
+   *   is not a usable repository (the ledger then reports why).
+   */
+  private async scanTracked(ledger: Ledger): Promise<StatusEntry[] | undefined> {
+    const tracked = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+    if (!tracked.ok) {
+      ledger.unavailable = tracked.reason
+      return undefined
+    }
+    ledger.unavailable = undefined
+    return parseStatusZ(tracked.stdout)
   }
 
-  /** `HEAD^{tree}`, the degraded baseline for a repository with no snapshot yet. */
-  private async treeOfHead(ledger: Ledger, budget: number): Promise<string | undefined> {
-    const result = await this.run(ledger.alias, headTreeCommand(ledger.root), budget)
-    if (!result.ok) return undefined
-    return parseTreeId(result.stdout)
+  /**
+   * The slow scan: new files, in the background.
+   *
+   * Measured at 11s on a warm tree and 71s on the same monorepo cold, so it never
+   * runs inline with the tracked scan, never runs twice at once, and only runs
+   * again after {@link untrackedRefreshMs}. A repo that cannot answer inside the
+   * budget is written off for the session (`untrackedGivenUp`) instead of being
+   * retried every turn.
+   */
+  private async kickUntracked(ledger: Ledger): Promise<void> {
+    if (ledger.disposed || ledger.untrackedGivenUp || ledger.untrackedJob !== undefined) return
+    if (ledger.untracked !== undefined && Date.now() - ledger.untrackedAt < this.untrackedCadence(ledger)) return
+    ledger.untrackedAt = Date.now()
+    const job = (async () => {
+      const started = Date.now()
+      const scan = await this.run(ledger.alias, untrackedCommand(ledger.root), this.untrackedBudget())
+      ledger.untrackedMs = Date.now() - started
+      if (ledger.disposed) return
+      if (!scan.ok) {
+        ledger.untrackedGivenUp = true
+        this.warn(`untracked scan unusable (${scan.reason}); new files will not be listed`)
+        return
+      }
+      ledger.untracked = parseUntrackedZ(scan.stdout)
+      // A completed scan is worth one more publish: it is the only source of
+      // "a file appeared" rows.
+      await this.publish(ledger)
+    })()
+      .catch(error => this.warn(`untracked scan failed: ${messageOf(error)}`))
+      .finally(() => { ledger.untrackedJob = undefined })
+    ledger.untrackedJob = job
+  }
+
+  /**
+   * How long before the untracked scan may run again.
+   *
+   * Self-tuning on purpose: the same command costs ~0.2s in a small repository
+   * and over a minute in a monorepo, so a fixed cadence is either wasteful or
+   * useless. Backing off to four times the last duration keeps small projects
+   * near-real-time while a big one settles into a scan every couple of minutes
+   * instead of one per turn.
+   */
+  private untrackedCadence(ledger: Ledger): number {
+    const configured = this.deps.untrackedRefreshMs
+    if (configured !== undefined) return configured
+    const last = ledger.untrackedMs
+    if (last === undefined) return 0
+    return Math.max(5_000, Math.min(last * 4, 120_000))
+  }
+
+  /** Read a batch of files, capped per file and in total. */
+  private async readPaths(
+    ledger: Ledger,
+    paths: readonly string[],
+    side: 'worktree' | 'head',
+  ): Promise<Map<string, ReadResult>> {
+    if (paths.length === 0) return new Map()
+    const perFile = this.deps.maxFileBytes ?? 256 * 1024
+    const total = this.deps.maxTotalBytes ?? 8 * 1024 * 1024
+    const command = side === 'worktree'
+      ? readWorktreeCommand(ledger.root, paths, perFile, total)
+      : readHeadCommand(ledger.root, paths, perFile, total)
+    const result = await this.run(ledger.alias, command)
+    if (!result.ok) {
+      // A failed read is not fatal: the affected files report a truncated side
+      // and the next turn retries.
+      this.warn(`read failed (${side}): ${result.reason}`)
+      return new Map()
+    }
+    return parseReads(result.stdout)
   }
 
   /** Run one command on the host, normalizing failure into a reason string. */
   private async run(alias: string, command: string, budget = this.execBudget()): Promise<
-    { ok: true; stdout: string; stderr: string } | { ok: false; reason: string; stderr: string }
+    { ok: true; stdout: string } | { ok: false; reason: string }
   > {
     try {
       const result = await this.deps.pool.exec(alias, command, { timeoutMs: budget })
       const stdout = typeof result.stdout === 'string' ? result.stdout : ''
+      if (result.success) return { ok: true, stdout }
       const stderr = typeof result.stderr === 'string' ? result.stderr : ''
-      if (result.success) return { ok: true, stdout, stderr }
-      return { ok: false, reason: this.reasonOf(result.exitCode, stderr), stderr }
+      return { ok: false, reason: this.reasonOf(result.exitCode, stderr) }
     } catch (error) {
-      return { ok: false, reason: `host unreachable: ${messageOf(error)}`, stderr: '' }
+      return { ok: false, reason: `host unreachable: ${messageOf(error)}` }
     }
   }
 
-  /** Turn a failed snapshot exit code into something a user can act on. */
+  /** Turn a failed scan into something a user can act on. */
   private reasonOf(exitCode: number | null | undefined, stderr: string): string {
-    switch (exitCode) {
-      case SNAPSHOT_EXIT.noRoot:
-        return 'session directory is missing on the host'
-      case SNAPSHOT_EXIT.noScratch:
-        return 'cannot create the snapshot directory under /tmp'
-      case SNAPSHOT_EXIT.noRepo:
-        return 'not a git repository (change tracking needs git)'
-      case SNAPSHOT_EXIT.noTree:
-        return 'git write-tree failed'
-      case SNAPSHOT_EXIT.addFailed:
-        // The dominant cause on a monorepo: `git add --all` outran the budget.
-        return `snapshot failed or timed out${stderr === '' ? '' : ` (${firstLine(stderr)})`}`
-      default:
-        return exitCode === null || exitCode === undefined
-          ? 'snapshot did not finish (timeout or connection loss)'
-          : `snapshot failed (exit ${exitCode})${stderr === '' ? '' : ` (${firstLine(stderr)})`}`
+    if (exitCode === 93) return 'not a git repository (change tracking needs git)'
+    if (exitCode === 90) return 'session directory is missing on the host'
+    if (exitCode === 124 || exitCode === null || exitCode === undefined) {
+      return `git did not answer in time${stderr === '' ? '' : ` (${firstLine(stderr)})`}`
     }
+    return `git failed (exit ${exitCode})${stderr === '' ? '' : ` (${firstLine(stderr)})`}`
   }
 
-  /** One exec's budget: the git setting, clamped so a hung host cannot pile up jobs. */
+  /** One exec's budget: the git setting, clamped so a hung host cannot pile up work. */
   private execBudget(): number {
-    let configured = 30_000
-    try {
-      configured = this.deps.timeouts().gitMs
-    } catch {
-      // Keep the default.
-    }
-    if (!Number.isFinite(configured) || configured <= 0) configured = 30_000
-    return Math.max(5_000, Math.min(configured, 120_000))
+    return this.budget(this.deps.timeouts().gitMs, 5_000, 60_000)
   }
 
-  private capBytes(text: string): { text: string; truncated: boolean } {
-    const cap = this.deps.maxDiffBytes ?? 2 * 1024 * 1024
-    if (Buffer.byteLength(text, 'utf8') <= cap) return { text, truncated: false }
-    return { text: text.slice(0, cap), truncated: true }
+  /** The untracked scan gets its own, more generous budget. */
+  private untrackedBudget(): number {
+    return this.deps.untrackedBudgetMs ?? this.budget(this.deps.timeouts().gitMs, 10_000, 90_000)
+  }
+
+  private budget(configured: number, floor: number, ceiling: number): number {
+    const value = Number.isFinite(configured) && configured > 0 ? configured : 30_000
+    return Math.max(floor, Math.min(value, ceiling))
   }
 
   private warn(message: string): void {
@@ -435,11 +593,6 @@ export class SessionChanges {
       // Logging must never break a turn.
     }
   }
-}
-
-/** POSIX single-quote for the cleanup command. */
-function quote(word: string): string {
-  return `'${word.replace(/'/g, `'\\''`)}'`
 }
 
 function firstLine(text: string): string {

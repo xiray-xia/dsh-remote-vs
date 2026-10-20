@@ -77,10 +77,10 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const alive = useRef(true)
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (force = false): Promise<void> => {
     if (sessionId === undefined || sessionId === '') return
     try {
-      const next = await api.changes.list(sessionId)
+      const next = await api.changes.list(sessionId, force)
       if (!alive.current) return
       setSummary(next)
       setError(undefined)
@@ -202,7 +202,7 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
         <button
           type="button"
           className="rvs-changes-refresh"
-          onClick={() => { void load() }}
+          onClick={() => { void load(true) }}
           title={t('changes.refresh')}
         >⟳</button>
       </div>

@@ -548,6 +548,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (op === 'list') {
+          // `force` runs the slow untracked scan now instead of waiting for the
+          // cadence — which is what the panel's refresh button means.
+          if (body?.force === true) ledger.rescan(sessionId)
           writeJson(res, 200, { summary: ledger.summary(sessionId) })
           return
         }

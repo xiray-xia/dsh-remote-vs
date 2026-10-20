@@ -253,8 +253,10 @@ export const api = {
    * is opened for review.
    */
   changes: {
-    list: (sessionId: string) =>
-      post<{ summary: RemoteChangesSummary | null }>(REMOTE_API.changes, { op: 'list', sessionId })
+    list: (sessionId: string, force = false) =>
+      post<{ summary: RemoteChangesSummary | null }>(REMOTE_API.changes, force
+        ? { op: 'list', sessionId, force: true }
+        : { op: 'list', sessionId })
         .then(r => r.summary ?? null),
     diff: (sessionId: string, path: string) =>
       post<{ diff: RemoteChangesDiff | null }>(REMOTE_API.changes, { op: 'diff', sessionId, path })

@@ -21,8 +21,20 @@
   --rvs-chg-info: #58a6ff;
 
   box-sizing: border-box;
-  width: 100%;
-  margin: 0 0 6px;
+  /*
+   * 与输入卡左右对齐。
+   *
+   * 这个面板是 composerStack 的直接子元素，而输入卡住在自己的包装层里
+   * （`.uV2eYG_root`：左右各 `--dsh-composer-side-clearance`），卡片本身
+   * `width:100%; max-width: var(--dsh-composer-card-max-width)` 且居中。所以这里
+   * 必须自己把那圈内缩和上限抄一遍，否则就是「面板通栏、输入卡内缩」。
+   * 两个变量都由 shell 定义在 `.wSkVaW_body` 上（嵌入态有另一组值），回退值只
+   * 兜住宿主没有这套变量的老版本。
+   */
+  width: calc(100% - 2 * var(--dsh-composer-side-clearance, 16px));
+  max-width: var(--dsh-composer-card-max-width, 920px);
+  /* composerStack 本身已有 gap，这里不要再叠下边距。 */
+  margin: 0 auto;
   border: 1px solid var(--rvs-chg-border);
   border-radius: 8px;
   background-color: var(--rvs-chg-surface);
