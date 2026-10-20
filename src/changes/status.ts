@@ -365,6 +365,32 @@ export function readHeadCommand(
 }
 
 /**
+ * Name every immediate subdirectory that is a git repository.
+ *
+ * A session working directory is often a CONTAINER for repositories (the
+ * reference host has `/srv/workbase` holding `app-web`), and
+ * `git status` at the container answers 128. This is a one-level `ls`-style
+ * probe — bounded work, no `find` — so it can never become the expensive part
+ * of a scan.
+ *
+ * It prints ALL matches on purpose: a workspace with several repositories has no
+ * single right answer, and the caller must refuse to guess rather than pick the
+ * first one. The SCM panel's explicit repository directory is the real answer.
+ *
+ * @param root - remote absolute POSIX directory (the session cwd).
+ */
+export function reposBelowCommand(root: string): string {
+  return [
+    'set -u',
+    `cd ${shq(root)} || exit ${READ_EXIT.noRoot}`,
+    'for rvs_d in */; do',
+    '  [ -d "$rvs_d/.git" ] || continue',
+    '  printf \'%s\\n\' "${rvs_d%/}"',
+    'done',
+  ].join('\n')
+}
+
+/**
  * Parse a {@link readWorktreeCommand} / {@link readHeadCommand} reply.
  *
  * Keys are the decoded paths, exactly as requested. A marker without its

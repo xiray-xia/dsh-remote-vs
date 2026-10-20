@@ -45,6 +45,7 @@ import {
   parseUntrackedZ,
   readHeadCommand,
   readWorktreeCommand,
+  reposBelowCommand,
   trackedStatusCommand,
   untrackedCommand,
   type ChangeStatus,
@@ -130,6 +131,12 @@ interface Ledger {
   startedAt: number
   /** True once the first untracked result has been folded into the baseline. */
   absorbed: boolean
+  /** True once a repository below the session root has been looked for. */
+  adoptedSubdir: boolean
+  /** The session root as first resolved; oot may be this plus subdir. */
+  baseRoot: string
+  /** Explicit repository directory inside the root ('' = the root itself). */
+  subdir: string
   /** Latest tracked scan (cheap, refreshed every turn). */
   tracked: StatusEntry[]
   /** Latest untracked scan; undefined until the first one lands. */
@@ -353,6 +360,37 @@ export class SessionChanges {
     return true
   }
 
+  /**
+   * Point one ledger at a subdirectory of the session root.
+   *
+   * This is the Source Control panel's "repository directory": an explicit
+   * choice by the user, and therefore the authority whenever it is set. The
+   * automatic one-level probe is only a fallback for a container workspace that
+   * holds exactly one repository.
+   *
+   * @param subdir - workspace-relative directory, or undefined for the session
+   *   root itself. Absolute paths and `..` are refused: they would move the
+   *   ledger outside the workspace it was created for.
+   */
+  useRepoSubdir(sessionId: string, subdir: string | undefined): void {
+    const ledger = this.ledgers.get(sessionId)
+    if (ledger === undefined || ledger.disposed) return
+    const clean = normalizeRepoSubdir(subdir)
+    if (clean === ledger.subdir) return
+    ledger.subdir = clean
+    ledger.root = clean === '' ? ledger.baseRoot : `${ledger.baseRoot}/${clean}`
+    // The baseline describes the previous root; it means nothing for this one.
+    ledger.baseline = undefined
+    ledger.baselineTaken = false
+    ledger.adoptedSubdir = false
+    ledger.files = []
+    ledger.records = new Map()
+    ledger.added = 0
+    ledger.deleted = 0
+    ledger.at = 0
+    this.schedule(ledger)
+  }
+
   // ------------------------------------------------------------- internals
 
   /** Resolve the routing target once per session, caching the ledger. */
@@ -385,6 +423,9 @@ export class SessionChanges {
       untrackedGivenUp: false,
       startedAt: Date.now(),
       absorbed: false,
+      adoptedSubdir: false,
+      baseRoot: root,
+      subdir: '',
       tracked: [],
       untracked: undefined,
       untrackedAt: 0,
@@ -548,17 +589,67 @@ export class SessionChanges {
    * The cheap scan: tracked files whose working-tree bytes differ from the
    * index (1.4s measured on the reference monorepo).
    *
-   * @returns entries relative to the session root, or undefined when the root
-   *   is not a usable repository (the ledger then reports why).
+   * A session working directory is often a CONTAINER for repositories rather
+   * than one itself (the reference host has `/srv/workbase` holding
+   * `app-web`), and `git status` there answers exit 128 — "not a git
+   * repository (or any parent up to mount point /)". When that happens the
+   * ledger looks one level down once and adopts the repository it finds, which
+   * is the same idea the SCM panel's `repoSubdir` expresses by hand.
+   *
+   * @returns entries relative to the ledger's root, or undefined when no
+   *   repository could be found (the ledger then reports why).
    */
   private async scanTracked(ledger: Ledger): Promise<StatusEntry[] | undefined> {
     const tracked = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
-    if (!tracked.ok) {
-      ledger.unavailable = tracked.reason
+    if (tracked.ok) {
+      ledger.unavailable = undefined
+      return parseStatusZ(tracked.stdout)
+    }
+    if (!ledger.adoptedSubdir) {
+      const found = await this.adoptRepositoryBelow(ledger)
+      if (found !== undefined) {
+        const retry = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+        if (retry.ok) {
+          ledger.unavailable = undefined
+          return parseStatusZ(retry.stdout)
+        }
+        ledger.unavailable = retry.reason
+        return undefined
+      }
+    }
+    ledger.unavailable = tracked.reason
+    return undefined
+  }
+
+  /**
+   * Look for a repository in the session root's immediate subdirectories.
+   *
+   * **Only an unambiguous answer is adopted.** A workspace that holds several
+   * repositories has no single right one, and silently picking the first would
+   * report changes from a project the session never touched — worse than saying
+   * "I don't know". The explicit repository directory the Source Control panel
+   * stores is the real answer, and this fallback exists only to spare the user
+   * from setting it when there is exactly one candidate.
+   *
+   * @returns the adopted root, or undefined when nothing (or too much) was found.
+   */
+  private async adoptRepositoryBelow(ledger: Ledger): Promise<string | undefined> {
+    ledger.adoptedSubdir = true
+    const probe = await this.run(ledger.alias, reposBelowCommand(ledger.root))
+    if (!probe.ok) return undefined
+    const found = probe.stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '' && !line.includes('/') && line !== '.')
+    if (found.length === 0) return undefined
+    if (found.length > 1) {
+      ledger.unavailable = `no git repository at the workspace root, and ${found.length} candidates below it`
+        + ' — set the repository directory in Source Control'
       return undefined
     }
-    ledger.unavailable = undefined
-    return parseStatusZ(tracked.stdout)
+    ledger.root = `${ledger.root}/${found[0]}`
+    this.warn(`no repository at the session root; using ${ledger.root}`)
+    return ledger.root
   }
 
   /**
@@ -719,7 +810,8 @@ export class SessionChanges {
 
   /** Turn a failed scan into something a user can act on. */
   private reasonOf(exitCode: number | null | undefined, stderr: string): string {
-    if (exitCode === 93) return 'not a git repository (change tracking needs git)'
+    // 93 is this plugin's own guard; 128 is git's own "not a repository".
+    if (exitCode === 93 || exitCode === 128) return 'not a git repository (change tracking needs git)'
     if (exitCode === 90) return 'session directory is missing on the host'
     if (exitCode === 124 || exitCode === null || exitCode === undefined) {
       return `git did not answer in time${stderr === '' ? '' : ` (${firstLine(stderr)})`}`
@@ -766,6 +858,15 @@ export class SessionChanges {
 function firstLine(text: string): string {
   const line = text.split('\n').find(candidate => candidate.trim() !== '') ?? ''
   return line.trim().slice(0, 160)
+}
+
+/** Workspace-relative repository directory, or '' when the value is unusable. */
+function normalizeRepoSubdir(value: string | undefined): string {
+  if (value === undefined) return ''
+  const trimmed = value.trim().replace(/^\.\/+/, '').replace(/\/+$/, '')
+  if (trimmed === '' || trimmed === '.') return ''
+  if (trimmed.startsWith('/') || trimmed.includes('..')) return ''
+  return trimmed
 }
 
 function messageOf(error: unknown): string {

@@ -557,6 +557,11 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 200, { summary: null, diff: null })
           return
         }
+        // The repository directory the Source Control panel stores is an explicit
+        // user choice, so it outranks anything the ledger would infer.
+        if (typeof body?.repoSubdir === 'string' || body?.repoSubdir === null) {
+          ledger.useRepoSubdir(sessionId, typeof body.repoSubdir === 'string' ? body.repoSubdir : undefined)
+        }
         if (op === 'list') {
           // A session with no ledger yet is not a dead end. The ledger is created
           // by turn events, so a conversation that was already mid-turn when this

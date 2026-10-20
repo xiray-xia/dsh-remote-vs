@@ -24,6 +24,7 @@ import {
   followSessionWorkspace,
   openRemoteFileInBinding,
   refreshAll,
+  readRepoSubdir,
   remoteOpenBindings,
   useExplorer,
 } from '../store.tsx'
@@ -94,12 +95,20 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const alive = useRef(true)
   const currentSession = useRef(sessionId)
   currentSession.current = sessionId
+  // The Source Control panel's repository directory, resolved at call time: it is
+  // the user's explicit answer to "which repository in this workspace", and it
+  // outranks the host's one-level guess. A ref (not a value) so a change made
+  // while this panel is open is picked up by the next poll.
+  const repoSubdirOf = (): string => {
+    const id = explorer.workspaceId
+    return id === undefined || id === '' ? '' : readRepoSubdir(id)
+  }
 
   const load = useCallback(async (force = false): Promise<void> => {
     if (sessionId === undefined || sessionId === '') return
     const asked = sessionId
     try {
-      const next = await api.changes.list(asked, force)
+      const next = await api.changes.list(asked, force, repoSubdirOf())
       // Two guards: the panel may be gone, and the user may have switched
       // sessions while this was in flight — a late answer for the old session
       // must not be filed under the new one.
@@ -156,7 +165,7 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     if (sessionId === undefined || summary === null) return
     setBusy(file.path)
     try {
-      const diff = await api.changes.diff(sessionId, file.path)
+      const diff = await api.changes.diff(sessionId, file.path, repoSubdirOf())
       if (!alive.current) return
       const stamp = `${file.path}@${summary.at}@${summary.turn}`
       const set: ChangeSet = diff !== null && diff.kind === 'text'
