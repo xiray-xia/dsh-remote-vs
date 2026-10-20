@@ -31,6 +31,7 @@ import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
+import { bindingForRemoteFile, bindingForWorkspacePath, decideWorkspaceFollow } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 
@@ -553,6 +554,64 @@ export function selectWorkspace(id: string): void {
 }
 
 let searchSeq = 0
+
+/**
+ * The session whose binding the sidebar already followed (per page load).
+ *
+ * Module state, not a ref: the two surfaces that can trigger the follow (the
+ * sidebar and the change panel) must share it, or each would drag the selector
+ * to its own idea of the session's workspace on every repaint.
+ */
+let followedSession: string | undefined
+
+/**
+ * Point the workspace selector (and with it the tree, the editor's dropdown and
+ * the git panel) at the binding the session on screen works in.
+ *
+ * The user's complaint this exists for: opening a session in one remote
+ * workspace showed the sidebar on another — the selector kept whatever
+ * localStorage held (or the FIRST binding, on a fresh profile), and a click in
+ * the change panel matched its binding by alias alone, which is ambiguous as
+ * soon as one host carries two workspaces (repo-a and repo-b share `alias-a`).
+ *
+ * Resolution order, strongest evidence first:
+ *  1. `workspacePath` — the host's own workspace path for the session, which IS
+ *     the alias dir of exactly one binding (`bindingForWorkspacePath`);
+ *  2. `alias` + `remoteRoot` — what the change panel holds for the session
+ *     (`bindingForRemoteFile`), which disambiguates by REMOTE path.
+ *
+ * Called with neither, it does nothing: an unknown session must never move the
+ * selection, and must never fall back to "the first binding".
+ *
+ * Once per session: after the follow, a manual pick stands until another
+ * session takes the seat (see `decideWorkspaceFollow`).
+ *
+ * @returns the binding id that was selected, or `undefined` when nothing moved.
+ */
+export function followSessionWorkspace(options: {
+  sessionId: string | undefined
+  /** The session's host workspace path (the local alias dir), when known. */
+  workspacePath?: string | undefined
+  /** Host alias the session is routed to, when known. */
+  alias?: string | undefined
+  /** Absolute remote root of the session's workspace, when known. */
+  remoteRoot?: string | undefined
+}): string | undefined {
+  const table = remoteOpenBindings()
+  const binding = bindingForWorkspacePath(table, options.workspacePath)
+    ?? (options.alias === undefined && options.remoteRoot === undefined
+      ? undefined
+      : bindingForRemoteFile(table, { alias: options.alias, remoteRoot: options.remoteRoot }))
+  const decision = decideWorkspaceFollow({
+    sessionId: options.sessionId,
+    followedSession,
+    bindingId: binding?.id,
+  })
+  if (decision.action === 'keep') return undefined
+  followedSession = decision.followedSession
+  if (state.workspaceId !== decision.bindingId) selectWorkspace(decision.bindingId)
+  return decision.bindingId
+}
 
 /**
  * Point git at a directory inside the workspace. Repositories often live in a

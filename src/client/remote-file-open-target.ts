@@ -146,8 +146,14 @@ function aliasDirOf(table: RemoteOpenBindings, binding: RemoteOpenBinding): stri
   return typeof dir === 'string' && dir !== '' ? trimTrailing(slashes(dir)) : undefined
 }
 
-/** Binding whose local alias directory IS the given workspace path. */
-function bindingForWorkspace(
+/**
+ * Binding whose local alias directory IS the given workspace path.
+ *
+ * This is the session→binding gate: the host's `workspaces` list says which
+ * workspace a session belongs to, and that workspace path is the alias dir the
+ * routing layer materialized for exactly one binding. Exact match, no guessing.
+ */
+export function bindingForWorkspacePath(
   table: RemoteOpenBindings,
   workspacePath: string | undefined,
 ): RemoteOpenBinding | undefined {
@@ -158,6 +164,122 @@ function bindingForWorkspace(
     if (dir !== undefined && samePath(dir, target)) return binding
   }
   return undefined
+}
+
+/** True for a remote POSIX absolute path (the only spelling bindings use). */
+function isRemoteAbsolute(path: string | undefined): path is string {
+  return typeof path === 'string' && path.startsWith('/') && !path.startsWith('//')
+}
+
+/**
+ * The binding that owns one REMOTE path: the alias narrows the host, the remote
+ * path decides between the bindings on it.
+ *
+ * One alias routinely carries SEVERAL bindings (the same host mounted at
+ * `/home/user/repo-a/…` and `/home/user/repo-b/…`), so an alias-only match hands
+ * back whichever was created first: the editor then opens the file the caller
+ * named while the sidebar, the tree and the workspace selector stay on the
+ * other workspace. The remote root the caller already holds (`summary.root`, a
+ * session cwd) is therefore the deciding evidence — an exact root match wins,
+ * then the deepest binding root that contains the file, and only then the
+ * alias's first binding (the historical fallback, for a caller that knows
+ * nothing but the alias).
+ *
+ * @param table - client bindings plus their alias directories.
+ * @param options.alias - host alias, when known (a hard filter).
+ * @param options.remoteRoot - absolute remote workspace root, when known.
+ * @param options.filePath - absolute remote file path, when known.
+ * @returns the owning binding, or `undefined` when the alias matches nothing.
+ */
+export function bindingForRemoteFile(
+  table: RemoteOpenBindings,
+  options: { alias?: string | undefined; remoteRoot?: string | undefined; filePath?: string | undefined },
+): RemoteOpenBinding | undefined {
+  const alias = options.alias?.trim()
+  const pool = alias === undefined || alias === ''
+    ? [...table.bindings]
+    : table.bindings.filter(binding => binding.alias === alias)
+  if (pool.length === 0) return undefined
+
+  const root = options.remoteRoot === undefined ? '' : trimTrailing(slashes(options.remoteRoot))
+  if (root !== '') {
+    const exact = pool.find(binding => samePath(binding.remotePath, root))
+    if (exact !== undefined) return exact
+  }
+
+  const probe = isRemoteAbsolute(options.filePath)
+    ? options.filePath
+    : isRemoteAbsolute(options.remoteRoot) ? options.remoteRoot : undefined
+  if (probe !== undefined) {
+    let best: { binding: RemoteOpenBinding; length: number } | undefined
+    for (const binding of pool) {
+      const candidate = trimTrailing(binding.remotePath)
+      if (!contains(candidate, probe)) continue
+      if (best === undefined || candidate.length > best.length) best = { binding, length: candidate.length }
+    }
+    if (best !== undefined) return best.binding
+  }
+
+  return pool[0]
+}
+
+/**
+ * The binding one change-panel row belongs to.
+ *
+ * The panel holds the session's own remote root (`summary.root`) and the row's
+ * absolute remote path, which is exactly what separates two bindings sharing an
+ * alias. Keeping the three-field call in one named function is what the gate
+ * drives — the dock is a one-liner around it.
+ */
+export function bindingForChangedFile(
+  table: RemoteOpenBindings,
+  summary: { alias: string; root: string },
+  filePath: string,
+): RemoteOpenBinding | undefined {
+  return bindingForRemoteFile(table, { alias: summary.alias, remoteRoot: summary.root, filePath })
+}
+
+/** Why the workspace selector kept the binding it already had. */
+export type WorkspaceFollowHold =
+  /** No session is on screen (or the id is empty). */
+  | 'no-session'
+  /** This session was already followed: a later manual pick must stand. */
+  | 'already-followed'
+  /** The session's binding is not resolvable yet (table empty/stale). */
+  | 'unresolved'
+
+/** What the workspace selector should do about the session on screen. */
+export type WorkspaceFollowDecision =
+  | { action: 'keep'; reason: WorkspaceFollowHold }
+  | { action: 'select'; bindingId: string; followedSession: string }
+
+/**
+ * Decide whether the sidebar should switch to the binding a session works in.
+ *
+ * Pure, so the wiring (`selectWorkspace`) stays a one-liner in the store while
+ * the policy is drivable by the gate:
+ *  - a session is followed ONCE — after that the user's manual pick stands
+ *    until another session takes the seat (so the selector never yanks itself
+ *    back while the user is browsing another workspace);
+ *  - an unresolved binding keeps the CURRENT selection: a session whose
+ *    workspace is not in the table yet must not blank the sidebar or move it
+ *    somewhere arbitrary.
+ *
+ * @param options.sessionId - the session on screen, when known.
+ * @param options.followedSession - the session already followed, if any.
+ * @param options.bindingId - the binding resolved for that session, if any.
+ */
+export function decideWorkspaceFollow(options: {
+  sessionId: string | undefined
+  followedSession: string | undefined
+  bindingId: string | undefined
+}): WorkspaceFollowDecision {
+  const sessionId = options.sessionId
+  if (sessionId === undefined || sessionId === '') return { action: 'keep', reason: 'no-session' }
+  if (options.followedSession === sessionId) return { action: 'keep', reason: 'already-followed' }
+  const bindingId = options.bindingId
+  if (bindingId === undefined || bindingId === '') return { action: 'keep', reason: 'unresolved' }
+  return { action: 'select', bindingId, followedSession: sessionId }
 }
 
 /** Binding whose local alias directory CONTAINS the given host path. */
@@ -251,7 +373,7 @@ export function resolveRemoteOpenTarget(options: {
     return { binding, candidates: [remoteJoin(binding.remotePath, rel)] }
   }
 
-  const binding = bindingForWorkspace(options.table, options.sessionWorkspacePath)
+  const binding = bindingForWorkspacePath(options.table, options.sessionWorkspacePath)
   if (binding === undefined) return undefined
   const aliasDir = aliasDirOf(options.table, binding)
   if (aliasDir === undefined) return undefined

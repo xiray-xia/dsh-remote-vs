@@ -564,11 +564,12 @@ export class SessionChanges {
   /**
    * The slow scan: new files, in the background.
    *
-   * Measured at 11s on a warm tree and 71s on the same monorepo cold, so it never
-   * runs inline with the tracked scan, never runs twice at once, and only runs
-   * again after {@link untrackedRefreshMs}. A repo that cannot answer inside the
-   * budget is written off for the session (`untrackedGivenUp`) instead of being
-   * retried every turn.
+   * The same command costs ~11s on a warm tree and over a minute on a cold one,
+   * and on the reference AOSP monorepo it has been measured past 60s with no
+   * answer at all. It therefore never runs inline with the tracked scan, never
+   * runs twice at once, and only runs again after {@link untrackedCadence}. A
+   * repository that cannot answer inside {@link untrackedBudget} is written off
+   * for the session (`untrackedGivenUp`) rather than retried every turn.
    */
   private async kickUntracked(ledger: Ledger): Promise<void> {
     if (ledger.disposed || ledger.untrackedGivenUp || ledger.untrackedJob !== undefined) return
@@ -609,7 +610,9 @@ export class SessionChanges {
     if (configured !== undefined) return configured
     const last = ledger.untrackedMs
     if (last === undefined) return 0
-    return Math.max(5_000, Math.min(last * 4, 120_000))
+    // Twice the last duration, so a three-minute scan settles into one every six
+    // minutes instead of running back to back forever on a huge checkout.
+    return Math.max(5_000, Math.min(last * 2, 600_000))
   }
 
   /**
@@ -732,8 +735,18 @@ export class SessionChanges {
   }
 
   /** The untracked scan gets its own, more generous budget. */
+  /**
+   * The untracked scan gets its own, much more generous budget.
+   *
+   * Three minutes is a deliberate choice for a monorepo: the walk is proportional
+   * to the whole checkout, not to the session, and the reference AOSP tree has
+   * been measured past a minute cold. Waiting is acceptable here because the
+   * scan runs in the background and the tracked changes are already on screen;
+   * giving up early is not, because the files a session creates with a shell
+   * command are visible ONLY through this scan.
+   */
   private untrackedBudget(): number {
-    return this.deps.untrackedBudgetMs ?? this.budget(this.deps.timeouts().gitMs, 10_000, 90_000)
+    return this.deps.untrackedBudgetMs ?? this.budget(this.deps.timeouts().gitMs, 10_000, 180_000)
   }
 
   private budget(configured: number, floor: number, ceiling: number): number {
