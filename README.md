@@ -34,9 +34,13 @@ dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
 
 要求 DSH `0.2.1-alpha.3` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.1-rc.2`**）。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
-必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。首次安装按提示在
-该 profile 的 `pnpm-workspace.yaml` 里放行构建脚本后重跑；装完重启 `dsh web`，打开设置 →
-远程主机开配。
+必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。
+
+**这一条命令就够了，不需要放行任何构建脚本**：仓库里带着构建好的 `lib/`，包本身没有
+`prepare`/`postinstall`，依赖树里也没有任何带安装脚本的包（`ssh2` 是**打进产物**的，不是依赖）。
+以前需要「在 profile 的 `pnpm-workspace.yaml` 里放行构建脚本后重跑」，那是 pnpm 12 对
+「带安装脚本的依赖」的硬策略门（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`），
+依赖侧无法豁免，只能从树里消掉。装完重启 `dsh web`，打开设置 → 远程主机开配。
 
 ## 能力
 
@@ -281,6 +285,9 @@ dsh plugin --profile web add link:<本目录绝对路径>
 ```
 
 **改完怎么生效：`pnpm run build` 之后重启 `dsh web` —— host 半与客户端半都是。**
+**`lib/` 是入库的**：本包没有 `prepare`（pnpm 12 会拦），别人 `dsh plugin add github:…` 拿到的是仓库内容，
+所以**改完源码必须 `npm run build` 并把 `lib/` 一起提交**——`pnpm check` 的第一步
+（`scripts/verify-lib.mjs`）会在 `lib/` 没入库或加载即抛错时直接失败。
 Host 在启动时把插件包读进内存（`initialBundleSnapshot`：先记录 mtime/ctime/size 作为 rev，再读字节；
 响应头 `Cache-Control: public, max-age=31536000, immutable`），所以**只改 `src/client/**` 也一样**：
 浏览器刷新——包括 `Ctrl+Shift+R`——只会取回启动时抓下的那批字节，rev 不变。判定方法：

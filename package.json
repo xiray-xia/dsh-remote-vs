@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-vs",
   "description": "VSCode-style remote development for DSH: SSH host manager (key/password), helper deploy pipeline with version check, remote file explorer + editor + terminal in dsh-better-sidebar.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "icon": "icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -66,9 +66,7 @@
   },
   "files": [
     "lib/**/*.js",
-    "lib/**/*.js.map",
     "lib/**/*.d.ts",
-    "lib/**/*.d.ts.map",
     "src",
     "vendor/dsh-remote-helpers/*",
     "cordis.patch.yml",
@@ -113,7 +111,6 @@
     "@lezer/highlight": "1.2.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "ssh2": "^1.17.0",
     "ws": "^8.18.0",
     "zod": "4.4.3"
   },
@@ -164,14 +161,14 @@
     "jsdom": "^30.1.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "ssh2": "^1.17.0",
     "tsdown": "0.22.2",
     "typescript": "~5.7.2"
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
-    "prepare": "node scripts/verify-lib.mjs --quiet || pnpm run build",
     "verify:lib": "node scripts/verify-lib.mjs",
-    "check": "node scripts/check-changes.mjs && node scripts/check-ledger.mjs && node scripts/check-status.mjs && node scripts/check-text-diff.mjs && node scripts/check-workspace-follow.mjs && node scripts/check-scm-stage.mjs",
+    "check": "node scripts/verify-lib.mjs && node scripts/check-changes.mjs && node scripts/check-ledger.mjs && node scripts/check-status.mjs && node scripts/check-text-diff.mjs && node scripts/check-workspace-follow.mjs && node scripts/check-scm-stage.mjs",
     "bundle": "tsdown",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"

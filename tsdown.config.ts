@@ -135,6 +135,37 @@ export default [
     fixedExtension: false,
     dts: false,
     clean: false,
+    /**
+     * ssh2 is BUNDLED here, not installed as a dependency.
+     *
+     * pnpm 12 refuses an install while ANY package in the tree carries a
+     * lifecycle script it has not been allowed to run: ssh2 has
+     * `install: node install.js` and drags in the optional native
+     * `cpu-features`, so `dsh plugin --profile web add github:…` failed with
+     * `ERR_PNPM_IGNORED_BUILDS` until the user approved both by hand in the
+     * profile's `pnpm-workspace.yaml`. Measured: with ssh2 out of the tree and
+     * `lib/` committed, the same command completes with no `allowBuilds` entry
+     * at all. The install cannot be fixed from the dependency side —
+     * `dependenciesMeta: { built: false }` is ignored and `allowBuilds` is only
+     * read from the installing workspace.
+     *
+     * Both native requires inside ssh2 are already optional upstream
+     * (`try { require('cpu-features')() } catch {}` in `constants.js`,
+     * `try { require('./crypto/build/Release/sshcrypto.node') } catch {}` in
+     * `protocol/crypto.js`, and its `install.js` exits 0 when the build fails),
+     * so the pure-JS crypto path is what ships. They stay external so the
+     * bundler does not try to resolve artifacts that are never built here.
+     */
+    noExternal: ['ssh2'],
+    external: ['cpu-features', /sshcrypto\.node$/],
+    /**
+     * ssh2's CJS sources read `__dirname` at module scope (`agent.js` resolves
+     * its bundled `util/pagent.exe`), which does not exist in an ESM bundle —
+     * importing the host half threw `ReferenceError: __dirname is not defined`
+     * before this was on. Measured with `.spike/ssh2-smoke.mjs`, which drives a
+     * real host through the bundled copy.
+     */
+    shims: true,
   },
   {
     entry: { client: 'src/client/index.tsx' },

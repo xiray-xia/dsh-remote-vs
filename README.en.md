@@ -37,9 +37,16 @@ dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
 Requires DSH `0.2.1-alpha.3` or newer (`engines.dsh` enforces the range; **the tested
 baseline is `0.2.1-rc.2`**). `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
-the common name; use your own profile's name). On first install, allow the printed build
-scripts in that profile's `pnpm-workspace.yaml` and re-run; then restart `dsh web` and
-open Settings → Remote hosts to configure.
+the common name; use your own profile's name).
+
+**That one command is all it takes — no build scripts have to be approved.** The
+repository ships the built `lib/`, the package has no `prepare`/`postinstall`, and no
+package in the dependency tree carries an install script (`ssh2` is **bundled into the
+artifact**, not depended on). The old "allow the printed build scripts in that profile's
+`pnpm-workspace.yaml` and re-run" step was pnpm 12's hard policy gate for dependencies
+with lifecycle scripts (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`);
+it cannot be waived from the dependency side, only removed from the tree. Then restart
+`dsh web` and open Settings → Remote hosts to configure.
 
 ## Capabilities
 
@@ -305,6 +312,10 @@ dsh plugin --profile web add link:<absolute path of this directory>
 ```
 
 **How a change goes live: `pnpm run build`, then restart `dsh web` — for the host half and the client half alike.**
+**`lib/` is committed.** The package has no `prepare` script (pnpm 12 refuses to run one for a git
+dependency), so a `dsh plugin add github:…` user receives the repository as it is: **after editing
+source you must `npm run build` and commit `lib/` with it.** The first step of `pnpm check`
+(`scripts/verify-lib.mjs`) fails when `lib/` is untracked or throws while loading.
 The Host reads plugin bundles into memory at startup (`initialBundleSnapshot`: it stats mtime/ctime/size into a
 revision, then reads the bytes; the response carries `Cache-Control: public, max-age=31536000, immutable`), so a
 **client-only** change (`src/client/**`) behaves exactly the same way: a browser refresh — `Ctrl+Shift+R`

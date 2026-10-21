@@ -1,0 +1,170 @@
+/**
+ * Remote git action layer: every SCM verb the UI can trigger, expressed as
+ * one remote command through the existing exec route.
+ *
+ * Nothing here needs a host-side change: the command builders live in
+ * `src/git-ops.ts` (asserted + single-quoted, so a file name can never escape
+ * into shell syntax), the parsers are pure, and errors are translated to the
+ * messages a user can act on (missing identity, no upstream, conflicts, ...).
+ */
+import { REMOTE_API } from '../../protocol.ts';
+import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteRead } from '../../protocol.ts';
+/** Error carrying a message already fit for the UI. */
+export declare class GitOpError extends Error {
+}
+/** Join a remote directory with a repo-relative path. */
+export declare function joinRemote(dir: string, rel: string): string;
+/** The repository that encloses a workspace directory (undefined when none). */
+export declare function resolveRepoRoot(alias: string, workspaceRoot: string): Promise<string | undefined>;
+/** Repositories under a workspace root (the workspace itself sorts first). */
+export declare function findRepos(alias: string, workspaceRoot: string): Promise<string[]>;
+/** Every changed path plus the ignored half. */
+export declare function loadStatusDetail(alias: string, root: string): Promise<GitStatusDetail>;
+/**
+ * Pathspec-limited status probe: the raw `-z` stdout for JUST these paths.
+ *
+ * The verification half of a stage/unstage. It deliberately does not go through
+ * `loadStatusDetail`: that command walks the whole repository (minutes on a
+ * large one), while this one is bounded by the paths handed to it — which is
+ * what lets the panel confirm an optimistic stage immediately.
+ *
+ * The budget is the read-path one (60 s), not the git budget: a probe that
+ * hangs must not hold the panel for the full git timeout.
+ *
+ * @param alias - host alias.
+ * @param root - absolute remote repository root (git runs here).
+ * @param paths - repo-relative paths that were just staged/unstaged.
+ * @returns the raw `-z` porcelain stdout ('' when nothing was asked).
+ */
+export declare function probeStatusPaths(alias: string, root: string, paths: readonly string[]): Promise<string>;
+/**
+ * Expand ONE untracked directory row: the raw `-z` stdout for what is inside.
+ *
+ * `-uall` is what makes the contents visible at all (the panel's own status call
+ * uses `-u normal`, which collapses a directory into one row), and the pathspec
+ * keeps the cost bounded by that directory — this must never become a
+ * repository-wide walk.
+ */
+export declare function probeStatusDir(alias: string, root: string, dir: string): Promise<string>;
+/** Current branch with its ahead/behind counters (detached HEAD tolerated). */
+export declare function loadHead(alias: string, root: string): Promise<{
+    branch: string;
+    detached: boolean;
+    ahead: number;
+    behind: number;
+}>;
+/** Both sides of a diff plus the diff itself. */
+export interface DiffPayload {
+    diff: string;
+    oldText: string;
+    newText: string;
+    /** True when either side is binary (the view refuses to render it). */
+    unsupported: boolean;
+}
+/** Load a file's diff with both full revisions. */
+export declare function loadDiff(alias: string, root: string, path: string, staged: boolean, untracked?: boolean): Promise<DiffPayload>;
+/** Files touched by one commit. */
+export declare function loadCommitFiles(alias: string, root: string, hash: string): Promise<GitCommitFile[]>;
+/** Diff of one path inside a commit (used by the history file drill-down). */
+export declare function loadCommitFileDiff(alias: string, root: string, hash: string, path: string): Promise<DiffPayload>;
+/** Local + remote-tracking branches. */
+export declare function loadBranches(alias: string, root: string, current: string): Promise<GitBranch[]>;
+/** Configured remotes. */
+export declare function loadRemotes(alias: string, root: string): Promise<GitRemote[]>;
+/** The stash stack. */
+export declare function loadStashes(alias: string, root: string): Promise<GitStash[]>;
+/** Stage paths (additions, edits, deletions, renames). */
+export declare function stagePaths(alias: string, root: string, paths: readonly string[]): Promise<void>;
+/** Unstage paths without touching the worktree. */
+export declare function unstagePaths(alias: string, root: string, paths: readonly string[]): Promise<void>;
+/**
+ * Discard worktree edits. Untracked paths are DELETED (the caller confirms
+ * first); tracked paths are restored from the index.
+ */
+export declare function discardPaths(alias: string, root: string, tracked: readonly string[], untracked: readonly string[]): Promise<void>;
+/**
+ * Apply one hunk: into the index (`stage`), out of the index (`unstage`), or
+ * out of the worktree (`revert`). The patch travels as a temp file because
+ * the exec route has no stdin channel — which also keeps the patch text away
+ * from shell quoting entirely.
+ */
+export declare function applyHunk(alias: string, root: string, patch: string, mode: 'stage' | 'unstage' | 'revert'): Promise<void>;
+/** Create a commit. */
+export declare function commitAll(alias: string, root: string, message: string, amend?: boolean): Promise<string>;
+/** Last commit message (drives the amend flow). */
+export declare function lastCommitMessage(alias: string, root: string): Promise<string>;
+/** fetch / pull / push / sync. */
+export declare function syncRepo(alias: string, root: string, kind: 'fetch' | 'pull' | 'push' | 'sync'): Promise<string>;
+/** Branch verbs. */
+export declare function branchOp(alias: string, root: string, op: {
+    kind: 'checkout';
+    ref: string;
+} | {
+    kind: 'create';
+    name: string;
+    from?: string;
+} | {
+    kind: 'delete';
+    name: string;
+    force: boolean;
+} | {
+    kind: 'rename';
+    from: string;
+    to: string;
+} | {
+    kind: 'merge';
+    ref: string;
+} | {
+    kind: 'publish';
+    name: string;
+    remote: string;
+}): Promise<string>;
+/** Remote verbs. */
+export declare function remoteOp(alias: string, root: string, op: {
+    kind: 'add';
+    name: string;
+    url: string;
+} | {
+    kind: 'remove';
+    name: string;
+} | {
+    kind: 'setUrl';
+    name: string;
+    url: string;
+}): Promise<string>;
+/** Stash verbs. */
+export declare function stashOp(alias: string, root: string, op: {
+    kind: 'save';
+    message: string;
+    includeUntracked: boolean;
+} | {
+    kind: 'apply';
+    ref: string;
+} | {
+    kind: 'pop';
+    ref: string;
+} | {
+    kind: 'drop';
+    ref: string;
+}): Promise<string>;
+/** Check out one commit (detached HEAD; the UI warns first). */
+export declare function checkoutCommit(alias: string, root: string, hash: string): Promise<string>;
+/** One file-name search hit. */
+export interface SearchHit {
+    path: string;
+    name: string;
+    dir: string;
+    isDir: boolean;
+}
+/**
+ * Name search under a remote directory. Depth-capped and `.git`/`node_modules`
+ * pruned so a huge tree cannot turn one keystroke into a minute of walking.
+ */
+export declare function searchFiles(alias: string, root: string, query: string, limit?: number, depth?: number): Promise<{
+    hits: SearchHit[];
+    truncated: boolean;
+}>;
+/** Read a remote file as text/base64 (used by the previews). */
+export declare function readRemoteFile(alias: string, fullPath: string): Promise<RemoteRead>;
+/** The terminal API base (kept here so both halves agree on the route table). */
+export { REMOTE_API };

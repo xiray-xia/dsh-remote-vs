@@ -1,5 +1,12 @@
 node_modules/
-lib/
+# lib/ IS committed, and that is load-bearing: the package has no `prepare`
+# script any more (pnpm 12 refuses to run one for a git dependency until the
+# user approves build scripts in their profile), so a `github:` install
+# receives the repository exactly as it is — an uncommitted build would ship an
+# empty plugin. `scripts/verify-lib.mjs` fails the gate if these stop being
+# tracked. Source maps stay out: 4.7 MB per client change is not worth keeping
+# in history, and nothing loads them.
+lib/**/*.map
 dist/
 *.tsbuildinfo
 .DS_Store
