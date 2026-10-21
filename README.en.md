@@ -171,6 +171,8 @@ into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4
 
 ## Remote workbench (VS Code style)
 
+![The sidebar's four views: files, search, source control, history](docs/media/sidebar-views.gif)
+
 Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page** (a standalone tab when
 `dsh-better-sidebar` is installed, otherwise the native right-Sidebar page) and **the conversation-view
 "remote editor" tab** (next to 对话/轨迹, giving the code area full width).

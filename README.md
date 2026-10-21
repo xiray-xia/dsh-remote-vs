@@ -167,6 +167,8 @@ Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scrat
 
 ## 远端工作台（VS Code 式）
 
+![侧栏四个视图：文件树、搜索、源代码管理、历史](docs/media/sidebar-views.gif)
+
 两个挂载面共用一份状态（`store.tsx`）：**右侧栏「远程」**（装了 better-sidebar 走独立 tab，
 否则走原生右栏页）与**会话视图「远程编辑器」**（与 对话/轨迹 并列，代码区整屏宽）。
 
