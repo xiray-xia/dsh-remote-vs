@@ -161,6 +161,26 @@ export function statusPathsCommand(workdir: string, paths: readonly string[]): s
   return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=no -- ${relPaths(paths)}`)
 }
 
+/**
+ * Pathspec-limited status INCLUDING untracked files, for ONE directory row.
+ *
+ * `-u normal` (the panel's performance mode) collapses an untracked directory
+ * into a single `dir/` row, so the files inside it are invisible. This is the
+ * command that opens it up: `-uall` lists those files individually (measured —
+ * files in nested folders arrive as their own paths, never as `sub/` rows),
+ * while the pathspec keeps the cost bounded by that directory instead of the
+ * repository.
+ *
+ * The trailing slash is deliberate: it makes the pathspec name the directory
+ * itself, so the call cannot match a sibling FILE that happens to share the
+ * name.
+ */
+export function statusDirCommand(workdir: string, dir: string): string {
+  const clean = assertRepoPath(dir).replace(/\/+$/, '')
+  if (clean === '') throw new Error('a directory path is required')
+  return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=all -- ${shQuote(`${clean}/`)}`)
+}
+
 /** Branch header only (`## branch...upstream [ahead N, behind M]`), NUL safe. */
 export function branchHeaderCommand(workdir: string): string {
   return capped(`${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)

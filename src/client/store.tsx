@@ -28,9 +28,10 @@ import { buildDiffModel } from './scm/diff-model.ts'
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
 import { changeSetFromHunks } from './changes/model.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
-import { applyStageOverrides, bucketStatus, buildTreeMarks, optimisticStageDetail, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
-import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeStatusPaths, resolveRepoRoot, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
+import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, optimisticStageDetail, type ChangeEntry, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
+import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeStatusDir, probeStatusPaths, resolveRepoRoot, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
 import { StageCoordinator } from './scm/stage-queue.ts'
+import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
@@ -130,6 +131,13 @@ interface State {
   view: RailView
   /** A pending search request raised by the explorer's context menu. */
   searchRequest: SearchRequest | undefined
+  /**
+   * Expanded untracked DIRECTORY rows (`-u normal` collapses a directory into
+   * one row, so the panel asks for its contents on demand — see
+   * `scm/untracked-dirs.ts`). Kept in the store, not in the panel: it has to
+   * outlive every status the panel adopts, and only the store sees those.
+   */
+  untrackedDirs: DirExpansions
 }
 
 /** The sidebar rail destinations. */
@@ -245,9 +253,25 @@ const stageCoordinator = new StageCoordinator(
   },
   {
     apply: applyLocalStage,
-    notify: (text, isError) => toast(text, isError),
+    report: (notice) => {
+      // The wording lives HERE, as two literal `t()` calls: the coordinator has
+      // no i18n (it is driven by a check with no React), and a key reached
+      // through a lookup would look unreferenced to `.spike/i18n-check.mjs`.
+      const paths = noticePaths(notice.paths)
+      if (notice.kind === 'mismatch') toast(`${t('scm.stageMismatch')} · ${paths}`, true)
+      else toast(`${t('scm.stageUnverified')} · ${paths}`, true)
+    },
   },
 )
+
+/** How many affected paths a notice names before it summarises them. */
+const NOTICE_PATHS = 3
+
+/** A short, readable path list for a stage/unstage notice. */
+function noticePaths(paths: readonly string[]): string {
+  if (paths.length <= NOTICE_PATHS) return paths.join(', ')
+  return `${paths.slice(0, NOTICE_PATHS).join(', ')} (+${paths.length - NOTICE_PATHS})`
+}
 
 const state: State = {
   ctx: undefined,
@@ -271,6 +295,7 @@ const state: State = {
   editorSurface: 'sidebar',
   view: readStoredView(),
   searchRequest: undefined,
+  untrackedDirs: new Map(),
 }
 
 /** Everything a view can read, plus the actions. */
@@ -338,6 +363,10 @@ export interface ExplorerValue {
    * confirms it (no repository-wide status, no extras — see `stageOptimistic`).
    */
   stageOptimistic: (paths: readonly string[], staged: boolean) => Promise<void>
+  /** Expanded untracked directory rows: directory path → the rows under it. */
+  untrackedDirs: DirExpansions
+  /** Expand / collapse one untracked directory row (one path-limited status). */
+  toggleUntrackedDir: (dirPath: string) => Promise<void>
   openFile: (fullPath: string, options?: { line?: number }) => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
   openCommitFile: (hash: string, rel: string) => void
@@ -443,6 +472,8 @@ function build(): ExplorerValue {
     refreshGit,
     afterWrite,
     stageOptimistic,
+    untrackedDirs: state.untrackedDirs,
+    toggleUntrackedDir,
     openFile,
     openDiff,
     openCommitFile,
@@ -621,7 +652,8 @@ function applyWorkspaceSelection(id: string, byUser: boolean): void {
   if (state.workspaceId === id) return
   if (byUser) noteManualPick()
   // Local stage results are repository-relative: another binding's paths must
-  // never be re-applied to this one.
+  // never be re-applied to this one. The expanded untracked directories are
+  // repository-relative too.
   stageOverrides = new Map()
   stageOverrideTarget = ''
   patch({
@@ -632,6 +664,7 @@ function applyWorkspaceSelection(id: string, byUser: boolean): void {
     head: undefined,
     repoRoot: undefined,
     repoSubdir: readRepoSubdir(id),
+    untrackedDirs: new Map(),
   })
   try {
     localStorage.setItem(WS_KEY, id)
@@ -945,7 +978,18 @@ export async function refreshGit(): Promise<void> {
         if (override.at <= stageAt) stageOverrides.delete(path)
       }
     }
-    patch({ repoRoot: root, repoSubdir: settled, repoMissing: false, status, head, gitBusy: false, gitError: undefined })
+    // An expanded untracked directory survives this refresh only while git still
+    // reports the same directory row (see `pruneDirExpansions`).
+    patch({
+      repoRoot: root,
+      repoSubdir: settled,
+      repoMissing: false,
+      status,
+      head,
+      gitBusy: false,
+      gitError: undefined,
+      untrackedDirs: pruneDirExpansions(state.untrackedDirs, status),
+    })
   } catch (error) {
     if (stale()) return
     // Clear the repo identity too. Leaving a previous binding's `repoRoot` in
@@ -1001,8 +1045,18 @@ export function applyLocalStage(paths: readonly string[], staged: boolean): void
   stageSeq += 1
   for (const path of paths) stageOverrides.set(path, { staged, at: stageSeq })
   if (state.status === undefined) return
-  const next = optimisticStageDetail(state.status, paths, staged)
-  if (next !== state.status) patch({ status: next })
+  // A file inside an expanded untracked directory has no record of its own
+  // (`-u normal` reported only the directory): staging it must still show up
+  // under "staged changes" instead of vanishing from the list.
+  let next = state.status
+  if (staged) for (const path of paths) next = insertStagedEntry(next, path)
+  next = optimisticStageDetail(next, paths, staged)
+  if (next === state.status) return
+  // A staged row is no longer an untracked row: it leaves the expansion, and a
+  // directory row that stopped being untracked takes its whole expansion with
+  // it (see `pruneDirExpansions`).
+  const dirs = staged ? dropExpandedRows(state.untrackedDirs, paths) : state.untrackedDirs
+  patch({ status: next, untrackedDirs: pruneDirExpansions(dirs, next) })
 }
 
 /**
@@ -1024,6 +1078,46 @@ export async function stageOptimistic(paths: readonly string[], staged: boolean)
   if (target === undefined || paths.length === 0) return
   await stageCoordinator.submit(target, paths, staged)
 }
+
+/**
+ * Expand or collapse one untracked DIRECTORY row.
+ *
+ * `-u normal` collapses an untracked directory into a single `dir/` row, so its
+ * contents are invisible. Expanding costs exactly ONE path-limited
+ * `git status -uall -- <dir>/` — never a repository-wide status, never the
+ * extras — and the rows it answers with are shown under the directory row.
+ * Collapsing costs nothing at all.
+ *
+ * The expansions are pruned against every status the panel adopts, so a
+ * directory that gets staged or deleted takes its rows with it (see
+ * `scm/untracked-dirs.ts`).
+ *
+ * @param dirPath - the directory row's repo-relative path (with its `/`).
+ */
+export async function toggleUntrackedDir(dirPath: string): Promise<void> {
+  if (dirPath === '' || !dirPath.endsWith('/')) return
+  if (state.untrackedDirs.has(dirPath)) {
+    patch({ untrackedDirs: collapseDir(state.untrackedDirs, dirPath) })
+    return
+  }
+  // A double click must not buy two probes: the second click only arrives while
+  // the first one's answer is still in flight.
+  if (dirProbes.has(dirPath)) return
+  const target = scmTarget()
+  if (target === undefined) return
+  dirProbes.add(dirPath)
+  try {
+    const stdout = await probeStatusDir(target.alias, target.root, dirPath)
+    // Read the state AFTER the round trip: another directory may have been
+    // expanded (or this one collapsed) while the probe was in flight.
+    patch({ untrackedDirs: expandDir(state.untrackedDirs, dirPath, stdout) })
+  } finally {
+    dirProbes.delete(dirPath)
+  }
+}
+
+/** Directory rows whose expansion probe is in flight (see `toggleUntrackedDir`). */
+const dirProbes = new Set<string>()
 
 // -------------------------------------------------------------- tab model
 

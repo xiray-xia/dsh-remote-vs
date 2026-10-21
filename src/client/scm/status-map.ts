@@ -34,9 +34,12 @@ export interface StatusBuckets {
 }
 
 /** True for a merge-conflict pair (UU/AA/DD/AU/UA/DU/UD). */
-function isConflict(x: string, y: string): boolean {
+export function isConflictStatus(x: string, y: string): boolean {
   return x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')
 }
+
+/** The spelling the rest of this module reads (exported for the row projection). */
+const isConflict = isConflictStatus
 
 /** The most descriptive letter for a path that has both halves changed. */
 function pickLetter(staged: string, unstaged: string): string {
@@ -122,6 +125,27 @@ export function isStagedStatus(x: string, y: string): boolean {
   if (x === '?' || y === '?') return false
   if (isConflict(x, y)) return false
   return x !== ' '
+}
+
+/**
+ * The verb one row's action button issues.
+ *
+ * The button is the OPPOSITE of the section the row sits in: a row in "staged
+ * changes" offers unstage, a row in "changes" offers stage. This exists because
+ * the two are trivially confusable — the row already KNOWS which section it is
+ * in (`isStaged`), and passing that flag straight through as the verb's target
+ * inverts the action, which is silent: the optimistic model has nothing to move
+ * (`git add` on an already-staged path, `git restore --staged` on an unstaged
+ * one), the probe agrees with the row it never changed, so the click reports
+ * neither success nor failure. That is exactly what shipped in 0.8.0 for both
+ * directions (stage was a no-op AND unstage was a no-op) while the section-level
+ * buttons, which pass a literal, stayed correct.
+ *
+ * A named verb instead of a boolean, so the call site reads as the action rather
+ * than as a state (`applyStage(paths, rowVerb(isStaged))`).
+ */
+export function rowVerb(isStaged: boolean): 'stage' | 'unstage' {
+  return isStaged ? 'unstage' : 'stage'
 }
 
 /**
@@ -213,6 +237,24 @@ function localStageEntry(entry: GitPathStatus, staged: boolean): GitPathStatus[]
   // HEAD has the path: what is left of the record is the worktree half.
   const worktree = y !== ' ' && y !== '?' ? y : x
   return [{ path, x: ' ', y: worktree, ...keep }]
+}
+
+/**
+ * Add a path the detailed status does not list yet as a STAGED ADDITION.
+ *
+ * The panel can stage a file that its own status call never reported: a file
+ * inside an expanded untracked DIRECTORY (`-u normal` collapses the directory
+ * into one `dir/` row, so the file has no record of its own). Without this the
+ * row would simply vanish — staged, yet shown nowhere until the next full
+ * refresh. A path that already has a record is left alone.
+ *
+ * @param detail - the status the panel is showing.
+ * @param path - repo-relative path that was just staged.
+ * @returns the status with the added record (the same object when it is known).
+ */
+export function insertStagedEntry(detail: GitStatusDetail, path: string): GitStatusDetail {
+  if (path === '' || detail.entries.some(entry => entry.path === path || entry.origPath === path)) return detail
+  return { ...detail, entries: [...detail.entries, { path, x: 'A', y: ' ' }] }
 }
 
 /** One local stage/unstage result a full status read may not have seen. */

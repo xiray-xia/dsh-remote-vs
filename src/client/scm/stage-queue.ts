@@ -45,12 +45,31 @@ export interface StagePort {
   probe: (target: ScmTarget, paths: readonly string[]) => Promise<string>
 }
 
+/** A verification outcome the user has to know about. */
+export interface StageNotice {
+  /**
+   * `mismatch`: the repository disagreed with the local move, which was then
+   * corrected. `unverified`: the check itself could not run, so the local state
+   * stands unconfirmed.
+   */
+  kind: 'mismatch' | 'unverified'
+  /** Repo-relative paths the notice is about, in click order. */
+  paths: readonly string[]
+}
+
 /** The two local effects: the status model, and the user. */
 export interface StageSink {
   /** Move paths between the index and worktree halves of the local model. */
   apply: (paths: readonly string[], staged: boolean) => void
-  /** Tell the user something they must know (rollback, unverifiable). */
-  notify: (text: string, isError: boolean) => void
+  /**
+   * Report one verification outcome.
+   *
+   * A structured notice rather than a sentence: the wording belongs to the
+   * caller (its own i18n keys, which have to be literal `t()` calls in the
+   * source for the i18n check to see them), while this module stays free of
+   * React, fetch and copy.
+   */
+  report: (notice: StageNotice) => void
 }
 
 /** Timer injection, so a check can drive the debounce deterministically. */
@@ -76,15 +95,6 @@ interface Job {
 /** Repository identity for grouping (alias + root, one line each). */
 function targetKey(target: ScmTarget): string {
   return `${target.alias}\n${target.root}`
-}
-
-/** How many paths a message names before it summarises. */
-const LISTED_PATHS = 3
-
-/** A short, readable path list for a notification. */
-function listPaths(paths: readonly string[]): string {
-  if (paths.length <= LISTED_PATHS) return paths.join(', ')
-  return `${paths.slice(0, LISTED_PATHS).join(', ')} (+${paths.length - LISTED_PATHS})`
 }
 
 /**
@@ -235,10 +245,7 @@ export class StageCoordinator {
       } catch {
         // A failed probe is not a failed operation: the writes landed, so the
         // optimistic state stands. Say so rather than silently trusting it.
-        this.sink.notify(
-          `could not verify ${group.paths.length} staged path(s) in ${group.target.root} — keeping the local state: ${listPaths(group.paths)}`,
-          true,
-        )
+        this.sink.report({ kind: 'unverified', paths: group.paths })
         continue
       }
       const detail = parseStatusDetail(stdout)
@@ -251,10 +258,7 @@ export class StageCoordinator {
       // Staged-ness is binary, so the opposite of the optimistic value IS what
       // the repository reports: apply the observation, not a guess.
       for (const path of wrong) this.sink.apply([path], !(group.staged.get(path) === true))
-      this.sink.notify(
-        `git did not ${group.staged.get(wrong[0] as string) === true ? 'stage' : 'unstage'} ${listPaths(wrong)} in ${group.target.root} — the panel was put back in sync with the repository`,
-        true,
-      )
+      this.sink.report({ kind: 'mismatch', paths: wrong })
     }
   }
 }

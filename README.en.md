@@ -49,7 +49,7 @@ open Settings → Remote hosts to configure.
 | --- | --- |
 | Explorer | Lazy tree + expand/collapse + hidden-files toggle; context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference; git status colours and folder roll-up marks |
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line |
-| Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
+| Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; **untracked directory rows expand on click**; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push) |
 | Session change review | The **collapsible** panel above the composer: what THIS SESSION changed (one row per file, file-type icon, `+a −b` on the right); clicking a file opens it in the remote editor with **line shading plus character-level inline diff**, `n/N ↑↓` jumps between change points, and hovering a changed line offers **Undo this change** (remote `git apply -R`). See "Session change review" below |
 | Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers, **rendering only the rows inside the viewport** (a 3000-line file goes from 9000 row containers to ~174, with exactly the same scroll range as a full render); switch between "before / after", and the after side is editable and savable |
 | Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
@@ -197,8 +197,10 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
 - **Known limits (stated honestly)**:
   - There is **no public API to select the "remote editor" view**; the plugin can only click the shell's
     own tab by its label and toasts a hint when that fails (`revealEditor()`).
-  - Untracked directories arrive as a **single `dir/` row**; clicking it only toasts instead of expanding
-    (a deliberate performance trade-off).
+  - Untracked directories arrive as a **single `dir/` row**; clicking it **expands** the files inside
+    (one path-limited `git status -uall -- dir/`, so the cost tracks the directory, not the repository;
+    click again to collapse). An expansion is a snapshot of the moment it was opened — collapse and
+    re-expand to refresh it.
   - Opening a file is capped at 8MiB (official helper constant); beyond that it is shown read-only.
   - The find widget floats above the code (like VS Code) and takes no layout space.
   - Output backpressure is **per shell**: one tab that cannot keep up pauses every tab attached to that

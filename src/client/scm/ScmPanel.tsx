@@ -8,7 +8,7 @@
  * and every successful write refreshes the shared status so the tree markers
  * and the change list never disagree.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash } from '../../protocol.ts'
 import { useExplorer } from '../store.tsx'
 import {
@@ -25,6 +25,7 @@ import {
   syncRepo,
 } from './actions.ts'
 import type { ChangeEntry } from './status-map.ts'
+import { rowVerb } from './status-map.ts'
 import { RepoPicker } from './RepoPicker.tsx'
 import {
   IconBranch,
@@ -195,24 +196,28 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
    * the same debounce window, so a burst of files could never coalesce into one
    * check. The optimistic move IS the feedback; a verb that failed is rolled
    * back by the store and reported here.
+   *
+   * The verb is a NAME, not a boolean: `store.stageOptimistic` takes the target
+   * state, and a row handler that passed its own section flag straight through
+   * would silently invert the action (see `rowVerb`).
    */
-  const applyStage = (paths: readonly string[], staged: boolean): void => {
+  const applyStage = (paths: readonly string[], verb: 'stage' | 'unstage'): void => {
     if (repoRoot === undefined || paths.length === 0) return
-    void store.stageOptimistic(paths, staged).catch((error: unknown) => { toast(messageOf(error), true) })
+    void store.stageOptimistic(paths, verb === 'stage').catch((error: unknown) => { toast(messageOf(error), true) })
   }
 
-  const stageOne = (entry: ChangeEntry, staged: boolean): void => {
-    applyStage([entry.path], staged)
+  /** The row's own button: `isStaged` is the section it is in, so the verb is the other one. */
+  const stageOne = (entry: ChangeEntry, isStaged: boolean): void => {
+    applyStage([entry.path], rowVerb(isStaged))
   }
 
   /** Open one change: previews for images, diffs otherwise. */
   const openChange = (entry: ChangeEntry): void => {
-    // `-u normal` reports an untracked DIRECTORY as one `dir/` row: it has no
-    // file diff, so the change list says so instead of opening an empty pane.
-    if (entry.path.endsWith('/')) {
-      toast(t('scm.dirEntry'), false)
-      return
-    }
+    // A directory row has no single diff. Untracked ones expand instead (see
+    // `changeRow`); a STAGED one (which real git reports per file, never as
+    // `dir/`) has nothing to open, so the click stays a no-op rather than
+    // opening an empty diff pane.
+    if (entry.path.endsWith('/')) return
     // A conflicted path has no single diff: `git diff` prints a combined
     // `diff --cc` block with `@@@` hunks, which the unified-diff parsers do
     // not recognise. The result was worse than "no diff" — with no hunks and
@@ -332,41 +337,84 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     )
   }
 
-  const changeRow = (entry: ChangeEntry, isStaged: boolean): ReactNode => (
-    <div
-      key={`${isStaged ? 's' : 'u'}:${entry.path}`}
-      className="rvs-scm-item"
-      role="button"
-      tabIndex={0}
-      title={`${entry.path}\n${t('scm.openHint')}`}
-      onClick={() => openChange(entry)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openChange(entry) }}
-    >
-      <span className="rvs-node-icon"><FileIcon path={entry.path} size={14} /></span>
-      <span className="rvs-scm-path">{entry.path}</span>
-      {(entry.oldPath ?? '') !== '' && <span className="rvs-scm-dir">← {entry.oldPath}</span>}
-      <span className={`rvs-file-status rvs-letter-${gitStatusClass(entry.status)}`}>{gitLetter(entry.status)}</span>
-      <span className="rvs-scm-actions">
-        <IconButton
-          title={isStaged ? t('scm.unstage') : t('scm.stage')}
-          disabled={busy !== undefined}
-          onClick={() => { void stageOne(entry, isStaged) }}
-        >
-          {isStaged ? <IconClose size={12} /> : <IconPlus size={13} />}
-        </IconButton>
-        {!isStaged && (
+  /**
+   * One row. `depth > 0` means it is a file inside an expanded untracked
+   * directory: same row, indented, and still fully actionable (staging such a
+   * file adds it to "staged changes" — see `store.applyLocalStage`).
+   *
+   * An UNTRACKED DIRECTORY row (`dir/`) is the one row whose click does not
+   * open a diff: it expands instead, because `-u normal` reported the directory
+   * alone and its files are otherwise invisible.
+   */
+  const changeRow = (entry: ChangeEntry, isStaged: boolean, depth = 0): ReactNode => {
+    const expandable = !isStaged && entry.path.endsWith('/')
+    const expanded = expandable && store.untrackedDirs.has(entry.path)
+    const activate = (): void => {
+      if (!expandable) {
+        openChange(entry)
+        return
+      }
+      void store.toggleUntrackedDir(entry.path).catch((error: unknown) => { toast(messageOf(error), true) })
+    }
+    return (
+      <div
+        key={`${isStaged ? 's' : 'u'}:${entry.path}`}
+        className="rvs-scm-item"
+        role="button"
+        tabIndex={0}
+        style={depth === 0 ? undefined : { paddingLeft: `${22 + depth * 12}px` }}
+        title={expandable ? `${entry.path}\n${t('scm.dirToggle')}` : `${entry.path}\n${t('scm.openHint')}`}
+        onClick={activate}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') activate() }}
+      >
+        {/* The chevron slot is reserved on EVERY row (11px), so a directory row
+            and its files stay in one column instead of shifting by an icon. */}
+        <span className={`rvs-chevron${expanded ? ' open' : ''}`} style={{ width: 11 }} aria-hidden="true">
+          {expandable ? <IconChevronRight size={11} /> : null}
+        </span>
+        <span className="rvs-node-icon">{expandable ? <IconFolder size={14} /> : <FileIcon path={entry.path} size={14} />}</span>
+        <span className="rvs-scm-path">{entry.path}</span>
+        {(entry.oldPath ?? '') !== '' && <span className="rvs-scm-dir">← {entry.oldPath}</span>}
+        <span className={`rvs-file-status rvs-letter-${gitStatusClass(entry.status)}`}>{gitLetter(entry.status)}</span>
+        <span className="rvs-scm-actions">
           <IconButton
-            title={entry.status === '?' ? t('scm.deleteUntracked') : t('scm.discard')}
-            danger
+            title={isStaged ? t('scm.unstage') : t('scm.stage')}
             disabled={busy !== undefined}
-            onClick={() => { void discardOne(entry) }}
+            onClick={() => { void stageOne(entry, isStaged) }}
           >
-            <IconTrash size={13} />
+            {isStaged ? <IconClose size={12} /> : <IconPlus size={13} />}
           </IconButton>
-        )}
-      </span>
-    </div>
-  )
+          {!isStaged && (
+            <IconButton
+              title={entry.status === '?' ? t('scm.deleteUntracked') : t('scm.discard')}
+              danger
+              disabled={busy !== undefined}
+              onClick={() => { void discardOne(entry) }}
+            >
+              <IconTrash size={13} />
+            </IconButton>
+          )}
+        </span>
+      </div>
+    )
+  }
+
+  /**
+   * Rows plus the contents of any expanded untracked directory, in place.
+   *
+   * The depth cap is defensive: `-uall` answers with files (measured), so a
+   * directory row can only appear nested if a future git answers differently —
+   * the renderer then recurses on the same rule instead of looping forever.
+   */
+  const changeRows = (entries: readonly ChangeEntry[], depth = 0): ReactNode =>
+    entries.map(entry => (
+      <Fragment key={`${depth}:${entry.path}`}>
+        {changeRow(entry, false, depth)}
+        {depth < 8
+          ? changeRows(store.untrackedDirs.get(entry.path) ?? [], depth + 1)
+          : null}
+      </Fragment>
+    ))
 
   return (
     <div className="rvs-pane grow">
@@ -447,7 +495,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               <IconButton
                 title={t('scm.stageAll')}
                 disabled={busy !== undefined}
-                onClick={() => { void applyStage(conflicts.map(item => item.path), true) }}
+                onClick={() => { void applyStage(conflicts.map(item => item.path), 'stage') }}
               >
                 <IconPlus size={13} />
               </IconButton>,
@@ -502,7 +550,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   <IconButton
                     title={t('scm.stageAll')}
                     disabled={busy !== undefined}
-                    onClick={() => { void applyStage(changes.map(item => item.path), true) }}
+                    onClick={() => { void applyStage(changes.map(item => item.path), 'stage') }}
                   >
                     <IconPlus size={13} />
                   </IconButton>
@@ -536,7 +584,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               </>,
               () => (changes.length === 0
                 ? <div className="rvs-empty">{t('scm.noChanges')}</div>
-                : <div>{changes.map(entry => changeRow(entry, false))}</div>),
+                : <div>{changeRows(changes)}</div>),
             )}
 
             {staged.length > 0 && section(
@@ -546,7 +594,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               <IconButton
                 title={t('scm.unstageAll')}
                 disabled={busy !== undefined}
-                onClick={() => { void applyStage(staged.map(item => item.path), false) }}
+                onClick={() => { void applyStage(staged.map(item => item.path), 'unstage') }}
               >
                 <IconClose size={12} />
               </IconButton>,

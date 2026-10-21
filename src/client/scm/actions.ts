@@ -51,6 +51,7 @@ import {
   stashPopCommand,
   stashSaveCommand,
   statusDetailCommand,
+  statusDirCommand,
   statusPathsCommand,
   unstageCommand,
 } from '../../git-ops.ts'
@@ -143,6 +144,19 @@ export async function loadStatusDetail(alias: string, root: string): Promise<Git
 export async function probeStatusPaths(alias: string, root: string, paths: readonly string[]): Promise<string> {
   if (paths.length === 0) return ''
   const out = await run(alias, statusPathsCommand(root, paths), 60_000)
+  return out.stdout
+}
+
+/**
+ * Expand ONE untracked directory row: the raw `-z` stdout for what is inside.
+ *
+ * `-uall` is what makes the contents visible at all (the panel's own status call
+ * uses `-u normal`, which collapses a directory into one row), and the pathspec
+ * keeps the cost bounded by that directory — this must never become a
+ * repository-wide walk.
+ */
+export async function probeStatusDir(alias: string, root: string, dir: string): Promise<string> {
+  const out = await run(alias, statusDirCommand(root, dir), 60_000)
   return out.stdout
 }
 
