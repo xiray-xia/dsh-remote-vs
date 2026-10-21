@@ -194,6 +194,8 @@ Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scrat
 
 ## 会话改动审阅（Cursor 式）
 
+![会话改动审阅：面板列出本次会话改动的文件，点开后整行着色并标出行内字符级差异，右上角可逐个改动点跳转，鼠标悬停即可撤销这一处改动](docs/media/session-change-review.gif)
+
 输入框上方那条**可收纳**的面板（标题「本次改动」）按**会话**回答"这一轮改了什么"。数据来自插件自己的
 会话改动账本（`/api/dsh-remote/changes`），不是 DSH 的 `workspaceChanges` —— 后者看不见被路由的会话
 （探针实测：58 个远端会话、0 个改动事件）。

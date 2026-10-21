@@ -208,6 +208,8 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
 
 ## Session change review (Cursor style)
 
+![Session change review: the panel lists the files this session changed, opening one paints whole-line and intra-line differences, the top-right control steps through the changes, and hovering reverts a single change](docs/media/session-change-review.gif)
+
 The **collapsible** panel above the composer (titled "本次改动") answers, per **session**, "what did this turn
 change?". Its data comes from the plugin's own change ledger (`/api/dsh-remote/changes`), not from DSH's
 `workspaceChanges` — the latter cannot see a routed session at all (the probe measured 58 remote sessions
