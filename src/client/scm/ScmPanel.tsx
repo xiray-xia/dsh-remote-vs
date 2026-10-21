@@ -21,10 +21,8 @@ import {
   loadStashes,
   lastCommitMessage,
   remoteOp,
-  stagePaths,
   stashOp,
   syncRepo,
-  unstagePaths,
 } from './actions.ts'
 import type { ChangeEntry } from './status-map.ts'
 import { RepoPicker } from './RepoPicker.tsx'
@@ -135,6 +133,78 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     await loadExtras()
   }, [store, loadExtras])
 
+  /**
+   * How much of the repository a verb's success invalidates.
+   *
+   * `all` used to be the answer for EVERY write, which cost three
+   * repository-wide git commands (stash list, branches, remotes) per click even
+   * when none of them could have changed — on a large repository that is the
+   * difference between a click and a coffee break. The extras are reloaded
+   * where they can actually change: a stash / branch / remote verb, a sync
+   * (which moves ahead/behind), the panel's own ⟳, or the first paint after a
+   * repository switch.
+   *
+   * `status` is for the verbs that move the working tree but touch nothing the
+   * extras hold (commit, amend, discard). Stage / unstage do not come through
+   * here at all: the store moves the row locally and ONE path-limited status
+   * confirms it (see `stageOptimistic`).
+   */
+  const guard = async (
+    action: string,
+    body: () => Promise<void>,
+    refresh: 'all' | 'status' = 'all',
+  ): Promise<void> => {
+    setBusy(action)
+    try {
+      await body()
+      if (refresh === 'all') await refreshAll()
+      else if (refresh === 'status') await store.afterWrite()
+    } catch (error) {
+      toast(messageOf(error), true)
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const discardOne = async (entry: ChangeEntry): Promise<void> => {
+    if (repoRoot === undefined) return
+    const ok = await confirmDialog({
+      title: entry.status === '?' ? t('scm.deleteUntrackedTitle') : t('scm.discardTitle'),
+      text: (entry.status === '?' ? t('scm.deleteUntrackedText') : t('scm.discardText')).replace('{path}', entry.path),
+      danger: true,
+      okText: entry.status === '?' ? t('files.delete') : t('scm.discard'),
+    })
+    if (!ok) return
+    // A discard moves worktree rows only: the stash / branch / remote lists
+    // cannot have changed, so the extras stay out of it.
+    await guard('discard', async () => {
+      if (entry.status === '?') await discardPaths(alias, repoRoot, [], [entry.path])
+      else await discardPaths(alias, repoRoot, [entry.path], [])
+      toast(t('scm.discarded'))
+    }, 'status')
+  }
+
+  /**
+   * Stage / unstage, the fast way: the row moves between sections at once and
+   * ONE path-limited `git status` confirms it — no repository-wide status, no
+   * extras (see `store.stageOptimistic`).
+   *
+   * Deliberately NOT wrapped in `guard`: that helper holds `busy` — and with it
+   * every row's buttons — until its refresh is done, which is exactly what made
+   * a click feel like a freeze. It would also stop the next click from reaching
+   * the same debounce window, so a burst of files could never coalesce into one
+   * check. The optimistic move IS the feedback; a verb that failed is rolled
+   * back by the store and reported here.
+   */
+  const applyStage = (paths: readonly string[], staged: boolean): void => {
+    if (repoRoot === undefined || paths.length === 0) return
+    void store.stageOptimistic(paths, staged).catch((error: unknown) => { toast(messageOf(error), true) })
+  }
+
+  const stageOne = (entry: ChangeEntry, staged: boolean): void => {
+    applyStage([entry.path], staged)
+  }
+
   /** Open one change: previews for images, diffs otherwise. */
   const openChange = (entry: ChangeEntry): void => {
     // `-u normal` reports an untracked DIRECTORY as one `dir/` row: it has no
@@ -161,44 +231,11 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     store.openDiff(entry.path, entry.staged, entry.status === '?')
   }
 
-  const guard = async (action: string, body: () => Promise<void>): Promise<void> => {
-    setBusy(action)
-    try {
-      await body()
-      await refreshAll()
-    } catch (error) {
-      toast(messageOf(error), true)
-    } finally {
-      setBusy(undefined)
-    }
-  }
-
-  const discardOne = async (entry: ChangeEntry): Promise<void> => {
-    if (repoRoot === undefined) return
-    const ok = await confirmDialog({
-      title: entry.status === '?' ? t('scm.deleteUntrackedTitle') : t('scm.discardTitle'),
-      text: (entry.status === '?' ? t('scm.deleteUntrackedText') : t('scm.discardText')).replace('{path}', entry.path),
-      danger: true,
-      okText: entry.status === '?' ? t('files.delete') : t('scm.discard'),
-    })
-    if (!ok) return
-    await guard('discard', async () => {
-      if (entry.status === '?') await discardPaths(alias, repoRoot, [], [entry.path])
-      else await discardPaths(alias, repoRoot, [entry.path], [])
-      toast(t('scm.discarded'))
-    })
-  }
-
-  const stageOne = async (entry: ChangeEntry, staged: boolean): Promise<void> => {
-    if (repoRoot === undefined) return
-    await guard(`stage:${entry.path}`, async () => {
-      if (staged) await unstagePaths(alias, repoRoot, [entry.path])
-      else await stagePaths(alias, repoRoot, [entry.path])
-    })
-  }
-
   const doCommit = async (): Promise<void> => {
     if (repoRoot === undefined || message.trim() === '') return
+    // A commit is a real state transition and the user expects to wait for it:
+    // the full status stays. The extras do not — a commit changes no stash,
+    // branch or remote.
     await guard('commit', async () => {
       await commitAll(alias, repoRoot, message)
       setMessage('')
@@ -208,7 +245,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         // Ignore.
       }
       toast(t('scm.committed'))
-    })
+    }, 'status')
   }
 
   const amend = async (): Promise<void> => {
@@ -221,10 +258,11 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
       okText: t('scm.commit'),
     })
     if (next === undefined || next.trim() === '') return
+    // Same as a commit: a real state transition, no extras involved.
     await guard('amend', async () => {
       await commitAll(alias, repoRoot, next, true)
       toast(t('scm.committed'))
-    })
+    }, 'status')
   }
 
   const doSync = async (kind: 'fetch' | 'pull' | 'push' | 'sync'): Promise<void> => {
@@ -409,7 +447,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               <IconButton
                 title={t('scm.stageAll')}
                 disabled={busy !== undefined}
-                onClick={() => { void guard('stageAll', async () => { await stagePaths(alias, repoRoot, conflicts.map(item => item.path)) }) }}
+                onClick={() => { void applyStage(conflicts.map(item => item.path), true) }}
               >
                 <IconPlus size={13} />
               </IconButton>,
@@ -464,7 +502,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   <IconButton
                     title={t('scm.stageAll')}
                     disabled={busy !== undefined}
-                    onClick={() => { void guard('stageAll', async () => { await stagePaths(alias, repoRoot, changes.map(item => item.path)) }) }}
+                    onClick={() => { void applyStage(changes.map(item => item.path), true) }}
                   >
                     <IconPlus size={13} />
                   </IconButton>
@@ -508,7 +546,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
               <IconButton
                 title={t('scm.unstageAll')}
                 disabled={busy !== undefined}
-                onClick={() => { void guard('unstageAll', async () => { await unstagePaths(alias, repoRoot, staged.map(item => item.path)) }) }}
+                onClick={() => { void applyStage(staged.map(item => item.path), false) }}
               >
                 <IconClose size={12} />
               </IconButton>,

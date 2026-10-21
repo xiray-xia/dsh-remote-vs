@@ -51,6 +51,7 @@ import {
   stashPopCommand,
   stashSaveCommand,
   statusDetailCommand,
+  statusPathsCommand,
   unstageCommand,
 } from '../../git-ops.ts'
 import { api, gitTimeoutMs } from '../api.ts'
@@ -121,6 +122,28 @@ export async function findRepos(alias: string, workspaceRoot: string): Promise<s
 export async function loadStatusDetail(alias: string, root: string): Promise<GitStatusDetail> {
   const out = await run(alias, statusDetailCommand(root))
   return parseStatusDetail(out.stdout)
+}
+
+/**
+ * Pathspec-limited status probe: the raw `-z` stdout for JUST these paths.
+ *
+ * The verification half of a stage/unstage. It deliberately does not go through
+ * `loadStatusDetail`: that command walks the whole repository (minutes on a
+ * large one), while this one is bounded by the paths handed to it — which is
+ * what lets the panel confirm an optimistic stage immediately.
+ *
+ * The budget is the read-path one (60 s), not the git budget: a probe that
+ * hangs must not hold the panel for the full git timeout.
+ *
+ * @param alias - host alias.
+ * @param root - absolute remote repository root (git runs here).
+ * @param paths - repo-relative paths that were just staged/unstaged.
+ * @returns the raw `-z` porcelain stdout ('' when nothing was asked).
+ */
+export async function probeStatusPaths(alias: string, root: string, paths: readonly string[]): Promise<string> {
+  if (paths.length === 0) return ''
+  const out = await run(alias, statusPathsCommand(root, paths), 60_000)
+  return out.stdout
 }
 
 /** Current branch with its ahead/behind counters (detached HEAD tolerated). */

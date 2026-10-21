@@ -28,8 +28,9 @@ import { buildDiffModel } from './scm/diff-model.ts'
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
 import { changeSetFromHunks } from './changes/model.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
-import { bucketStatus, buildTreeMarks, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
-import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, resolveRepoRoot, applyHunk, type DiffPayload } from './scm/actions.ts'
+import { applyStageOverrides, bucketStatus, buildTreeMarks, optimisticStageDetail, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
+import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeStatusPaths, resolveRepoRoot, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
+import { StageCoordinator } from './scm/stage-queue.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
@@ -205,6 +206,49 @@ const lang: Lang = detectLang()
 
 const EMPTY_STATUS: GitStatusDetail = { entries: [], ignored: [], truncated: false }
 
+// ------------------------------------------------- optimistic stage/unstage
+
+/**
+ * Local stage/unstage results, for ONE repository, that a full status read may
+ * not have seen yet.
+ *
+ * Skipping the repository-wide refresh after a stage is what makes the click
+ * instant, but another verb (a save, a discard, a commit) can still have a full
+ * `git status` in flight — and on a large repository that read started minutes
+ * ago. Landing it as-is would flip the row the user just staged back into
+ * "changes", so `refreshGit` re-applies whatever started after the read did
+ * (see `applyStageOverrides`) and prunes the rest.
+ */
+let stageOverrides = new Map<string, StageOverride>()
+/** Repository the overrides above belong to (`alias\nroot`); '' = none. */
+let stageOverrideTarget = ''
+/** Monotonic ticket: what a status read started at (see `applyStageOverrides`). */
+let stageSeq = 0
+
+/** Repository identity for the override bookkeeping. */
+function stageTargetKey(target: { alias: string; root: string }): string {
+  return `${target.alias}\n${target.root}`
+}
+
+/**
+ * The stage/unstage coordinator (see `scm/stage-queue.ts`).
+ *
+ * One instance per page: the panel's clicks, this store's status model and the
+ * user notifications meet here. Every verb it drives is the panel's own action
+ * layer, so nothing about it needs a host-side change.
+ */
+const stageCoordinator = new StageCoordinator(
+  {
+    stage: (target, paths) => stagePaths(target.alias, target.root, paths),
+    unstage: (target, paths) => unstagePaths(target.alias, target.root, paths),
+    probe: (target, paths) => probeStatusPaths(target.alias, target.root, paths),
+  },
+  {
+    apply: applyLocalStage,
+    notify: (text, isError) => toast(text, isError),
+  },
+)
+
 const state: State = {
   ctx: undefined,
   ready: false,
@@ -289,6 +333,11 @@ export interface ExplorerValue {
   refreshAll: () => void
   refreshGit: () => Promise<void>
   afterWrite: () => Promise<void>
+  /**
+   * Stage / unstage paths: the row moves at once, and ONE path-limited status
+   * confirms it (no repository-wide status, no extras — see `stageOptimistic`).
+   */
+  stageOptimistic: (paths: readonly string[], staged: boolean) => Promise<void>
   openFile: (fullPath: string, options?: { line?: number }) => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
   openCommitFile: (hash: string, rel: string) => void
@@ -393,6 +442,7 @@ function build(): ExplorerValue {
     refreshAll,
     refreshGit,
     afterWrite,
+    stageOptimistic,
     openFile,
     openDiff,
     openCommitFile,
@@ -570,6 +620,10 @@ function selectWorkspaceAuto(id: string): void {
 function applyWorkspaceSelection(id: string, byUser: boolean): void {
   if (state.workspaceId === id) return
   if (byUser) noteManualPick()
+  // Local stage results are repository-relative: another binding's paths must
+  // never be re-applied to this one.
+  stageOverrides = new Map()
+  stageOverrideTarget = ''
   patch({
     workspaceId: id,
     tabs: [],
@@ -861,6 +915,9 @@ export async function refreshGit(): Promise<void> {
   // slower request wins the last write and the panel shows one workspace's
   // repository while the selector and every action use another's.
   const stale = (): boolean => gen !== gitGeneration || activeBinding().key !== key
+  // A local stage/unstage that happens while this read is in flight cannot be
+  // in its answer: remember where the local timeline stood when it started.
+  const stageAt = stageSeq
   patch({ gitBusy: true })
   try {
     const workdir = repoWorkdir(workspace.remotePath, state.repoSubdir)
@@ -879,7 +936,16 @@ export async function refreshGit(): Promise<void> {
     // stored choice is what git actually uses (and what the picker shows).
     const settled = repoSubdirOf(workspace.remotePath, root) ?? state.repoSubdir
     if (settled !== state.repoSubdir) writeRepoSubdir(key, settled)
-    patch({ repoRoot: root, repoSubdir: settled, repoMissing: false, status: detail, head, gitBusy: false, gitError: undefined })
+    // Keep the local stage results this read could not have seen, and retire
+    // the ones it did see (they are in `detail` now, for better or worse).
+    const target = stageTargetKey({ alias: workspace.alias, root })
+    const status = stageOverrideTarget === target ? applyStageOverrides(detail, stageOverrides, stageAt) : detail
+    if (stageOverrideTarget === target) {
+      for (const [path, override] of stageOverrides) {
+        if (override.at <= stageAt) stageOverrides.delete(path)
+      }
+    }
+    patch({ repoRoot: root, repoSubdir: settled, repoMissing: false, status, head, gitBusy: false, gitError: undefined })
   } catch (error) {
     if (stale()) return
     // Clear the repo identity too. Leaving a previous binding's `repoRoot` in
@@ -902,6 +968,61 @@ export async function refreshGit(): Promise<void> {
 export async function afterWrite(): Promise<void> {
   await refreshGit()
   patch({ revision: state.revision + 1 })
+}
+
+/** The repository the SCM panel is pointed at, or undefined when none. */
+export function scmTarget(): { alias: string; root: string } | undefined {
+  const workspace = currentWorkspace()
+  if (workspace === undefined || state.repoRoot === undefined) return undefined
+  return { alias: workspace.alias, root: state.repoRoot }
+}
+
+/**
+ * Move paths between the index and the worktree halves of the LOCAL status
+ * model — the optimistic update, its rollback, and the correction the probe
+ * asks for all land here.
+ *
+ * Pure model work: no command is issued, nothing but `status` is republished,
+ * and the explorer's revision is left alone (staging does not change the remote
+ * tree, so re-listing directories over SFTP would be pure waste). The paths are
+ * also remembered so a full status read that started BEFORE this change cannot
+ * undo it (see `applyStageOverrides`).
+ */
+export function applyLocalStage(paths: readonly string[], staged: boolean): void {
+  if (paths.length === 0) return
+  const target = scmTarget()
+  const key = target === undefined ? '' : stageTargetKey(target)
+  if (key !== stageOverrideTarget) {
+    // Another repository (or none): the previous overrides name paths that
+    // mean something else here, so they must not be applied to it.
+    stageOverrides = new Map()
+    stageOverrideTarget = key
+  }
+  stageSeq += 1
+  for (const path of paths) stageOverrides.set(path, { staged, at: stageSeq })
+  if (state.status === undefined) return
+  const next = optimisticStageDetail(state.status, paths, staged)
+  if (next !== state.status) patch({ status: next })
+}
+
+/**
+ * Stage / unstage paths with instant local feedback and ONE cheap check.
+ *
+ * The reported problem: `+` on one file in a large repository fired four
+ * repository-wide git commands (the `git add`, a full `git status`, and the
+ * three extras loaders), so the click cost minutes and locked the panel. Here
+ * the row moves immediately in the local model, the real verb goes out at once,
+ * and a single path-limited `git status -- <paths>` (cost independent of the
+ * repository size) confirms it — rolling the row back and telling the user when
+ * the repository disagrees.
+ *
+ * Resolves when the verification is in; rejects when the git verb itself failed
+ * (the caller reports that error).
+ */
+export async function stageOptimistic(paths: readonly string[], staged: boolean): Promise<void> {
+  const target = scmTarget()
+  if (target === undefined || paths.length === 0) return
+  await stageCoordinator.submit(target, paths, staged)
 }
 
 // -------------------------------------------------------------- tab model

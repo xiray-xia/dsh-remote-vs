@@ -9,7 +9,7 @@
  * inherited downward, because `git status --ignored=matching` reports an
  * ignored directory once, unexpanded.
  */
-import type { GitStatusDetail } from '../../protocol.ts'
+import type { GitPathStatus, GitStatusDetail } from '../../protocol.ts'
 
 /** One changed path as the SCM panel shows it. */
 export interface ChangeEntry {
@@ -108,6 +108,148 @@ export function bucketStatus(detail: GitStatusDetail): StatusBuckets {
     // conflicted — exactly the three sections the panel renders.
     total: staged.length + merged.length + conflicts.length,
   }
+}
+
+/**
+ * Whether one porcelain record counts as STAGED for the panel.
+ *
+ * Mirrors `bucketStatus` exactly, because a verification that disagreed with
+ * the list would "correct" a change the user can see was applied: an untracked
+ * record is not in the index at all, and a conflict pair lives in its own
+ * section (never in "staged changes").
+ */
+export function isStagedStatus(x: string, y: string): boolean {
+  if (x === '?' || y === '?') return false
+  if (isConflict(x, y)) return false
+  return x !== ' '
+}
+
+/**
+ * The staged-ness of one path in a PATH-LIMITED status probe
+ * (`git status --porcelain -z -uno -- <paths>`).
+ *
+ * The probe runs with `--untracked-files=no`, so a path that is not in the
+ * index has no record at all: absence means "not staged" (measured against
+ * real git — untracked → no record, staged → `A `/`M `).
+ *
+ * A trailing slash is an untracked DIRECTORY row (`-u normal` reports the
+ * directory once): `git add -- dir/` puts every file inside into the index and
+ * the probe then reports those files individually, never `dir/` itself — so a
+ * directory path is answered by prefix (also measured).
+ */
+export function stagedStateOf(detail: GitStatusDetail, path: string): boolean {
+  if (path.endsWith('/')) {
+    return detail.entries.some(entry => entry.path.startsWith(path) && isStagedStatus(entry.x, entry.y))
+  }
+  const hit = detail.entries.find(entry => entry.path === path || entry.origPath === path)
+  return hit === undefined ? false : isStagedStatus(hit.x, hit.y)
+}
+
+/**
+ * The local (optimistic) projection of one stage/unstage: what the detailed
+ * status looks like the moment the user clicks, before the host answers.
+ *
+ * The transform mirrors what git does to the two halves of a porcelain record
+ * (`git add` clears the worktree half, `git restore --staged` clears the index
+ * half) and was checked against real git for the cases that are not obvious:
+ *   - staging an untracked path (`??`) makes it `A `;
+ *   - unstaging a staged NEW file returns it to `??` (untracked rows are listed
+ *     under "changes", so the record stays in the model);
+ *   - unstaging a staged RENAME leaves HEAD's path deleted in the INDEX — the
+ *     old path becomes `D ` and the new one untracked (measured, not assumed);
+ *   - staging a conflict resolves it into the index.
+ *
+ * Pure, so the panel's instant feedback is assertable without a host: the
+ * caller decides WHEN to apply it (and when to apply the inverse).
+ *
+ * @param detail - the status the panel is showing.
+ * @param paths - repo-relative paths that were just staged/unstaged.
+ * @param staged - true for a stage, false for an unstage.
+ * @returns the projected status (the same object when no path matched).
+ */
+export function optimisticStageDetail(
+  detail: GitStatusDetail,
+  paths: readonly string[],
+  staged: boolean,
+): GitStatusDetail {
+  if (paths.length === 0) return detail
+  const wanted = new Set(paths)
+  const entries: GitPathStatus[] = []
+  let touched = false
+  for (const entry of detail.entries) {
+    if (!wanted.has(entry.path)) {
+      entries.push(entry)
+      continue
+    }
+    touched = true
+    entries.push(...localStageEntry(entry, staged))
+  }
+  return touched ? { ...detail, entries } : detail
+}
+
+/** One record's local projection (a rename unstaged into two records). */
+function localStageEntry(entry: GitPathStatus, staged: boolean): GitPathStatus[] {
+  const { path, x, y, origPath } = entry
+  const keep = origPath === undefined ? {} : { origPath }
+  if (staged) {
+    // The index half takes the most descriptive letter it can keep: what is
+    // already staged, else what the worktree showed, else a plain add.
+    const letter = x !== ' ' && x !== '?' ? x : (y !== ' ' && y !== '?' ? y : 'M')
+    return [{ path, x: letter, y: ' ', ...keep }]
+  }
+  // Unmerged paths: `git restore --staged` refuses them, so the local model
+  // shows nothing until the verb reports the failure.
+  if (isConflict(x, y)) return [entry]
+  // Unstage puts the index half back to HEAD. A path HEAD does not have — an
+  // addition, a rename/copy destination, an untracked row — therefore has no
+  // index entry left at all and becomes untracked again (measured against real
+  // git: unstaging a staged rename leaves the new name untracked and HEAD's old
+  // path deleted in the INDEX).
+  if (x === '?' || x === 'A' || x === 'R' || x === 'C') {
+    const out: GitPathStatus[] = [{ path, x: '?', y: '?' }]
+    if (x === 'R' && origPath !== undefined) out.push({ path: origPath, x: 'D', y: ' ' })
+    return out
+  }
+  // HEAD has the path: what is left of the record is the worktree half.
+  const worktree = y !== ' ' && y !== '?' ? y : x
+  return [{ path, x: ' ', y: worktree, ...keep }]
+}
+
+/** One local stage/unstage result a full status read may not have seen. */
+export interface StageOverride {
+  staged: boolean
+  /** Monotonic sequence number of the local change. */
+  at: number
+}
+
+/**
+ * Re-apply the local stage results a FULL status read could not have seen.
+ *
+ * Skipping the repository-wide refresh after a stage is what makes the click
+ * instant, but another verb (a save, a discard, a commit) can still have a full
+ * `git status` in flight — and on a large repository that read started minutes
+ * ago. Landing it as-is would flip the row the user just staged back into
+ * "changes", i.e. the panel would contradict itself for as long as it takes to
+ * run the next full read. A read that STARTED before a local change cannot have
+ * seen it, so those paths keep the local value; a read that started after them
+ * is authoritative and prunes them.
+ *
+ * @param detail - the freshly read status.
+ * @param overrides - repo-relative path → local stage result (one repository).
+ * @param startedAt - the sequence number when the read was issued.
+ * @returns the detail with the newer local results re-applied.
+ */
+export function applyStageOverrides(
+  detail: GitStatusDetail,
+  overrides: ReadonlyMap<string, StageOverride>,
+  startedAt: number,
+): GitStatusDetail {
+  let next = detail
+  for (const [path, override] of overrides) {
+    if (override.at <= startedAt) continue
+    next = optimisticStageDetail(next, [path], override.staged)
+  }
+  return next
 }
 
 /** Per-path marks the tree paints: file letter, directory roll-up, ignored. */

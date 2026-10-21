@@ -140,6 +140,27 @@ export function statusDetailCommand(workdir: string): string {
   return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=normal --ignored=matching`)
 }
 
+/**
+ * Pathspec-limited porcelain status: the SAME `-z` record shape as
+ * `statusDetailCommand`, restricted to the given paths.
+ *
+ * This is the cheap half of a stage/unstage. A full `git status` costs the
+ * repository's whole index/worktree walk — minutes on the AOSP monorepo the
+ * report came from — while a pathspec-limited call only visits the paths it was
+ * given, so its cost tracks the touched paths instead of the repository size.
+ * That is what makes it usable as an immediate verification of a local
+ * (optimistic) stage.
+ *
+ * `--untracked-files=no` is deliberate: the untracked walk is the expensive
+ * part, and it cannot answer the question this call exists for. Verified
+ * against real git — an untracked path yields NO record, a path that just
+ * entered the index is reported as `A ` (and a staged rename as `R  new\0old`)
+ * — so absence means "not in the index", which is all the caller needs.
+ */
+export function statusPathsCommand(workdir: string, paths: readonly string[]): string {
+  return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=no -- ${relPaths(paths)}`)
+}
+
 /** Branch header only (`## branch...upstream [ahead N, behind M]`), NUL safe. */
 export function branchHeaderCommand(workdir: string): string {
   return capped(`${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
