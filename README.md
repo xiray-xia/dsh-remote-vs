@@ -29,18 +29,23 @@ P2 起原生工具在远端工作区里透明跑远端（见下）。
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
+dsh plugin --profile web add dsh-remote-vs
 ```
+
+（从 npm 装，推荐；也可以直接跟仓库装：`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`。）
 
 要求 DSH `0.2.1-alpha.3` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.1-rc.2`**）。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
 必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。
 
-**这一条命令就够了，不需要放行任何构建脚本**：仓库里带着构建好的 `lib/`，包本身没有
-`prepare`/`postinstall`，依赖树里也没有任何带安装脚本的包（`ssh2` 是**打进产物**的，不是依赖）。
+**这一条命令就够了，不需要放行任何构建脚本**：包本身没有 `prepare`/`postinstall`，依赖树里也没有任何
+带安装脚本的包（`ssh2` 是**打进产物**的，不是依赖）；走仓库安装时还带着构建好的 `lib/`。
 以前需要「在 profile 的 `pnpm-workspace.yaml` 里放行构建脚本后重跑」，那是 pnpm 12 对
 「带安装脚本的依赖」的硬策略门（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`），
 依赖侧无法豁免，只能从树里消掉。装完重启 `dsh web`，打开设置 → 远程主机开配。
+
+> 包内含预编译的 helper（`vendor/dsh-remote-helpers/`，约 45 MB），所以首次安装下载量偏大 ——
+> 它是**唯一**的 helper 投放渠道（官方 Release 不带 helper 可执行文件），去掉它就没法给新主机部署。
 
 ## 能力
 

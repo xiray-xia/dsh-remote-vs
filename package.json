@@ -1,8 +1,19 @@
 {
   "name": "dsh-remote-vs",
   "description": "VSCode-style remote development for DSH: SSH host manager (key/password), helper deploy pipeline with version check, remote file explorer + editor + terminal in dsh-better-sidebar.",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "icon": "icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "ssh",
+    "sftp",
+    "remote-development",
+    "remote-editor",
+    "terminal",
+    "vscode"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -78,6 +89,10 @@
   ],
   "author": "xiray-xia",
   "license": "MIT",
+  "homepage": "https://github.com/xiray-xia/dsh-remote-vs#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/xiray-xia/dsh-remote-vs.git"

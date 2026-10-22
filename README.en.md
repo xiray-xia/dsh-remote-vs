@@ -31,22 +31,30 @@ transparently run remotely (see below).
 ## Install
 
 ```sh
-dsh plugin --profile web add github:xiray-xia/dsh-remote-vs
+dsh plugin --profile web add dsh-remote-vs
 ```
+
+(From npm, recommended; installing straight from the repository also works:
+`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
 Requires DSH `0.2.1-alpha.3` or newer (`engines.dsh` enforces the range; **the tested
 baseline is `0.2.1-rc.2`**). `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name).
 
-**That one command is all it takes — no build scripts have to be approved.** The
-repository ships the built `lib/`, the package has no `prepare`/`postinstall`, and no
-package in the dependency tree carries an install script (`ssh2` is **bundled into the
-artifact**, not depended on). The old "allow the printed build scripts in that profile's
+**That one command is all it takes — no build scripts have to be approved.** The package
+has no `prepare`/`postinstall` and no package in the dependency tree carries an install
+script (`ssh2` is **bundled into the artifact**, not depended on); the repository route
+also ships the built `lib/`. The old "allow the printed build scripts in that profile's
 `pnpm-workspace.yaml` and re-run" step was pnpm 12's hard policy gate for dependencies
 with lifecycle scripts (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`);
 it cannot be waived from the dependency side, only removed from the tree. Then restart
 `dsh web` and open Settings → Remote hosts to configure.
+
+> The package carries the prebuilt helper (`vendor/dsh-remote-helpers/`, ~45 MB), so the
+> first install is a large download — it is the **only** channel that delivers a helper
+> (the official releases ship no helper executable), and dropping it would leave new hosts
+> undeployable.
 
 ## Capabilities
 
