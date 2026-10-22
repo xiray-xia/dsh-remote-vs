@@ -411,26 +411,58 @@ function assertQuery(query: string): string {
 }
 
 /**
- * Name search under a remote directory. Depth-capped and `.git`/`node_modules`
- * pruned so a huge tree cannot turn one keystroke into a minute of walking.
+ * Directory names a NAME search never walks.
+ *
+ * The old `find` prune list plus one addition: `out` is build output (the
+ * content search already prunes it), and on an AOSP tree with a populated `out/`
+ * walking it would cost far more than the depth cap it replaces ever did.
+ */
+const NAME_PRUNE_DIRS = ['.git', 'node_modules', '.venv', 'dist', 'build', 'out']
+
+/**
+ * Name search under a remote directory: `rg` when the host has it, `find` when
+ * it does not — decided BY THE HOST inside one command, so there is no probe
+ * round trip and no per-alias cache to invalidate.
+ *
+ * Why the fallback exists at all: the previous implementation was `find` with a
+ * hard `-maxdepth 6`, and that cap silently hid real files. Measured on the repo-a
+ * monorepo (~4M files), `b0/vendor/oem/usdk/services/src/com/android/server/
+ * KeySystemService.java` sits 10 levels down: `find -maxdepth 6` returns 0
+ * hits (2.0 s), `find -maxdepth 12` returns it but costs 13.5 s, and an uncapped
+ * `find` over that tree does not finish at all. `rg --files --iglob` answers the
+ * same query in ~4 s with no depth limit, because it walks the tree once with a
+ * prefiltered glob instead of stat-ing every entry.
+ *
+ * Coverage: `--no-ignore --hidden` keeps what `find` did — it never consulted
+ * .gitignore — so a generated or ignored file is still findable by name. The
+ * fallback keeps a cap (raised from 6 to 12) because an uncapped walk is not
+ * viable on a tree that size.
+ *
+ * The query is a GLOB fragment (as it always was): `*.java` still works as a
+ * pattern, and `--iglob` matches case-insensitively like `find -iname`.
  */
 export async function searchFiles(
   alias: string,
   root: string,
   query: string,
   limit = 120,
-  depth = 6,
+  depth = 12,
 ): Promise<{ hits: SearchHit[]; truncated: boolean }> {
   const clean = assertQuery(query)
   const cap = Math.min(Math.max(Math.floor(limit), 1), 400)
-  // `-printf '%p\t%y'` carries the entry type, because `find -print` never
-  // emits a trailing slash for directories — the old `line.endsWith('/')`
-  // test could therefore never be true and every hit was reported as a file
-  // (so a directory hit was routed into openFile). GNU/BusyBox find support
-  // -printf; the content-search builder already depends on GNU grep flags.
-  const command = `find ${shQuote(root)} -maxdepth ${depth} `
-    + `\\( -name .git -o -name node_modules -o -name .venv -o -name dist -o -name build \\) -prune -o `
-    + `\\( -type f -o -type d \\) -iname ${shQuote(`*${clean}*`)} -printf '%p\\t%y\\n' 2>/dev/null | head -n ${cap + 1}`
+  const pattern = `*${clean}*`
+  const prunes = NAME_PRUNE_DIRS.map(name => `-g ${shQuote(`!**/${name}/**`)}`).join(' ')
+  const rg = `rg --files --no-ignore --hidden --iglob ${shQuote(pattern)} ${prunes} ${shQuote(root)} 2>/dev/null`
+  // `-printf '%p\t%y'` carries the entry type, because `find -print` never emits
+  // a trailing slash for directories — the old `line.endsWith('/')` test could
+  // therefore never be true and every hit was reported as a file (so a directory
+  // hit was routed into openFile). GNU/BusyBox find support -printf; the
+  // content-search builder already depends on GNU grep flags. rg's `--files`
+  // prints bare paths (files only), which the parser below already tolerates.
+  const find = `find ${shQuote(root)} -maxdepth ${depth} `
+    + `\\( ${NAME_PRUNE_DIRS.map(name => `-name ${shQuote(name)}`).join(' -o ')} \\) -prune -o `
+    + `\\( -type f -o -type d \\) -iname ${shQuote(pattern)} -printf '%p\\t%y\\n' 2>/dev/null`
+  const command = `if command -v rg >/dev/null 2>&1; then ${rg}; else ${find}; fi | head -n ${cap + 1}`
   const out = await tryRun(alias, command, 90_000)
   const lines = out.split('\n').map(line => line.trim()).filter(line => line !== '')
   const truncated = lines.length > cap

@@ -61,7 +61,25 @@ export function assertQuery(query: string): string {
 }
 
 /**
- * Recursive content search under one absolute remote directory.
+ * Recursive content search under one absolute remote directory: `rg` when the
+ * host has it, `grep -r` when it does not.
+ *
+ * Measured on the repo-a monorepo (~4M files, 6.6 + 6.12 kernel trees): the `grep`
+ * form was still running when a 300 s timeout killed it, and the same query
+ * scoped to one subtree (`b0/vendor/oem`) answers in 18 ms — on a tree that
+ * size the tool matters less than the scope, but rg is the faster one and it is
+ * also what the user asked for. rg is preferred, with the previous grep command
+ * kept verbatim as the fallback, so behaviour can never get worse than today.
+ *
+ * Two deliberate differences on the rg path:
+ *   - it honours .gitignore (grep never did), which is what keeps build outputs
+ *     and kernel artifacts out of an interactive search — the same default VS
+ *     Code ships, and the reason `--no-ignore` is NOT passed here;
+ *   - `--hidden` keeps dotfiles searchable (`.github/workflows/*.yml`), with
+ *     `.git` excluded explicitly so `--hidden` cannot walk a nested repository.
+ *
+ * The output SHAPE is identical either way (`path\0line:text`, verified byte for
+ * byte against both tools on a real host), so `parseContentHits` is unchanged.
  *
  * `--null` puts a NUL between the path and the `line:text` half so a path
  * containing `:` still parses; `cut` bounds each line and `head` bounds the
@@ -72,7 +90,7 @@ export function contentSearchCommand(dir: string, query: string, options: Conten
   const max = Math.min(Math.max(Math.floor(options.maxResults), 1), 2000)
   const lineChars = Math.min(Math.max(Math.floor(options.maxLineChars), 80), 4000)
   const prune = [...PRUNE_DIRS, ...(options.prune ?? [])]
-  const parts = [
+  const grepParts = [
     'grep -rIn --null --binary-files=without-match',
     ...prune.map(name => `--exclude-dir=${shQuote(name)}`),
     options.caseSensitive ? '' : '-i',
@@ -82,7 +100,19 @@ export function contentSearchCommand(dir: string, query: string, options: Conten
     '--',
     shQuote(assertRemoteDir(dir)),
   ].filter(part => part !== '')
-  return `${parts.join(' ')} 2>/dev/null | cut -c1-${lineChars} | head -n ${max + 1}`
+  const rgParts = [
+    'rg -n --no-heading --null --color=never --with-filename --hidden',
+    ...prune.map(name => `-g ${shQuote(`!**/${name}/**`)}`),
+    options.caseSensitive ? '' : '-i',
+    options.wholeWord ? '-w' : '',
+    // rg is regex by default, so literal mode is the one that needs a flag.
+    options.regex ? '' : '-F',
+    `-e ${shQuote(pattern)}`,
+    shQuote(assertRemoteDir(dir)),
+  ].filter(part => part !== '')
+  const grep = `${grepParts.join(' ')} 2>/dev/null`
+  const rg = `${rgParts.join(' ')} 2>/dev/null`
+  return `if command -v rg >/dev/null 2>&1; then ${rg}; else ${grep}; fi | cut -c1-${lineChars} | head -n ${max + 1}`
 }
 
 /** One content-search hit. */

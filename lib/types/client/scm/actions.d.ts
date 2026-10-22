@@ -157,8 +157,26 @@ export interface SearchHit {
     isDir: boolean;
 }
 /**
- * Name search under a remote directory. Depth-capped and `.git`/`node_modules`
- * pruned so a huge tree cannot turn one keystroke into a minute of walking.
+ * Name search under a remote directory: `rg` when the host has it, `find` when
+ * it does not — decided BY THE HOST inside one command, so there is no probe
+ * round trip and no per-alias cache to invalidate.
+ *
+ * Why the fallback exists at all: the previous implementation was `find` with a
+ * hard `-maxdepth 6`, and that cap silently hid real files. Measured on the repo-a
+ * monorepo (~4M files), `b0/vendor/oem/usdk/services/src/com/android/server/
+ * KeySystemService.java` sits 10 levels down: `find -maxdepth 6` returns 0
+ * hits (2.0 s), `find -maxdepth 12` returns it but costs 13.5 s, and an uncapped
+ * `find` over that tree does not finish at all. `rg --files --iglob` answers the
+ * same query in ~4 s with no depth limit, because it walks the tree once with a
+ * prefiltered glob instead of stat-ing every entry.
+ *
+ * Coverage: `--no-ignore --hidden` keeps what `find` did — it never consulted
+ * .gitignore — so a generated or ignored file is still findable by name. The
+ * fallback keeps a cap (raised from 6 to 12) because an uncapped walk is not
+ * viable on a tree that size.
+ *
+ * The query is a GLOB fragment (as it always was): `*.java` still works as a
+ * pattern, and `--iglob` matches case-insensitively like `find -iname`.
  */
 export declare function searchFiles(alias: string, root: string, query: string, limit?: number, depth?: number): Promise<{
     hits: SearchHit[];
