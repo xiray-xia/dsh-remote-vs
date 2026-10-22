@@ -148,8 +148,8 @@ export declare class SessionChanges {
      * index (1.4s measured on the reference monorepo).
      *
      * A session working directory is often a CONTAINER for repositories rather
-     * than one itself (the reference host has `/srv/workbase` holding
-     * `app-web`), and `git status` there answers exit 128 — "not a git
+     * than one itself (a session root that holds another repository inside it),
+     * and `git status` there answers exit 128 — "not a git
      * repository (or any parent up to mount point /)". When that happens the
      * ledger looks one level down once and adopts the repository it finds, which
      * is the same idea the SCM panel's `repoSubdir` expresses by hand.

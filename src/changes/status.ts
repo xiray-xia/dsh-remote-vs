@@ -367,8 +367,8 @@ export function readHeadCommand(
 /**
  * Name every immediate subdirectory that is a git repository.
  *
- * A session working directory is often a CONTAINER for repositories (the
- * reference host has `/srv/workbase` holding `app-web`), and
+ * A session working directory is often a CONTAINER for repositories (a root
+ * that holds another repository inside it), and
  * `git status` at the container answers 128. This is a one-level `ls`-style
  * probe — bounded work, no `find` — so it can never become the expensive part
  * of a scan.

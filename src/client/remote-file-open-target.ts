@@ -6,7 +6,7 @@
  * opens it through its own right-sidebar preview. That preview resolves the
  * address path against the SESSION WORKSPACE ROOT. A model that quotes a path
  * relative to its CURRENT directory (e.g. `_xfer/reports/x.md` while working
- * in `…/workbase/app-web`) therefore misses by one segment, and a
+ * in `<workspace>/<inner-repo>`) therefore misses by one segment, and a
  * remote session's workspace root only exists as an EMPTY local alias dir —
  * the click dies with the host-side ENOENT the user sees.
  *
@@ -181,7 +181,7 @@ function isRemoteAbsolute(path: string | undefined): path is string {
  * path decides between the bindings on it.
  *
  * One alias routinely carries SEVERAL bindings (the same host mounted at
- * `/home/user/repo-a/…` and `/home/user/repo-b/…`), so an alias-only match hands
+ * `/srv/one/…` and `/srv/two/…`), so an alias-only match hands
  * back whichever was created first: the editor then opens the file the caller
  * named while the sidebar, the tree and the workspace selector stay on the
  * other workspace. The remote root the caller already holds (`summary.root`, a
@@ -396,8 +396,8 @@ function bindingForHostPath(
  * `bindingForWorkspacePath` answers only for the workspace path ITSELF (exact
  * alias-dir match). A session cwd is weaker evidence: the model cd'ed into a
  * project sub-directory, and the host commits whichever spelling the session
- * ran in — the local alias (`C:\…\aliases\aliasdir-a\src`) or the REMOTE path
- * (`/srv/repo-a/src`). Both are still inside exactly
+ * ran in — the local alias dir (`C:\…\aliases\<alias>\src`) or the REMOTE
+ * path (`/srv/one/src`). Both are still inside exactly
  * one binding, so the deepest containing alias dir / remote root decides.
  *
  * No fallback to "the first binding": a cwd that names no known binding answers

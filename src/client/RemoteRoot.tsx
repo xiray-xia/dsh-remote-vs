@@ -133,7 +133,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    * Without this the panel opened on whatever localStorage held — and on a
    * fresh profile on `workspaces[0]` — so a session working in one remote
    * workspace showed another workspace's tree until the user corrected it by
-   * hand (the reported bug: a repo-a session browsing repo-b). The host's own
+   * hand (the reported bug: a session browsing another workspace on one host). The host's own
    * workspace membership for the on-screen session is the only sanctioned
    * source (`useRemoteChatTarget`), and it is a soft read: while it answers
    * nothing the current selection stands.

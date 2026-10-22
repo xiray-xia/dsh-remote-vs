@@ -189,7 +189,7 @@ export default class TransparentFileSystem extends FileSystem {
     // for remote processes), but that spelling is not guaranteed to route BACK:
     // a session path derived from it (working-directory.set commits THIS value)
     // would resolve local whenever two bindings share the remote root — that is
-    // how subagents of `alias-c`/`alias-d` sessions ended up running on the Host.
+    // how subagents of a session bound to another host ended up running on the Host.
     // toSessionPath keeps the remote spelling where it is unambiguous and uses
     // the binding's unique alias spelling only where it is not.
     return this.remote.toSessionPath(world, fs.processPath(target))

@@ -222,7 +222,7 @@ export declare function setFollowSession(sessionId: string | undefined): void;
  * workspace showed the sidebar on another — the selector kept whatever
  * localStorage held (or the FIRST binding, on a fresh profile), and a click in
  * the change panel matched its binding by alias alone, which is ambiguous as
- * soon as one host carries two workspaces (repo-a and repo-b share `alias-a`).
+ * soon as one host carries two workspaces under one alias).
  *
  * Resolution order, strongest evidence first (all of it inside
  * `planWorkspaceFollow`, so the policy has exactly one home):

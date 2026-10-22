@@ -173,8 +173,8 @@ export class RemoteWorlds {
     if (byRemotePath.length === 0) return undefined
     const longest = Math.max(...byRemotePath.map(candidate => candidate.length))
     const top = byRemotePath.filter(candidate => candidate.length === longest)
-    // Two bindings can share one remote directory — here `alias-c:/home` and
-    // `alias-d:/home` do. Picking either would send a write to the wrong host,
+    // Two bindings can share one remote directory — here two aliases both
+    // mounted at `/home` do. Picking either would send a write to the wrong host,
     // and a wrong-host write is silent and destructive in a way a local one is
     // not, so an ambiguous remote-form cwd stays local instead of guessing.
     //
@@ -276,7 +276,7 @@ export class RemoteWorlds {
    * service canonicalizes through it), and the remote fs view answers the remote
    * absolute path. That is the right spelling for display and for remote
    * processes, but it is not always a spelling the router can route BACK: two
-   * bindings may share one remote root (`alias-c:/home` + `alias-d:/home`), and
+   * bindings may share one remote root (two aliases both mounted at `/home`), and
    * `/home` is then deliberately ambiguous and resolves local. A spawned child
    * session inherits exactly that committed spelling — so every subagent of a
    * remote session in one of those workspaces silently ran on the Host (and a

@@ -234,8 +234,8 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       // sees what the load wrote.
       //
       // Resolved by the session's REMOTE root, never by the alias alone: one
-      // alias carries several bindings (repo-a and repo-b both live on
-      // `alias-a`), and the alias-only form picked whichever came first —
+      // alias carries several bindings (two workspaces can live on one alias),
+      // and the alias-only form picked whichever came first —
       // the file opened while the tree and the selector stayed on the other
       // workspace. That was the reported bug.
       let binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
