@@ -425,13 +425,12 @@ const NAME_PRUNE_DIRS = ['.git', 'node_modules', '.venv', 'dist', 'build', 'out'
  * round trip and no per-alias cache to invalidate.
  *
  * Why the fallback exists at all: the previous implementation was `find` with a
- * hard `-maxdepth 6`, and that cap silently hid real files. Measured on the repo-a
- * monorepo (~4M files), `b0/vendor/oem/usdk/services/src/com/android/server/
- * KeySystemService.java` sits 10 levels down: `find -maxdepth 6` returns 0
- * hits (2.0 s), `find -maxdepth 12` returns it but costs 13.5 s, and an uncapped
- * `find` over that tree does not finish at all. `rg --files --iglob` answers the
- * same query in ~4 s with no depth limit, because it walks the tree once with a
- * prefiltered glob instead of stat-ing every entry.
+ * hard `-maxdepth 6`, and that cap silently hid real files — in a monorepo of a
+ * few million files, a source file ten levels down is simply invisible to it.
+ * Measured on such a tree: `find -maxdepth 6` → 0 hits (2.0 s), `find -maxdepth
+ * 12` → the hit, but 13.5 s, an uncapped `find` → does not finish at all, and
+ * `rg --files --iglob` → the hit in ~4 s with no depth limit, because it walks
+ * the tree once with a prefiltered glob instead of stat-ing every entry.
  *
  * Coverage: `--no-ignore --hidden` keeps what `find` did — it never consulted
  * .gitignore — so a generated or ignored file is still findable by name. The

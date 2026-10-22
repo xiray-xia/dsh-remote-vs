@@ -178,11 +178,13 @@ dsh_remote_vs/
 When a new helper is built, swap the 4-piece set (tarball + sha256 + helper.json + patch notes)
 into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4, which is gitignored and not distributed).
 
-`.spike/` (gitignored) holds live-host verification scripts plus the local self-checks:
-`p2-router.ts` main regression (real remote + real Cordis + real router classes) and probes like
-`grep-probe.mjs` (build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
-`fallback-check.mjs` / `client-load-check.mjs` / `tool-schema-check.mjs` which need no host at all
-(see "Development").
+`.spike/` and `scripts/` (both gitignored, **never distributed with the repository**) hold the
+development-time verification and self-check scripts: `.spike/` has the live-host ones — `p2-router.ts`
+main regression (real remote + real Cordis + real router classes) and probes like `grep-probe.mjs`
+(build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
+`fallback-check.mjs` / `client-load-check.mjs` / `tool-schema-check.mjs` which need no host at all;
+`scripts/` has the plain-node regression gates (`node scripts/check-*.mjs`, with `verify-lib.mjs`
+checking the build artifact). Both are covered under "Development".
 
 ## Remote workbench (VS Code style)
 
@@ -322,8 +324,9 @@ dsh plugin --profile web add link:<absolute path of this directory>
 **How a change goes live: `pnpm run build`, then restart `dsh web` — for the host half and the client half alike.**
 **`lib/` is committed.** The package has no `prepare` script (pnpm 12 refuses to run one for a git
 dependency), so a `dsh plugin add github:…` user receives the repository as it is: **after editing
-source you must `npm run build` and commit `lib/` with it.** The first step of `pnpm check`
-(`scripts/verify-lib.mjs`) fails when `lib/` is untracked or throws while loading.
+source you must `npm run build` and commit `lib/` with it** (`node scripts/verify-lib.mjs` checks that the
+entries are present, committed and loadable; the self-check scripts live on the maintainer's machine only,
+see below).
 The Host reads plugin bundles into memory at startup (`initialBundleSnapshot`: it stats mtime/ctime/size into a
 revision, then reads the bytes; the response carries `Cache-Control: public, max-age=31536000, immutable`), so a
 **client-only** change (`src/client/**`) behaves exactly the same way: a browser refresh — `Ctrl+Shift+R`

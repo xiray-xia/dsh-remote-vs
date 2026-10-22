@@ -3,14 +3,21 @@ node_modules/
 # script any more (pnpm 12 refuses to run one for a git dependency until the
 # user approves build scripts in their profile), so a `github:` install
 # receives the repository exactly as it is — an uncommitted build would ship an
-# empty plugin. `scripts/verify-lib.mjs` fails the gate if these stop being
-# tracked. Source maps stay out: 4.7 MB per client change is not worth keeping
-# in history, and nothing loads them.
+# empty plugin. Source maps stay out: 4.7 MB per client change is not worth
+# keeping in history, and nothing loads them.
 lib/**/*.map
 dist/
 *.tsbuildinfo
 .DS_Store
+# Development-only trees. The published repository holds exactly what a user
+# needs to INSTALL and RUN the plugin (lib/, src/, vendor/, locale/,
+# cordis.patch.yml, icon.svg, the READMEs, LICENSE, package.json + build
+# config). Everything used only to develop and verify it stays on disk:
+#   .spike/    real-host and jsdom probes
+#   scripts/   the self-check gates (`node scripts/check-*.mjs`)
+#   docs/MAINTENANCE.md, docs/P2-PLAN.md, docs/CODE-REVIEW*.md, CODE-REVIEW*.md
 .spike/
+scripts/
 # Local-only working docs (never push to GitHub; see MAINTENANCE §1)
 docs/P2-PLAN.md
 docs/MAINTENANCE.md

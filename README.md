@@ -169,10 +169,12 @@ dsh_remote_vs/
 新版本 helper 编好后把 4 件套（tarball + sha256 + helper.json + 补丁说明）
 换进 vendor 并提交即可（详细步骤在本地维护文档 `docs/MAINTENANCE.md` §4，该文件被 .gitignore，不随仓库分发）。
 
-`.spike/`（gitignored）是真机验证脚本 + 本地自检脚本：`p2-router.ts` 主回归（真远端 + 真
-Cordis + 真路由类）+ `grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
+`.spike/` 与 `scripts/`（都 gitignored，**不随仓库分发**）是开发期的验证与自检脚本：
+`.spike/` 里是真机验证脚本 —— `p2-router.ts` 主回归（真远端 + 真 Cordis + 真路由类）+
+`grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
 `model-check.mjs` / `reveal-check.mjs` / `fallback-check.mjs` / `client-load-check.mjs` /
-`tool-schema-check.mjs`（见下文“开发”）。
+`tool-schema-check.mjs`；`scripts/` 里是纯 node 的回归闸门（`node scripts/check-*.mjs`，
+其中 `verify-lib.mjs` 核对构建产物）。两者都见下文"开发"。
 
 ## 远端工作台（VS Code 式）
 
@@ -291,8 +293,8 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 **改完怎么生效：`pnpm run build` 之后重启 `dsh web` —— host 半与客户端半都是。**
 **`lib/` 是入库的**：本包没有 `prepare`（pnpm 12 会拦），别人 `dsh plugin add github:…` 拿到的是仓库内容，
-所以**改完源码必须 `npm run build` 并把 `lib/` 一起提交**——`pnpm check` 的第一步
-（`scripts/verify-lib.mjs`）会在 `lib/` 没入库或加载即抛错时直接失败。
+所以**改完源码必须 `npm run build` 并把 `lib/` 一起提交**（`node scripts/verify-lib.mjs` 会核对入口齐全、
+已入库、能加载；自检脚本只在本机，见下）。
 Host 在启动时把插件包读进内存（`initialBundleSnapshot`：先记录 mtime/ctime/size 作为 rev，再读字节；
 响应头 `Cache-Control: public, max-age=31536000, immutable`），所以**只改 `src/client/**` 也一样**：
 浏览器刷新——包括 `Ctrl+Shift+R`——只会取回启动时抓下的那批字节，rev 不变。判定方法：

@@ -64,12 +64,12 @@ export function assertQuery(query: string): string {
  * Recursive content search under one absolute remote directory: `rg` when the
  * host has it, `grep -r` when it does not.
  *
- * Measured on the repo-a monorepo (~4M files, 6.6 + 6.12 kernel trees): the `grep`
- * form was still running when a 300 s timeout killed it, and the same query
- * scoped to one subtree (`b0/vendor/oem`) answers in 18 ms — on a tree that
- * size the tool matters less than the scope, but rg is the faster one and it is
- * also what the user asked for. rg is preferred, with the previous grep command
- * kept verbatim as the fallback, so behaviour can never get worse than today.
+ * Measured on a monorepo of a few million files (two kernel source trees among
+ * them): the `grep` form was still running when a 300 s timeout killed it, while
+ * the same query scoped to one subtree answers in milliseconds — on a tree that
+ * size the SCOPE matters more than the tool, but rg is the faster one, so it is
+ * preferred, with the previous grep command kept verbatim as the fallback so
+ * behaviour can never get worse than today.
  *
  * Two deliberate differences on the rg path:
  *   - it honours .gitignore (grep never did), which is what keeps build outputs
