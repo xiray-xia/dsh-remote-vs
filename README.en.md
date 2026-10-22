@@ -181,7 +181,7 @@ into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4
 `.spike/` and `scripts/` (both gitignored, **never distributed with the repository**) hold the
 development-time verification and self-check scripts: `.spike/` has the live-host ones — `p2-router.ts`
 main regression (real remote + real Cordis + real router classes) and probes like `grep-probe.mjs`
-(build with `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
+(build with the local `tsconfig.scratch.json`), plus `model-check.mjs` / `reveal-check.mjs` /
 `fallback-check.mjs` / `client-load-check.mjs` / `tool-schema-check.mjs` which need no host at all;
 `scripts/` has the plain-node regression gates (`node scripts/check-*.mjs`, with `verify-lib.mjs`
 checking the build artifact). Both are covered under "Development".

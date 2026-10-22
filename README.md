@@ -171,7 +171,7 @@ dsh_remote_vs/
 
 `.spike/` 与 `scripts/`（都 gitignored，**不随仓库分发**）是开发期的验证与自检脚本：
 `.spike/` 里是真机验证脚本 —— `p2-router.ts` 主回归（真远端 + 真 Cordis + 真路由类）+
-`grep-probe.mjs` 等探针（构建见 `tsconfig.scratch.json`），以及不需要真机的
+`grep-probe.mjs` 等探针（用本地的 `tsconfig.scratch.json` 构建），以及不需要真机的
 `model-check.mjs` / `reveal-check.mjs` / `fallback-check.mjs` / `client-load-check.mjs` /
 `tool-schema-check.mjs`；`scripts/` 里是纯 node 的回归闸门（`node scripts/check-*.mjs`，
 其中 `verify-lib.mjs` 核对构建产物）。两者都见下文"开发"。
