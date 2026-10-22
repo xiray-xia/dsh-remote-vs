@@ -26,3 +26,4 @@ docs/MAINTENANCE.md
 # repository. Keep them on disk, never in the tree.
 CODE-REVIEW*.md
 docs/CODE-REVIEW*.md
+tsconfig.scratch.json
