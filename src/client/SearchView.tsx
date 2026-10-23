@@ -20,7 +20,7 @@ import {
   type ContentHit,
 } from '../search-ops.ts'
 import { searchFiles, type SearchHit } from './scm/actions.ts'
-import { repoRelative, useExplorer } from './store.tsx'
+import { useExplorer } from './store.tsx'
 import { api } from './api.ts'
 import {
   FileIcon,
@@ -77,7 +77,7 @@ function relativeTo(root: string, full: string): string {
 
 export function SearchView(): ReactNode {
   const store = useExplorer()
-  const { t, alias, root, repoRoot } = store
+  const { t, alias, root } = store
   const [mode, setModeState] = useState<Mode>(readMode)
   const [query, setQuery] = useState('')
   /** Absolute remote directory the search runs in ('' = workspace root). */
@@ -209,17 +209,19 @@ export function SearchView(): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request?.id])
 
+  /**
+   * A hit ALWAYS opens the file.
+   *
+   * It used to open the diff instead whenever the file had a status mark, which
+   * is wrong for a search result: the user is looking for the file, not for its
+   * change, and for a path the index knows nothing about (untracked, or a mark
+   * that belongs to another repository root) that "diff" rendered EMPTY — the
+   * panel called it "no differences" and there was no way to see the content,
+   * not even by double-clicking. The diff has its own entry points (the source
+   * control panel and the change review dock).
+   */
   const openHit = (path: string, line?: number): void => {
-    if (line === undefined) {
-      const rel = repoRelative(repoRoot, path)
-      if (rel !== '' && store.marks.files.has(rel)) {
-        store.openDiff(rel, false, store.marks.files.get(rel) === '?')
-        return
-      }
-      store.openFile(path)
-      return
-    }
-    store.openFile(path, { line })
+    store.openFile(path, line === undefined ? undefined : { line })
   }
 
   const groups = useMemo(() => groupHits(contentHits), [contentHits])

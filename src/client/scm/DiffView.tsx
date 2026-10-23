@@ -225,19 +225,24 @@ function Line(props: { tokens: Token[]; empty?: boolean }): ReactNode {
 
 /**
  * The top horizontal scrollbar: a scroll container whose only content is a
- * spacer as wide as the widest pane. Dragging it drives both panes, so the
- * user never has to scroll to the bottom of a file to reach a long line's
- * horizontal bar.
+ * spacer as wide as the widest line. Dragging it drives both panes, so a long
+ * line can be reached without scrolling to the bottom of the file first.
+ *
+ * Rendered only when a line really is wider than the grid (see `hscroll`), and
+ * styled tall enough to see and grab: as a permanently mounted 13 px band with
+ * a `thin`, low-contrast thumb it read as "there is no horizontal scrollbar".
  */
 function HScrollBar(props: {
   barRef: React.RefObject<HTMLDivElement>
   width: number
+  hint: string
   onScroll: (left: number) => void
 }): ReactNode {
   return (
     <div
       className="rvs-hbar"
       ref={props.barRef}
+      title={props.hint}
       onScroll={(e) => props.onScroll(e.currentTarget.scrollLeft)}
     >
       <div className="rvs-hbar-inner" style={{ width: props.width }} />
@@ -265,20 +270,31 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
   const leftRef = useRef<HTMLDivElement>(null)
   const rightRef = useRef<HTMLDivElement>(null)
   const hbarRef = useRef<HTMLDivElement>(null)
-  const [barWidth, setBarWidth] = useState(0)
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * Widest rendered line vs the width the grid actually shows.
+   *
+   * Only the PAIR matters: the top bar exists for one reason — telling the user
+   * "this line continues past the edge, grab me" — so it is rendered only when
+   * `content > viewport`. A permanently mounted 13 px band was invisible in
+   * practice (a 1 px spacer, `thin` scrollbar, low-contrast thumb) and read as
+   * "there is no horizontal scrollbar at all".
+   */
+  const [hscroll, setHscroll] = useState({ content: 0, viewport: 0 })
   const rowsInView = useRowWindow(tab.model?.rows ?? [])
 
   /**
-   * Measure the widest pane and size the top bar's spacer to it. Runs after
-   * every model change, on container resizes (a pane that is empty until
-   * its fonts settle would otherwise leave the bar too short) and whenever
-   * the window slides, since the widest line on screen changes with it.
+   * Measure the widest pane and the grid's own width. Runs after every model
+   * change, on container resizes (a pane that is empty until its fonts settle
+   * would otherwise leave the bar too short) and whenever the window slides,
+   * since the widest line on screen changes with it.
    */
   useLayoutEffect(() => {
     if (mode !== 'split') return
     const measure = (): void => {
-      const widest = Math.max(leftRef.current?.scrollWidth ?? 0, rightRef.current?.scrollWidth ?? 0)
-      setBarWidth(widest)
+      const content = Math.max(leftRef.current?.scrollWidth ?? 0, rightRef.current?.scrollWidth ?? 0)
+      const viewport = gridRef.current?.clientWidth ?? 0
+      setHscroll(previous => (previous.content === content && previous.viewport === viewport ? previous : { content, viewport }))
     }
     measure()
     const timer = window.setTimeout(measure, 80)
@@ -431,10 +447,21 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
       </div>
       {mode === 'split' && (
         <>
-          <HScrollBar barRef={hbarRef} width={barWidth} onScroll={syncFromBar} />
+          {hscroll.content > hscroll.viewport + 1 && (
+            <HScrollBar barRef={hbarRef} width={hscroll.content} hint={t('scm.hScrollHint')} onScroll={syncFromBar} />
+          )}
           {/* The grid owns the vertical scroll for all three columns, so the
               window below is shared and the panes cannot drift apart. */}
-          <div className="rvs-diff-grid" ref={rowsInView.attachGrid} onScroll={rowsInView.onScroll}>
+          <div
+            className="rvs-diff-grid"
+            ref={(element) => {
+              // Two consumers, one element: the row window's observer and the
+              // horizontal measurement above.
+              rowsInView.attachGrid(element)
+              gridRef.current = element
+            }}
+            onScroll={rowsInView.onScroll}
+          >
             <div className="rvs-diff-cols">
               {/* Left pane: fixed 50% (see .rvs-diff-col) with its own hidden
                   horizontal scroll, driven from the bar above. */}

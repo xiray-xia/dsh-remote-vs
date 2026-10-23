@@ -1118,15 +1118,19 @@ body[data-ds-dark-theme] .rvs-root {
  * The two panes scroll horizontally on their own — so a long line can never
  * widen the layout — and this proxy bar drives both of them from the TOP of
  * the view, instead of forcing a scroll to the bottom of the file to reach a
- * horizontal bar. Its inner spacer is sized to the widest pane.
+ * horizontal bar. Its inner spacer is sized to the widest line, and the
+ * component only renders it when a line really is wider than the grid.
+ *
+ * Sized and coloured to be SEEN: as a 13 px band with `scrollbar-width: thin`
+ * and a faint thumb, it read as "there is no horizontal scrollbar at all".
  */
 .rvs-hbar {
   flex: none;
-  height: 13px;
+  height: 15px;
   overflow-x: auto;
   overflow-y: hidden;
   border-bottom: 1px solid var(--rvs-border);
-  scrollbar-width: thin;
+  background: var(--rvs-hover);
 }
 
 .rvs-hbar-inner {
@@ -1134,16 +1138,19 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-hbar::-webkit-scrollbar {
-  height: 9px;
+  height: 11px;
 }
 
 .rvs-hbar::-webkit-scrollbar-thumb {
-  background: var(--dsw-alias-scrollbar-bg-l2, rgba(127, 127, 127, .45));
-  border-radius: 5px;
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(150, 160, 180, .75));
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .rvs-hbar::-webkit-scrollbar-thumb:hover {
-  background: var(--dsw-alias-scrollbar-hover-l2, rgba(127, 127, 127, .65));
+  background: var(--dsw-alias-scrollbar-hover-l2, rgba(170, 180, 200, .95));
+  background-clip: padding-box;
 }
 
 .rvs-hbar::-webkit-scrollbar-track {
@@ -1159,8 +1166,10 @@ body[data-ds-dark-theme] .rvs-root {
 /**
  * One diff pane. `flex: 1 1 0` keeps the panes EXACTLY equal however long a
  * line is (the previous row markup let a long line widen its own pane, which
- * is what broke the symmetry), and each pane carries its own horizontal
- * scroll — hidden, because the top bar is the user-facing control.
+ * is what broke the symmetry). Each pane keeps its own horizontal scroll, and
+ * its scrollbar is now VISIBLE: the top proxy remains the convenient control,
+ * but the pane's own bar is what a user reaches for first, and it sits right
+ * under the content when the file is shorter than the view.
  */
 .rvs-diff-col {
   flex: 1 1 0;
@@ -1170,8 +1179,21 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-diff-col::-webkit-scrollbar {
-  height: 0;
+  height: 9px;
   width: 0;
+}
+
+.rvs-diff-col::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(150, 160, 180, .6));
+  border-radius: 5px;
+}
+
+.rvs-diff-col::-webkit-scrollbar-thumb:hover {
+  background: var(--dsw-alias-scrollbar-hover-l2, rgba(170, 180, 200, .85));
+}
+
+.rvs-diff-col::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .rvs-dline {
