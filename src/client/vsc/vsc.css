@@ -1073,6 +1073,29 @@ body[data-ds-dark-theme] .rvs-root {
   color: var(--rvs-fg3);
 }
 
+/**
+ * Prev/next change, in the toolbar's free space.
+ *
+ * Two chevrons around a tabular counter: the pair then reads as "jump to change
+ * n of N" instead of two anonymous arrows, and the counter doubles as the "where
+ * am I" cue while scrolling by hand.
+ */
+.rvs-hunknav {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-right: 2px;
+}
+
+.rvs-hunknav-pos {
+  min-width: 30px;
+  text-align: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--rvs-fg3);
+  user-select: none;
+}
+
 .rvs-seg {
   display: inline-flex;
   border: 1px solid var(--rvs-border2);

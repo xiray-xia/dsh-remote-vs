@@ -55,6 +55,11 @@ export function IconChevronDown(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M3.5 6 L8 10.5 L12.5 6" />, props.className)
 }
 
+/** Mirror of `IconChevronDown`, for the diff's "previous change" button. */
+export function IconChevronUp(props: IconProps): ReactNode {
+  return svg(props.size ?? 14, <path d="M3.5 10 L8 5.5 L12.5 10" />, props.className)
+}
+
 export function IconFolder(props: IconProps & { open?: boolean }): ReactNode {
   return props.open === true
     ? svg(props.size ?? 16, <path d="M1.8 12.6V4.2a1 1 0 0 1 1-1h3l1.4 1.6h6a1 1 0 0 1 1 1v1H2.6l1 5.8a1 1 0 0 0 1 .8h7.6" />, props.className)

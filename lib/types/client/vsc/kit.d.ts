@@ -18,6 +18,8 @@ type IconProps = {
 };
 export declare function IconChevronRight(props: IconProps): ReactNode;
 export declare function IconChevronDown(props: IconProps): ReactNode;
+/** Mirror of `IconChevronDown`, for the diff's "previous change" button. */
+export declare function IconChevronUp(props: IconProps): ReactNode;
 export declare function IconFolder(props: IconProps & {
     open?: boolean;
 }): ReactNode;

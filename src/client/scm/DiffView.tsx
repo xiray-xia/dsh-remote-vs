@@ -20,7 +20,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { EditorTab } from '../store.tsx'
 import { useExplorer } from '../store.tsx'
 import { applyHunk, GitOpError } from './actions.ts'
-import { diffCounts } from './diff-model.ts'
+import { diffCounts, hunkAtRow, stepHunk } from './diff-model.ts'
 import type { DiffRow } from '../../protocol.ts'
 import { api } from '../api.ts'
 import { CodeEditor, type CodeEditorHandle } from '../CodeEditor.tsx'
@@ -29,6 +29,8 @@ import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import { langFromPath, tokenizeDocument, type Token } from '../vsc/tokenize.ts'
 import {
   IconButton,
+  IconChevronDown,
+  IconChevronUp,
   IconRefresh,
   IconSave,
   MiniSpinner,
@@ -283,6 +285,43 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
   const [hscroll, setHscroll] = useState({ content: 0, viewport: 0 })
   const rowsInView = useRowWindow(tab.model?.rows ?? [])
 
+  /** First row of every change, ascending — the prev/next jump targets. */
+  const hunkRows = useMemo(() => (tab.model === undefined ? [] : tab.model.hunks.map(hunk => hunk.startRow).sort((a, b) => a - b)), [tab.model])
+  /**
+   * The change the toolbar's `n / N` reports.
+   *
+   * A jump sets it explicitly instead of re-deriving it from `scrollTop`: near
+   * the bottom of a file the browser CLAMPS the offset, so re-deriving would
+   * report the change above the one the button just went to and the next click
+   * would refuse to advance. A manual scroll does re-derive it (`hunkAtRow`),
+   * which is what keeps the counter honest when the user drags instead of
+   * clicking. `-1` = nothing jumped yet / the viewport is above the first
+   * change.
+   */
+  const [hunkCursor, setHunkCursor] = useState(-1)
+  /** The `scrollTop` a jump just wrote, so its own scroll event is not read as a manual scroll. */
+  const jumpedTopRef = useRef(-1)
+
+  /** Scroll to the next (1) or previous (-1) change, wrapping at both ends. */
+  const jumpHunk = (direction: 1 | -1): void => {
+    const grid = gridRef.current
+    if (grid === null) return
+    const target = stepHunk(hunkRows.length, hunkCursor, direction)
+    if (target < 0) return
+    const top = (hunkRows[target] as number) * ROW_HEIGHT
+    jumpedTopRef.current = top
+    grid.scrollTop = top
+    setHunkCursor(target)
+  }
+
+  /** Keep `n / N` in step with the viewport while the user scrolls by hand. */
+  const syncHunkCursor = (grid: HTMLDivElement): void => {
+    if (hunkRows.length === 0) return
+    if (Math.abs(grid.scrollTop - jumpedTopRef.current) < 1) return
+    const next = hunkAtRow(hunkRows, grid.scrollTop / ROW_HEIGHT)
+    setHunkCursor(previous => (previous === next ? previous : next))
+  }
+
   /**
    * Measure the widest pane and the grid's own width. Runs after every model
    * change, on container resizes (a pane that is empty until its fonts settle
@@ -435,6 +474,19 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
         <span style={{ color: 'var(--rvs-git-d)' }}>-{counts.removed}</span>
         {tab.staged && <span className="rvs-pill">{t('scm.stagedReadonly')}</span>}
         <span className="rvs-einfo-spacer" />
+        {/* Prev/next change: only the split view is windowed, so only it has a
+            row offset to jump to. The counter doubles as the "where am I" cue. */}
+        {mode === 'split' && hunkRows.length > 0 && (
+          <span className="rvs-hunknav" title={t('scm.hunkNavHint')}>
+            <IconButton title={t('scm.prevHunk')} onClick={() => jumpHunk(-1)}>
+              <IconChevronUp size={13} />
+            </IconButton>
+            <span className="rvs-hunknav-pos">{hunkCursor < 0 ? `-/${hunkRows.length}` : `${hunkCursor + 1}/${hunkRows.length}`}</span>
+            <IconButton title={t('scm.nextHunk')} onClick={() => jumpHunk(1)}>
+              <IconChevronDown size={13} />
+            </IconButton>
+          </span>
+        )}
         {busy && <MiniSpinner />}
         <IconButton title={t('scm.reloadDiff')} onClick={() => { void reload() }} disabled={busy}>
           <IconRefresh size={13} />
@@ -460,7 +512,10 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
               rowsInView.attachGrid(element)
               gridRef.current = element
             }}
-            onScroll={rowsInView.onScroll}
+            onScroll={(event) => {
+              rowsInView.onScroll(event)
+              syncHunkCursor(event.currentTarget)
+            }}
           >
             <div className="rvs-diff-cols">
               {/* Left pane: fixed 50% (see .rvs-diff-col) with its own hidden
