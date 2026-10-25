@@ -23,6 +23,7 @@ import { aliasRoot } from '../paths.ts'
 import type { RemoteHostEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RpcConnection } from './helper-rpc.ts'
 import { SshProcRuntime } from './ssh-proc.ts'
+import { legacyWorkspaceTitle, workspaceTitle } from '../workspace-title.ts'
 
 export type RoutingMode = 'off' | 'shadow' | 'enforce'
 
@@ -395,10 +396,23 @@ export class RemoteWorlds {
       }
       if (registry === undefined) continue
       try {
-        const existing = await registry.resolveByPath(aliasPath)
-        if (existing !== undefined) continue
-        const base = binding.remotePath.split('/').filter(Boolean).pop() ?? binding.remotePath
-        await registry.create(aliasPath, `${binding.alias} > ${base}`)
+        const existing = await registry.resolveByPath(aliasPath) as
+          | { title?: string; setTitle?: (title: string) => Promise<unknown> }
+          | undefined
+        const desired = workspaceTitle(binding)
+        if (existing !== undefined) {
+          // DISPLAY ONLY: the registry resolves workspaces by canonical PATH
+          // (`resolveByPath`) and its own docs call the title "used only when a
+          // new record is created", so nothing here can move a route. The
+          // retitle is additionally gated on the current title still being
+          // EXACTLY what the old code produced (`alias > <last path segment>`),
+          // so a title the user renamed by hand is never overwritten.
+          if (desired !== existing.title && existing.title === legacyWorkspaceTitle(binding) && typeof existing.setTitle === 'function') {
+            await existing.setTitle(desired)
+          }
+          continue
+        }
+        await registry.create(aliasPath, desired)
       } catch (error) {
         try {
           this.ctx.logger.warn(`[remote-vs] workspace registration failed for ${aliasPath}: ${error instanceof Error ? error.message : String(error)}`)
