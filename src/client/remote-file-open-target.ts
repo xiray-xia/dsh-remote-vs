@@ -20,6 +20,7 @@
  *  - anything that does not name a known binding answers `undefined`, so the
  *    native preview keeps handling local sessions and unknown addresses.
  */
+import { shellQuote } from './shell.ts'
 
 /** One remote binding as the client store exposes it. */
 export interface RemoteOpenBinding {
@@ -427,11 +428,6 @@ export function bindingForSessionCwd(
   }
   // A local spelling: the deepest alias directory that contains it.
   return bindingForHostPath(table, path)
-}
-
-/** POSIX single-quote a word for a remote `bash -c` style command line. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 /**

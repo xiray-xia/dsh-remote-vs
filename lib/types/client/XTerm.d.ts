@@ -12,4 +12,10 @@ export declare function XTerm(props: {
     fontFamily?: string;
     /** When the parent sub-tab hides/shows this view without unmounting. */
     visible?: boolean;
+    /**
+     * Line typed into the fresh shell once its PTY reports ready (a menu entry's
+     * `cd`). Sent ONCE per mount: a reconnect is a new mount and thus a new shell,
+     * which correctly re-runs the line.
+     */
+    initialInput?: string;
 }): ReactNode;

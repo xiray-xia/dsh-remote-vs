@@ -106,6 +106,12 @@ export function XTerm(props: {
   fontFamily?: string
   /** When the parent sub-tab hides/shows this view without unmounting. */
   visible?: boolean
+  /**
+   * Line typed into the fresh shell once its PTY reports ready (a menu entry's
+   * `cd`). Sent ONCE per mount: a reconnect is a new mount and thus a new shell,
+   * which correctly re-runs the line.
+   */
+  initialInput?: string
 }): ReactNode {
   const hostRef = useRef<HTMLDivElement>(null)
   const propsRef = useRef(props)
@@ -143,6 +149,8 @@ export function XTerm(props: {
 
     const ws = new WebSocket(propsRef.current.wsUrl)
     let opened = false
+    /** The seeded line is typed at most once per mount (a reconnect re-mounts). */
+    let seeded = false
     let exitReported = false
     const reportExit = (code: number | null, message?: string): void => {
       if (exitReported) return
@@ -208,6 +216,13 @@ export function XTerm(props: {
       }
       if (frame.t === 'ready') {
         propsRef.current.onReady(frame.id)
+        // The shell exists now: type the seeded line (a menu entry's `cd`), as a
+        // normal input line so the shell echoes it and redraws its prompt.
+        const seed = propsRef.current.initialInput
+        if (!seeded && seed !== undefined && seed !== '') {
+          seeded = true
+          send(ws, { t: 'in', d: `${seed}\n` })
+        }
       } else if (frame.t === 'out') {
         term.write(frame.d)
       } else if (frame.t === 'exit') {

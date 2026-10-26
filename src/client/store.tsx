@@ -131,6 +131,10 @@ interface State {
   view: RailView
   /** A pending search request raised by the explorer's context menu. */
   searchRequest: SearchRequest | undefined
+  /** A pending "show this folder in the tree" request (search-result menu). */
+  revealRequest: RevealRequest | undefined
+  /** A pending "open a terminal in this folder" request (search-result menu). */
+  terminalRequest: TerminalRequest | undefined
   /**
    * Expanded untracked DIRECTORY rows (`-u normal` collapses a directory into
    * one row, so the panel asks for its contents on demand — see
@@ -152,6 +156,32 @@ export interface SearchRequest {
   query: string
   /** Absolute remote directory the search is scoped to. */
   scope: string
+}
+
+/** One "show this folder in the explorer tree" request. */
+export interface RevealRequest {
+  /** Monotonic id so asking for the same folder twice still re-triggers. */
+  id: number
+  /** Absolute remote DIRECTORY to expand and scroll to. */
+  path: string
+}
+
+/** One "open a terminal here" request. */
+export interface TerminalRequest {
+  /** Monotonic id so the same folder can be opened twice. */
+  id: number
+  /**
+   * Host alias the directory lives on.
+   *
+   * Carried explicitly, and NOT taken from the terminal panel's own last-used
+   * host: the panel remembers whatever host the user ran a shell on last, so a
+   * menu action on a workspace bound elsewhere opened the shell on the WRONG
+   * machine — the `cd` then failed with "No such file or directory" for a path
+   * that exists perfectly well on its own host.
+   */
+  alias: string
+  /** Absolute remote directory the fresh shell should `cd` into. */
+  dir: string
 }
 
 const WS_KEY = 'dsh-remote-vs.files.ws'
@@ -295,6 +325,8 @@ const state: State = {
   editorSurface: 'sidebar',
   view: readStoredView(),
   searchRequest: undefined,
+  revealRequest: undefined,
+  terminalRequest: undefined,
   untrackedDirs: new Map(),
 }
 
@@ -337,10 +369,25 @@ export interface ExplorerValue {
   editorSurface: 'center' | 'sidebar'
   view: RailView
   searchRequest: SearchRequest | undefined
+  /** Pending "show this folder in the tree" request (consumed by the explorer). */
+  revealRequest: RevealRequest | undefined
+  /** Pending "open a terminal here" request (consumed by the terminal panel). */
+  terminalRequest: TerminalRequest | undefined
   setView: (view: RailView) => void
   /** Switch to the search panel (optionally scoped to a folder) — the tree's
       "find in folder" entry point. */
   requestSearch: (request: { mode: 'name' | 'content'; query?: string; scope: string }) => void
+  /**
+   * Show one remote directory in the explorer: switch to it, expand the folder
+   * and its ancestors, then scroll its row into view. Raised by the search
+   * results' "open containing folder" entry.
+   */
+  revealInExplorer: (dir: string) => void
+  /**
+   * Open a fresh terminal tab whose shell `cd`s into `dir`. Raised by the
+   * search results' "open in terminal" entry.
+   */
+  openTerminalAt: (dir: string) => void
   /**
    * The USER's pick — the workspace dropdowns and the wizard's "open files".
    *
@@ -463,8 +510,12 @@ function build(): ExplorerValue {
     editorSurface: state.editorSurface,
     view: state.view,
     searchRequest: state.searchRequest,
+    revealRequest: state.revealRequest,
+    terminalRequest: state.terminalRequest,
     setView,
     requestSearch,
+    revealInExplorer,
+    openTerminalAt,
     selectWorkspace,
     setRepoSubdir,
     discoverRepos,
@@ -620,6 +671,48 @@ export function requestSearch(request: { mode: 'name' | 'content'; query?: strin
     },
   })
   setView('search')
+}
+
+/** Monotonic ticket for "show this folder" requests (0 = none yet). */
+let revealSeq = 0
+
+/**
+ * Show one remote directory in the explorer.
+ *
+ * Two stages, because the tree is lazily loaded: this raises the request and
+ * switches the panel, and the explorer itself expands the ancestors (loading
+ * each level) and scrolls the row into view — it is the only place that knows
+ * which directories are currently expanded.
+ *
+ * @param dir - absolute remote DIRECTORY (a file's parent for a file hit).
+ */
+export function revealInExplorer(dir: string): void {
+  revealSeq += 1
+  patch({ revealRequest: { id: revealSeq, path: dir } })
+  setView('explorer')
+}
+
+/** Monotonic ticket for "open a terminal here" requests. */
+let terminalSeq = 0
+
+/**
+ * Open a fresh terminal tab whose shell lands in `dir` — on the CURRENT
+ * workspace's host.
+ *
+ * The terminal panel consumes the request (it owns the tabs) and the shell gets
+ * a quoted `cd` once its PTY reports ready — the host's terminal route has no
+ * "start in this directory" parameter, so a typed command is the honest way.
+ *
+ * The alias travels IN the request. The panel otherwise opens new tabs on the
+ * host it last used, which put the shell on a different machine than the path
+ * belongs to and made the `cd` fail with "No such file or directory".
+ *
+ * @param dir - absolute remote directory.
+ */
+export function openTerminalAt(dir: string): void {
+  terminalSeq += 1
+  patch({ terminalRequest: { id: terminalSeq, alias: currentWorkspace()?.alias ?? '', dir } })
+  setView('terminal')
 }
 
 /**

@@ -246,7 +246,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
       case 'terminal':
         // The terminal draws its own header + tab strip, so it takes the whole
         // slot (no extra padding wrapper).
-        return <TerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} />
+        return <TerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} request={store.terminalRequest} />
       case 'workspaces':
         return (
           <div className="rvs-viewpad" style={{ height: '100%' }}>

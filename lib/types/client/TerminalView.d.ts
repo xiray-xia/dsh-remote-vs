@@ -9,8 +9,11 @@
  */
 import { type ReactNode } from 'react';
 import type { RemoteHostSummary } from '../protocol.ts';
+import type { TerminalRequest } from './store.tsx';
 export declare function TerminalView(props: {
     t: (key: string) => string;
     hosts: RemoteHostSummary[];
     visible: boolean;
+    /** A pending "open a terminal here" request from the search results' menu. */
+    request?: TerminalRequest;
 }): ReactNode;

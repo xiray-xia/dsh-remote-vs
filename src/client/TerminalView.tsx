@@ -11,6 +11,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
+import { cdCommand } from './shell.ts'
+import type { TerminalRequest } from './store.tsx'
 import { optionStyle } from './ui.tsx'
 import {
   IconButton,
@@ -32,6 +34,8 @@ interface TermTab {
   /** Bumped to force a fresh connection (connect / reconnect). */
   nonce: number
   connected: boolean
+  /** Command typed once the shell reports ready (a menu entry's `cd`). */
+  initialCommand?: string
   /** Human-readable reason the tab is not connected. */
   note?: string
 }
@@ -84,10 +88,21 @@ function newId(): string {
   return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
+/**
+ * The last "open a terminal here" request this page already acted on.
+ *
+ * Module scope, not a component ref: the panel is normally kept mounted, but a
+ * remount would reset a ref and re-open a tab for the SAME old request. A new
+ * request always carries a larger id, so one counter serves both goals.
+ */
+let openedTerminalRequest = 0
+
 export function TerminalView(props: {
   t: (key: string) => string
   hosts: RemoteHostSummary[]
   visible: boolean
+  /** A pending "open a terminal here" request from the search results' menu. */
+  request?: TerminalRequest
 }): ReactNode {
   const t = props.t
   const [alias, setAlias] = useState<string>(readAlias)
@@ -126,12 +141,47 @@ export function TerminalView(props: {
     setTabs(prev => prev.map(tab => (tab.id === id ? { ...tab, ...next } : tab)))
   }, [])
 
-  const openTab = useCallback((host: string): void => {
+  const openTab = useCallback((host: string, initialCommand?: string): void => {
     if (host === '') return
-    const tab: TermTab = { id: newId(), alias: host, nonce: 0, connected: true }
+    const tab: TermTab = {
+      id: newId(),
+      alias: host,
+      nonce: 0,
+      connected: true,
+      ...(initialCommand === undefined ? {} : { initialCommand }),
+    }
     setTabs(prev => [...prev, tab])
     setActiveId(tab.id)
   }, [])
+
+  /**
+   * "Open a terminal here" (a search result's menu): open one tab whose shell
+   * lands in that folder, on the host the folder BELONGS to.
+   *
+   * The alias must come from the request, not from `effectiveAlias`: the panel
+   * remembers whatever host the user last ran a shell on, so a menu action on a
+   * workspace bound elsewhere used to open the shell on the wrong machine and
+   * the `cd` failed with "No such file or directory" for a path that is fine on
+   * its own host.
+   *
+   * The folder is reached by TYPING `cd` once the PTY reports ready (see
+   * `XTerm`'s `initialInput`) — the host's terminal route has no "start in this
+   * directory" parameter, and inventing one would mean a host-side change for a
+   * display feature. The request id makes a repeat for the same folder still
+   * open a second tab.
+   */
+  useEffect(() => {
+    const request = props.request
+    if (request === undefined || request.id === openedTerminalRequest) return
+    openedTerminalRequest = request.id
+    const target = request.alias !== '' && props.hosts.some(host => host.alias === request.alias)
+      ? request.alias
+      : effectiveAlias
+    // Keep the header picker in step with the tab that just opened, so the next
+    // "+" continues on the same host.
+    if (target !== alias) setAlias(target)
+    openTab(target, cdCommand(request.dir))
+  }, [props.request, props.hosts, effectiveAlias, alias, openTab])
 
   const closeTab = useCallback(async (tab: TermTab): Promise<void> => {
     const ok = await confirmDialog({
@@ -276,6 +326,7 @@ export function TerminalView(props: {
                   rows: 24,
                 })}
                 visible={props.visible && tab.id === active?.id}
+                {...(tab.initialCommand === undefined ? {} : { initialInput: tab.initialCommand })}
                 onReady={(id) => patchTab(tab.id, { session: id, connected: true, note: undefined })}
                 onExit={(code, message) => {
                   if (message === 'terminal session expired') {

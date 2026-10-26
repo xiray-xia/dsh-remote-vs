@@ -265,6 +265,51 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     }
   }, [alias])
 
+  /**
+   * "Show this folder in the tree" — raised by a search result's menu.
+   *
+   * Two stages, because the tree is lazy: expand every level from the root down
+   * to the target (the listing of each level is fetched here) and then scroll
+   * its row into view. The scroll is retried rather than delayed once: over SFTP
+   * a deep level can take a moment, and the request carries a monotonic id so
+   * asking for the SAME folder again still re-scrolls.
+   */
+  useEffect(() => {
+    const request = store.revealRequest
+    if (request === undefined) return
+    const base = root.replace(/\/+$/, '')
+    const target = request.path.replace(/\/+$/, '')
+    if (target !== base && !target.startsWith(`${base}/`)) return
+    const chain: string[] = []
+    let walk = base
+    for (const part of target.slice(base.length).split('/')) {
+      if (part === '') continue
+      walk = `${walk}/${part}`
+      chain.push(walk)
+    }
+    for (const dir of chain) void loadDir(dir)
+    if (chain.length > 0) {
+      setExpanded((previous) => {
+        const next = new Set(previous)
+        for (const dir of chain) next.add(dir)
+        return next
+      })
+    }
+    let attempts = 0
+    const timer = window.setInterval(() => {
+      attempts += 1
+      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
+        .find((candidate) => candidate.dataset.rvsPath === target)
+      if (row !== undefined) {
+        window.clearInterval(timer)
+        row.scrollIntoView({ block: 'center' })
+        return
+      }
+      if (attempts > 20) window.clearInterval(timer)
+    }, 150)
+    return () => window.clearInterval(timer)
+  }, [store.revealRequest, root, loadDir])
+
   // Root listing + refresh on the shared revision bump (git writes, saves...).
   const revision = store.revision
   /**

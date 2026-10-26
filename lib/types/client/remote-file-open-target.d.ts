@@ -1,25 +1,3 @@
-/**
- * Where a clicked file reference should open when the owning session lives in
- * a remote workspace (pure — no React, no fetch, so the gate can drive it).
- *
- * DSH renders every file reference as a `dsh-resource://file/…` address and
- * opens it through its own right-sidebar preview. That preview resolves the
- * address path against the SESSION WORKSPACE ROOT. A model that quotes a path
- * relative to its CURRENT directory (e.g. `_xfer/reports/x.md` while working
- * in `<workspace>/<inner-repo>`) therefore misses by one segment, and a
- * remote session's workspace root only exists as an EMPTY local alias dir —
- * the click dies with the host-side ENOENT the user sees.
- *
- * This module answers "which binding, which remote paths to try" for the
- * client interceptor:
- *  - relative paths are tried against the workspace root first and the
- *    session's current working directory second (the model's usual writing
- *    base), which is what makes the one-segment miss heal;
- *  - absolute spellings (local alias, POSIX remote, drive-qualified alias)
- *    are folded back onto the binding;
- *  - anything that does not name a known binding answers `undefined`, so the
- *    native preview keeps handling local sessions and unknown addresses.
- */
 /** One remote binding as the client store exposes it. */
 export interface RemoteOpenBinding {
     id: string;

@@ -20,9 +20,10 @@ import {
   type ContentHit,
 } from '../search-ops.ts'
 import { searchFiles, type SearchHit } from './scm/actions.ts'
-import { useExplorer } from './store.tsx'
+import { repoRelative, useExplorer } from './store.tsx'
 import { api } from './api.ts'
 import {
+  ContextMenu,
   FileIcon,
   IconCase,
   IconContentSearch,
@@ -33,6 +34,9 @@ import {
   MiniSpinner,
   Segmented,
   baseName,
+  copyText,
+  toast,
+  useContextMenu,
 } from './vsc/kit.tsx'
 
 type Mode = 'name' | 'content'
@@ -77,7 +81,7 @@ function relativeTo(root: string, full: string): string {
 
 export function SearchView(): ReactNode {
   const store = useExplorer()
-  const { t, alias, root } = store
+  const { t, alias, root, repoRoot } = store
   const [mode, setModeState] = useState<Mode>(readMode)
   const [query, setQuery] = useState('')
   /** Absolute remote directory the search runs in ('' = workspace root). */
@@ -93,6 +97,7 @@ export function SearchView(): ReactNode {
   const [ran, setRan] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
   const seq = useRef(0)
+  const menu = useContextMenu()
 
   const effectiveScope = scope === '' ? root : scope
   const scopeLabel = useMemo(() => {
@@ -224,6 +229,37 @@ export function SearchView(): ReactNode {
     store.openFile(path, line === undefined ? undefined : { line })
   }
 
+  /** Absolute path of one NAME hit, plus the DIRECTORY a menu action should use. */
+  const nameHitPaths = (hit: SearchHit): { abs: string; dir: string } => {
+    const base = effectiveScope.replace(/\/+$/, '')
+    const abs = `${base}/${hit.path}`
+    // A directory hit (only the `find` fallback reports those) is its own
+    // folder; a file hit's actions target the folder it lives in.
+    const dir = hit.isDir ? abs : (abs.slice(0, abs.lastIndexOf('/')) || '/')
+    return { abs, dir }
+  }
+
+  /**
+   * Right-click on a name result: the four things one does with a found path.
+   *
+   * "Relative" is relative to the REPOSITORY when the workspace sits inside one
+   * (the same relative form the tree's own menu copies), else absolute — which
+   * is what makes the copied value paste straight into a shell that already ran
+   * `cd` into the repo.
+   */
+  const openHitMenu = (event: React.MouseEvent, hit: SearchHit): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const { abs, dir } = nameHitPaths(hit)
+    const rel = repoRelative(repoRoot, abs) || abs
+    menu.open(event.clientX, event.clientY, [
+      { label: t('files.copyAbs'), onSelect: () => { void copyText(abs); toast(t('files.copiedClipboard')) } },
+      { label: t('files.copyRel'), onSelect: () => { void copyText(rel); toast(t('files.copiedClipboard')) } },
+      { label: t('search.revealInExplorer'), onSelect: () => { store.revealInExplorer(dir) }, separated: true },
+      { label: t('search.openInTerminal'), onSelect: () => { store.openTerminalAt(dir) } },
+    ])
+  }
+
   const groups = useMemo(() => groupHits(contentHits), [contentHits])
 
   /**
@@ -351,6 +387,7 @@ export function SearchView(): ReactNode {
                 className="rvs-hit"
                 title={hit.path}
                 onClick={() => openHit(`${(effectiveScope === '' ? root : effectiveScope).replace(/\/+$/, '')}/${hit.path}`)}
+                onContextMenu={(event) => { openHitMenu(event, hit) }}
               >
                 <span className="rvs-node-icon">
                   {hit.isDir ? <span style={{ color: 'var(--rvs-fg3)' }}>▸</span> : <FileIcon path={hit.path} size={14} />}
@@ -404,6 +441,9 @@ export function SearchView(): ReactNode {
           </>
         )}
       </div>
+      {menu.menu !== undefined && (
+        <ContextMenu x={menu.menu.x} y={menu.menu.y} entries={menu.menu.entries} onClose={menu.close} />
+      )}
     </div>
   )
 }
