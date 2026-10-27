@@ -31,7 +31,7 @@ import {
   type ParsedFileAddress,
   type RemoteOpenBinding,
 } from './remote-file-open-target.ts'
-import { isEditorCentered, openRemoteFileInBinding, remoteOpenBindings } from './store.tsx'
+import { isEditorTakeoverActive, openRemoteFileInBinding, remoteOpenBindings } from './store.tsx'
 import { workspacePathOf } from './use-remote-chat-target.ts'
 
 interface SidebarRightLike {
@@ -216,7 +216,7 @@ export function installRemoteFileOpen(ctx: Context): () => void {
         // Cheap, synchronous gate first: only a file address of a session in
         // one of our bindings is intercepted. Everything else keeps the native
         // call (and its synchronous throw semantics) untouched.
-        if (!isEditorCentered()) return original(address, options)
+        if (!isEditorTakeoverActive()) return original(address, options)
         const parsed = parseFileAddress(address)
         if (parsed === undefined) return original(address, options)
         return interceptSync(ctx, parsed, address, options) === true ? undefined : original(address, options)

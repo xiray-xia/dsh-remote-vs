@@ -5,6 +5,7 @@ import { type StatusBuckets, type TreeMarks } from './scm/status-map.ts';
 import { type DiffPayload } from './scm/actions.ts';
 import { type DirExpansions } from './scm/untracked-dirs.ts';
 import { type Lang } from './i18n.ts';
+import { type EditorSurface } from './float-editor.ts';
 /** One editor tab (code file, preview or diff). */
 export interface EditorTab {
     id: string;
@@ -144,7 +145,10 @@ export interface ExplorerValue {
     activeTab: EditorTab | undefined;
     activeTabId: string | undefined;
     revision: number;
-    editorSurface: 'center' | 'sidebar';
+    /** Effective editor mount: the floating window wins over the base surface. */
+    editorSurface: EditorSurface;
+    floatOpen: boolean;
+    floatAvailable: boolean;
     view: RailView;
     searchRequest: SearchRequest | undefined;
     /** Pending "show this folder in the tree" request (consumed by the explorer). */
@@ -199,6 +203,19 @@ export interface ExplorerValue {
     openFile: (fullPath: string, options?: {
         line?: number;
     }) => void;
+    /**
+     * 「在悬浮编辑器中打开」：把编辑器整体浮出，再打开这个文件。
+     *
+     * 先捕获当前编辑器缓冲区再切表面（见 `captureLiveBuffer`）：主界面里没保存
+     * 的编辑不会因为这次切换丢掉。
+     */
+    openInFloatEditor: (fullPath: string, options?: {
+        line?: number;
+    }) => void;
+    /** 同上，只是打开的是工作区 diff（SCM 更改列表的悬浮入口）。 */
+    openDiffInFloatEditor: (rel: string, staged: boolean, untracked?: boolean) => void;
+    /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
+    dockFloatingEditor: () => void;
     openDiff: (rel: string, staged: boolean, untracked?: boolean) => void;
     openCommitFile: (hash: string, rel: string) => void;
     activateTab: (id: string) => void;
@@ -438,8 +455,16 @@ export declare function remoteOpenBindings(): {
 export declare function openRemoteFileInBinding(bindingId: string, remotePath: string, options?: {
     line?: number;
 }): boolean;
-/** Whether the editor tab is mounted in the centre conversation view. */
-export declare function isEditorCentered(): boolean;
+/**
+ * Whether the plugin's own rich editor is the place a remote file click should
+ * land (the click interceptor's gate, see `remote-file-open.ts`).
+ *
+ * The centre conversation view is the normal case; while the editor floats it
+ * is the floating window instead — the file still belongs in OUR editor, not in
+ * the host's native preview. On the sidebar-fallback layout (`sidebar`) the
+ * interceptor stays off, exactly as before this feature.
+ */
+export declare function isEditorTakeoverActive(): boolean;
 /** Open (or focus) a working-tree diff of one repository path. */
 export declare function openDiff(rel: string, staged: boolean, untracked?: boolean): void;
 /** Open (or focus) one file of one commit (`ref^` against `ref`). */
@@ -470,6 +495,42 @@ export declare function saveTab(id: string, content: string): Promise<void>;
 export declare function reloadTab(id: string): Promise<void>;
 /** Note where the editor pane is mounted (set by the client entry). */
 export declare function setEditorSurface(surface: 'center' | 'sidebar'): void;
+/**
+ * Record that the host's frame-wide overlay slot actually rendered the
+ * floating window host (see `FloatingEditorWindow`).
+ *
+ * This is a runtime handshake, not a configuration flag: on a host whose
+ * `shell.overlay` slot is missing, the entry never mounts and the menu entries
+ * stay disabled instead of opening a surface that cannot paint.
+ */
+export declare function setFloatEditorAvailable(available: boolean): void;
+/**
+ * Open one file in the floating editor (file-tree / search / SCM menu action).
+ *
+ * Order matters twice:
+ *   1. the live buffer is captured BEFORE the surface flips (the flip unmounts
+ *      the editor that owns it);
+ *   2. a second capture runs even when already floating, because opening
+ *      another file is a tab switch — the very action that remounts the editor
+ *      and would otherwise drop the edits typed in the tab being left.
+ * A host whose overlay slot is unavailable gets the file in the normal surface
+ * instead (with the reason toasted), so the click is never a dead end.
+ */
+export declare function openInFloatEditor(fullPath: string, options?: {
+    line?: number;
+}): void;
+/**
+ * The floating variant of `openDiff` — the SCM change list's entry.
+ *
+ * Same handoff order as `openInFloatEditor`; a diff tab has no text buffer of
+ * its own, but the file editor that WAS on screen still does.
+ */
+export declare function openDiffInFloatEditor(rel: string, staged: boolean, untracked?: boolean): void;
+/**
+ * Dock the editor back onto its base surface (centre conversation view or the
+ * sidebar fallback), carrying the live buffer with it.
+ */
+export declare function dockFloatingEditor(): void;
 /**
  * 换一份「本会话改了什么」的标记。
  *

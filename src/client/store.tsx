@@ -33,6 +33,8 @@ import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, pr
 import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
+import { canFloatEditor, effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
+import { captureLiveEditor } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
@@ -127,6 +129,14 @@ interface State {
   revision: number
   /** Where the editor pane is mounted ('center' = conversation view). */
   editorSurface: 'center' | 'sidebar'
+  /** True while the editor is popped out into the floating window. */
+  floatOpen: boolean
+  /**
+   * True once the host's frame-wide overlay slot actually rendered the
+   * floating window host. Until then the menu entry stays disabled: a surface
+   * that can never paint is worse than a missing entry.
+   */
+  floatAvailable: boolean
   /** The active sidebar panel (shared so any surface can switch it). */
   view: RailView
   /** A pending search request raised by the explorer's context menu. */
@@ -323,6 +333,8 @@ const state: State = {
   activeTabId: undefined,
   revision: 0,
   editorSurface: 'sidebar',
+  floatOpen: false,
+  floatAvailable: false,
   view: readStoredView(),
   searchRequest: undefined,
   revealRequest: undefined,
@@ -366,7 +378,10 @@ export interface ExplorerValue {
   activeTab: EditorTab | undefined
   activeTabId: string | undefined
   revision: number
-  editorSurface: 'center' | 'sidebar'
+  /** Effective editor mount: the floating window wins over the base surface. */
+  editorSurface: EditorSurface
+  floatOpen: boolean
+  floatAvailable: boolean
   view: RailView
   searchRequest: SearchRequest | undefined
   /** Pending "show this folder in the tree" request (consumed by the explorer). */
@@ -415,6 +430,17 @@ export interface ExplorerValue {
   /** Expand / collapse one untracked directory row (one path-limited status). */
   toggleUntrackedDir: (dirPath: string) => Promise<void>
   openFile: (fullPath: string, options?: { line?: number }) => void
+  /**
+   * 「在悬浮编辑器中打开」：把编辑器整体浮出，再打开这个文件。
+   *
+   * 先捕获当前编辑器缓冲区再切表面（见 `captureLiveBuffer`）：主界面里没保存
+   * 的编辑不会因为这次切换丢掉。
+   */
+  openInFloatEditor: (fullPath: string, options?: { line?: number }) => void
+  /** 同上，只是打开的是工作区 diff（SCM 更改列表的悬浮入口）。 */
+  openDiffInFloatEditor: (rel: string, staged: boolean, untracked?: boolean) => void
+  /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
+  dockFloatingEditor: () => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
   openCommitFile: (hash: string, rel: string) => void
   activateTab: (id: string) => void
@@ -507,7 +533,9 @@ function build(): ExplorerValue {
     activeTab: state.tabs.find(item => item.id === state.activeTabId),
     activeTabId: state.activeTabId,
     revision: state.revision,
-    editorSurface: state.editorSurface,
+    editorSurface: effectiveEditorSurface(state.editorSurface, state.floatOpen),
+    floatOpen: state.floatOpen,
+    floatAvailable: state.floatAvailable,
     view: state.view,
     searchRequest: state.searchRequest,
     revealRequest: state.revealRequest,
@@ -526,6 +554,9 @@ function build(): ExplorerValue {
     untrackedDirs: state.untrackedDirs,
     toggleUntrackedDir,
     openFile,
+    openInFloatEditor,
+    openDiffInFloatEditor,
+    dockFloatingEditor,
     openDiff,
     openCommitFile,
     activateTab,
@@ -1246,7 +1277,9 @@ let revealRetry: ReturnType<typeof setTimeout> | undefined
  * is told where the file opened instead of being left guessing.
  */
 function revealEditor(): void {
-  if (state.editorSurface !== 'center') return
+  // While the editor floats, the shell tab has no editor to reveal: the file
+  // just went into the floating window (which is already on screen).
+  if (effectiveEditorSurface(state.editorSurface, state.floatOpen) !== 'center') return
   const label = t('view.editor')
   // A newer open supersedes the pending retry: arming a second one left the
   // timers piling up one per opened file (each doing its own full-document tab
@@ -1267,6 +1300,48 @@ function revealEditor(): void {
 
 function patchTab(id: string, next: Partial<EditorTab>): void {
   patch({ tabs: state.tabs.map(tab => (tab.id === id ? { ...tab, ...next } : tab)) })
+}
+
+/**
+ * Copy the live editor buffer onto its tab before the editor surface changes.
+ *
+ * Why this exists: `CodeEditor` reads its `initial` text ONCE, on mount
+ * (`src/client/CodeEditor.tsx`), and the tab's stored text is only ever written
+ * by a load/reload — typing lives exclusively in CodeMirror. Moving the editor
+ * between the centre/sidebar mount and the floating window therefore unmounts
+ * and remounts it, and without this handoff the edits typed since the load
+ * would silently disappear (and a later Ctrl+S would write the pre-edit text
+ * back).
+ *
+ * The text is written into the tab, which is exactly the input the replacement
+ * mount reads: no extra channel exists or is needed. The scroll + caret half of
+ * the handoff lives in `live-editor.ts`.
+ */
+function captureLiveBuffer(): void {
+  const captured = captureLiveEditor()
+  if (captured === undefined) return
+  const tab = state.tabs.find(item => item.id === captured.tabId)
+  // Diffs and previews have no CodeMirror buffer; and an unchanged buffer
+  // would just hand the same string back, so neither case touches the store.
+  if (tab === undefined || tab.kind !== 'file' || tab.text === captured.text) return
+  patchTab(captured.tabId, { text: captured.text })
+}
+
+/**
+ * Flip the editor into the floating surface, capturing the live buffer first.
+ *
+ * A no-op while already floating (the editor is not remounted then), and a
+ * toast-only refusal on a host that cannot host the window — the caller still
+ * opens the file, just on the normal surface.
+ */
+function enterFloatSurface(): void {
+  if (!canFloatEditor(state.floatAvailable)) {
+    toast(t('float.unavailable'), true)
+    return
+  }
+  if (state.floatOpen) return
+  captureLiveBuffer()
+  patch({ floatOpen: true })
 }
 
 /**
@@ -1402,9 +1477,17 @@ export function openRemoteFileInBinding(
   return true
 }
 
-/** Whether the editor tab is mounted in the centre conversation view. */
-export function isEditorCentered(): boolean {
-  return state.editorSurface === 'center'
+/**
+ * Whether the plugin's own rich editor is the place a remote file click should
+ * land (the click interceptor's gate, see `remote-file-open.ts`).
+ *
+ * The centre conversation view is the normal case; while the editor floats it
+ * is the floating window instead — the file still belongs in OUR editor, not in
+ * the host's native preview. On the sidebar-fallback layout (`sidebar`) the
+ * interceptor stays off, exactly as before this feature.
+ */
+export function isEditorTakeoverActive(): boolean {
+  return effectiveEditorSurface(state.editorSurface, state.floatOpen) !== 'sidebar'
 }
 
 /** Open (or focus) a working-tree diff of one repository path. */
@@ -1603,6 +1686,70 @@ export async function reloadTab(id: string): Promise<void> {
 /** Note where the editor pane is mounted (set by the client entry). */
 export function setEditorSurface(surface: 'center' | 'sidebar'): void {
   patch({ editorSurface: surface })
+}
+
+/**
+ * Record that the host's frame-wide overlay slot actually rendered the
+ * floating window host (see `FloatingEditorWindow`).
+ *
+ * This is a runtime handshake, not a configuration flag: on a host whose
+ * `shell.overlay` slot is missing, the entry never mounts and the menu entries
+ * stay disabled instead of opening a surface that cannot paint.
+ */
+export function setFloatEditorAvailable(available: boolean): void {
+  if (available) {
+    if (state.floatAvailable) return
+    patch({ floatAvailable: true })
+    return
+  }
+  // The host went away while the editor floated (plugin unmount / host swap):
+  // keeping `floatOpen` would leave the main surfaces showing the "docked
+  // elsewhere" placeholder with no window to dock from.
+  if (!state.floatAvailable && !state.floatOpen) return
+  patch({ floatAvailable: false, floatOpen: false })
+}
+
+/**
+ * Open one file in the floating editor (file-tree / search / SCM menu action).
+ *
+ * Order matters twice:
+ *   1. the live buffer is captured BEFORE the surface flips (the flip unmounts
+ *      the editor that owns it);
+ *   2. a second capture runs even when already floating, because opening
+ *      another file is a tab switch — the very action that remounts the editor
+ *      and would otherwise drop the edits typed in the tab being left.
+ * A host whose overlay slot is unavailable gets the file in the normal surface
+ * instead (with the reason toasted), so the click is never a dead end.
+ */
+export function openInFloatEditor(fullPath: string, options: { line?: number } = {}): void {
+  captureLiveBuffer()
+  enterFloatSurface()
+  openFile(fullPath, options)
+}
+
+/**
+ * The floating variant of `openDiff` — the SCM change list's entry.
+ *
+ * Same handoff order as `openInFloatEditor`; a diff tab has no text buffer of
+ * its own, but the file editor that WAS on screen still does.
+ */
+export function openDiffInFloatEditor(rel: string, staged: boolean, untracked = false): void {
+  captureLiveBuffer()
+  enterFloatSurface()
+  openDiff(rel, staged, untracked)
+}
+
+/**
+ * Dock the editor back onto its base surface (centre conversation view or the
+ * sidebar fallback), carrying the live buffer with it.
+ */
+export function dockFloatingEditor(): void {
+  if (!state.floatOpen) return
+  captureLiveBuffer()
+  patch({ floatOpen: false })
+  // The shell renders only the selected conversation view; a docked editor
+  // behind another tab would look like the window simply vanished.
+  revealEditor()
 }
 
 /**

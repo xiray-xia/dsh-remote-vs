@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { sameLocalDir } from './composer.ts'
+import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
@@ -229,23 +230,26 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    * buffer rather than the previous file's undo stack, which is what we want,
    * but it also reset the scroll and the caret.
    *
-   * The editor REPORTS its position (see `CodeEditor`'s `onViewState`) instead
-   * of this component reading it back through `editorRef`, because the ref is
-   * already `null` by the time any cleanup here could run: React clears a
-   * child's ref before running the parent's cleanup. Both earlier attempts
-   * failed on exactly that — a `useEffect` keyed on the active tab captured the
-   * INCOMING tab's editor (always scrollTop 0), and a `useLayoutEffect` cleanup
-   * found `editorRef.current === null`. `.spike/tabswitch-check.mjs` reproduces
-   * both failures and pins the working wiring.
+   * The map lives in `live-editor.ts`, NOT in a `useRef` here, because the pane
+   * is unmounted when the editor floats out (and again when it docks back): a
+   * per-component map would lose the position on the one surface swap that
+   * most needs it. It survives there for the same reason the store does.
    *
    * Keyed by tab id alone, which is safe because only ONE `EditorPane` is ever
    * mounted: the centre surface when the host has a `conversation.view` slot,
-   * otherwise the sidebar fallback. With two live editors for the same tab the
-   * hidden one would report its untouched scrollTop 0 and overwrite the visible
-   * one's, snapping every switch back to the top — so `RemoteRoot` gates both
-   * mounts on `editorSurface` and must keep doing so.
+   * the floating window while the editor floats, otherwise the sidebar
+   * fallback. With two live editors for the same tab the hidden one would
+   * report its untouched scrollTop 0 and overwrite the visible one's, snapping
+   * every switch back to the top — so `RemoteRoot`, `RemoteEditorView` and the
+   * floating window all gate their mounts on `editorSurface` and must keep
+   * doing so.
+   *
+   * The editor REPORTS its position (see `CodeEditor`'s `onViewState`) instead
+   * of this component reading it back through `editorRef`, because the ref is
+   * already `null` by the time any cleanup here could run: React clears a
+   * child's ref before running the parent's cleanup. `.spike/tabswitch-check.mjs`
+   * reproduces the failed variants and pins the working wiring.
    */
-  const viewStates = useRef(new Map<string, CodeEditorViewState>())
   /**
    * Store a reading under the tab that produced it.
    *
@@ -261,20 +265,17 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    * accept a report for any tab.
    */
   const rememberViewState = useCallback((tabId: string, state: CodeEditorViewState): void => {
-    viewStates.current.set(tabId, state)
+    rememberEditorViewState(tabId, state)
   }, [])
 
   /**
-   * Closed tabs may not keep their scroll + caret. This map is keyed by tab id
-   * and was only ever written, and the pane is mounted for the life of the
-   * page: a session that opened a few hundred files held a state object for
-   * every one of them, long after the tab was gone.
+   * Closed tabs may not keep their scroll + caret. The map is keyed by tab id
+   * and is only ever written: a session that opened a few hundred files would
+   * otherwise hold a state object for every one of them, long after the tab is
+   * gone.
    */
   useEffect(() => {
-    const live = new Set(tabs.map(tab => tab.id))
-    for (const id of [...viewStates.current.keys()]) {
-      if (!live.has(id)) viewStates.current.delete(id)
-    }
+    pruneEditorViewStates(new Set(tabs.map(tab => tab.id)))
   }, [tabs])
 
   /**
@@ -294,6 +295,20 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     && !activeTab.binary
     && !activeTab.loading
     && activeTab.error === undefined
+
+  /**
+   * Advertise the live editor so the store can snapshot it before a surface
+   * flip (see `captureLiveEditor`): the floating window is a different mount of
+   * the SAME pane, so switching to it unmounts this component.
+   *
+   * The getter is `() => editorRef.current`, not the handle itself: the handle
+   * only exists after `CodeEditor` mounts, and it is cleared before the
+   * cleanup that would otherwise run here.
+   */
+  useEffect(() => {
+    if (!editorMounted || activeTab === undefined) return
+    return registerLiveEditor(activeTab.id, () => editorRef.current)
+  }, [editorMounted, activeTab?.id])
 
   const saveActive = async (): Promise<void> => {
     const tab = activeTab
@@ -488,9 +503,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       {...(activeTab.changeSet === undefined ? {} : { changeSet: activeTab.changeSet })}
                       {...(activeTab.revealHunkLine === undefined ? {} : { revealHunkLine: activeTab.revealHunkLine })}
                       {...(activeTab.revealHunkNonce === undefined ? {} : { revealHunkNonce: activeTab.revealHunkNonce })}
-                      {...(viewStates.current.get(activeTab.id) === undefined
+                      {...(editorViewStateOf(activeTab.id) === undefined
                         ? {}
-                        : { viewState: viewStates.current.get(activeTab.id) })}
+                        : { viewState: editorViewStateOf(activeTab.id) })}
                       onTokens={setTokenCount}
                       onViewState={rememberViewState}
                       onStepHunk={(dir) => { gotoChange(activeTab.id, dir) }}

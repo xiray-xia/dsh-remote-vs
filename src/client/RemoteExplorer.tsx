@@ -1032,6 +1032,17 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     ]
     if (entry !== undefined) {
       entries.push({ label: t('files.open'), onSelect: () => openEntry(entry), separated: true })
+      if (!entry.isDir) {
+        // 「在悬浮编辑器中打开」: the editor surface floats above the app shell,
+        // above whatever conversation view is selected. Disabled only when the
+        // host has no frame-wide overlay slot to host the window (see
+        // `FloatingEditorWindow`'s availability handshake).
+        entries.push({
+          label: t('files.openInFloat'),
+          onSelect: () => { store.openInFloatEditor(entry.path) },
+          disabled: !store.floatAvailable,
+        })
+      }
       if (!entry.isDir && isPreviewOnlyFile(entry.path)) {
         entries.push({ label: t('files.openAsText'), onSelect: () => store.openFile(entry.path) })
       }

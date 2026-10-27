@@ -5,8 +5,8 @@
 [中文](./README.md) | English
 
 SSH host management inside the DSH Host process + helper push pipeline + a **VS Code-style remote
-workbench** (explorer / search / source control / commit graph / multi-tab editor / side-by-side diff /
-multiple terminals). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
+workbench** (explorer / search / source control / commit graph / multi-tab editor / floating editor /
+side-by-side diff / multiple terminals). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
 there is an extra standalone "Remote" tab, otherwise it falls back to a native right-Sidebar "Remote"
 page (same content, self-opened from the guide, per-session instances). The editor is ALSO mounted into
 the conversation view slot as a "远程编辑器" (remote editor) tab next to "对话 / 轨迹", so the code area is
@@ -69,6 +69,7 @@ it cannot be waived from the dependency side, only removed from the tree. Then r
 | Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers, **rendering only the rows inside the viewport** (a 3000-line file goes from 9000 row containers to ~174, with exactly the same scroll range as a full render); switch between "before / after", and the after side is editable and savable |
 | Commit graph | SVG branch/merge graph + commit details + click a commit to expand its changed files + open the diff |
 | Multi-tab editor | Open/save/reload, dirty marks, several files at once; image preview, Markdown/HTML preview (source vs preview) |
+| Floating editor | "Open in floating editor" in the file-tree / search-hit / source-control context menus: the editor itself floats into a window above the whole shell (same tabs, previews, diff, find and change marks — not a second, thinner editor). Drag the title bar to move, drag any of the eight edges/corners to resize, maximize/restore (or double-click the title bar), minimize to the title bar; `Ctrl+wheel` zooms the editor text. Position, size and font size survive a page refresh |
 | Syntax highlighting | VS Code **Dark+ / Light+** palettes; covers java/aidl/smali, c/c++, go, rust, js/ts, json, py, yaml, xml, html/css, md, sh, properties/rc/toml, diff …; a **fallback colorer** takes over when no grammar matches, so a file is never left monochrome. Honest caveat: kotlin / gradle / smali are coloured by the Java grammar (no dedicated package), which gets keywords, strings and comments right but does not split their own syntax |
 | Find | In-editor `Ctrl+F` (`Aa` / `ab_` / `.*`, `3/17` count, ↑↓, `F3`/`Shift+F3`, `Esc`); **selected text is carried into the box by `Ctrl+F`**; the widget is pinned to the top-right and does not scroll away |
 | Jump | Clicking a search hit opens the file at that line, centres it and **lights the landing line** (fades after ~2.6s); repeat jumps in the same file work |
@@ -140,6 +141,10 @@ dsh_remote_vs/
 │       ├── RemoteExplorer.tsx   # explorer: tree + context menu + file ops + @ references + status marks
 │       ├── SearchView.tsx       # search panel: name / content modes + Aa/ab_/.* + grouped hits + jump
 │       ├── EditorPane.tsx       # editor pane: tabs + info bar (build stamp / tok count) + image/MD/HTML preview
+│       ├── FloatingEditorWindow.tsx # floating window frame (title-bar drag/8-way resize/maximize/minimize/font zoom)
+│       ├── FloatingPlaceholder.tsx  # "docked elsewhere" placeholder + dock button left on the other surfaces
+│       ├── float-editor.ts      # window geometry/resize/surface rules (pure; driven directly by the self-check)
+│       ├── live-editor.ts       # live buffer + scroll/caret handoff across a surface change
 │       ├── CodeEditor.tsx       # CodeMirror wrapper: grammar table/theme/find widget/jump/fallback wiring
 │       ├── scm/            # ── source control ──
 │       │   ├── ScmPanel.tsx     # changes/staged/untracked + per-file and per-hunk actions + commit box
@@ -202,6 +207,11 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
 - **Editor**: tabs plus an info bar (path, language, **build stamp**, `tok N` coloured-token count,
   saved state, reload/save). Those three marks exist for troubleshooting: the stamp answers "is the
   browser running the bundle I just built?", `tok 0` answers "did a grammar match this extension?".
+- **Floating editor**: "Open in floating editor" from the file-tree / search-hit / source-control context
+  menus lifts the editor into a window above the shell (same tabs and buffers; closing or docking puts it
+  back on its original surface). Drag the title bar, resize from the eight edges/corners, maximize/restore,
+  minimize to the title bar, zoom the text with `Ctrl+wheel`; unsaved text is explicitly handed over between
+  the main surface and the floating window so the switch cannot swallow it.
 - **Find and jump**: `Ctrl+F` opens a widget pinned to the editor's top-right corner
   (`position: fixed` anchored to the editor's rect, so no ancestor scroller can carry it away);
   a selection is carried into it by `Ctrl+F`; a jump from the search results centres the line and

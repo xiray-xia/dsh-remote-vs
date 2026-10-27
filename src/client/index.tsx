@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import './vsc/vsc.css'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
+import { FloatingEditorWindow } from './FloatingEditorWindow.tsx'
 import { registerNativeExplorer } from './NativeExplorer.tsx'
 import { installRemoteFileOpen } from './remote-file-open.ts'
 import { RemoteEditorView } from './RemoteEditorView.tsx'
@@ -283,4 +284,41 @@ export function apply(ctx: Context): void {
       }
     }
   }, 'dsh-remote-vs: conversation view (editor + diff)')
+  // The floating editor window: hosted by the host's FRAME-WIDE overlay slot,
+  // which is the only seat that survives every sidebar tab and conversation
+  // view being unmounted. Registering from a narrower surface (the explorer
+  // tab, the editor view) would take the window away with that surface — and
+  // the editor's live buffer with it.
+  //
+  // The slot is looked up behind a try/catch: an older host without
+  // `shell.overlay` simply keeps the floating feature off. Availability is NOT
+  // assumed here — `FloatingEditorWindow` reports it once it really mounts, so
+  // the menu entry can never point at a window that cannot paint.
+  ctx.effect(() => {
+    let dispose: (() => void) | undefined
+    try {
+      const slots = ctx.slots as unknown as {
+        inject(slot: string, register: () => () => void): () => void
+        register(
+          options: { name: string; id: string; order: number },
+          component: () => ReactNode,
+        ): () => void
+      }
+      dispose = slots.inject('shell.overlay', () => slots.register({
+        name: 'shell.overlay',
+        id: 'remote-vs:floating-editor',
+        order: 40,
+      }, () => <FloatingEditorWindow ctx={ctx} />))
+    } catch (error) {
+      console.warn('[dsh-remote-vs] shell.overlay registration failed (floating editor unavailable):', error)
+      return () => {}
+    }
+    return () => {
+      try {
+        dispose?.()
+      } catch {
+        // Ignore.
+      }
+    }
+  }, 'dsh-remote-vs: floating editor window')
 }

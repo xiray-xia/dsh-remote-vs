@@ -6,10 +6,15 @@
  * sidebar then keeps the whole column for the explorer. Both surfaces read
  * the same module-level store, so a diff opened from source control appears
  * here, and a save here repaints the sidebar's change list.
+ *
+ * While the editor floats (`editorSurface === 'float'`) this tab is NOT the
+ * editor's mount any more, so it renders a placeholder instead: mounting a
+ * second `EditorPane` would give the same tab two live buffers.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ReactNode } from 'react'
 import { EditorPane } from './EditorPane.tsx'
+import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { useBootstrap, useExplorer } from './store.tsx'
 import { DialogHost } from './vsc/kit.tsx'
 
@@ -46,7 +51,7 @@ export function RemoteEditorView(props: { ctx: Context }): ReactNode {
               </span>
             )}
           </div>
-          <EditorPane visible />
+          {store.editorSurface === 'center' ? <EditorPane visible /> : <FloatingEditorPlaceholder />}
         </div>
       </div>
     </>

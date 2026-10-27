@@ -8,7 +8,7 @@
  * and every successful write refreshes the shared status so the tree markers
  * and the change list never disagree.
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash } from '../../protocol.ts'
 import { useExplorer } from '../store.tsx'
 import {
@@ -39,6 +39,7 @@ import {
   IconSync,
   IconTrash,
   IconUndo,
+  ContextMenu,
   FileIcon,
   MiniSpinner,
   baseName,
@@ -49,6 +50,7 @@ import {
   isPreviewOnlyFile,
   promptDialog,
   toast,
+  useContextMenu,
 } from '../vsc/kit.tsx'
 
 const MSG_KEY = 'dsh-remote-vs.commitMsg'
@@ -77,6 +79,8 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const [newBranch, setNewBranch] = useState('')
   const [remoteForm, setRemoteForm] = useState({ name: '', url: '' })
   const [picker, setPicker] = useState(false)
+  /** Right-click menu of one change row (the floating-editor entry). */
+  const menu = useContextMenu()
 
   const fold = (id: string): void => setFolded(prev => ({ ...prev, [id]: prev[id] !== true }))
 
@@ -236,6 +240,36 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     store.openDiff(entry.path, entry.staged, entry.status === '?')
   }
 
+  /**
+   * The same destination as `openChange`, but in the floating editor.
+   *
+   * Kept in step with `openChange` on purpose: a conflicted path and a
+   * preview-only file are opened as FILES (there is no usable diff), everything
+   * else as the working-tree diff the row click would show.
+   */
+  const openChangeInFloat = (entry: ChangeEntry): void => {
+    if (entry.path.endsWith('/')) return
+    const abs = `${repoRoot?.replace(/\/+$/, '') ?? store.root}/${entry.path}`
+    if (entry.status === 'U' || isPreviewOnlyFile(entry.path)) {
+      store.openInFloatEditor(abs)
+      return
+    }
+    store.openDiffInFloatEditor(entry.path, entry.staged, entry.status === '?')
+  }
+
+  /** Right-click on one change row: the floating-editor entry. */
+  const openRowMenu = (event: ReactMouseEvent, entry: ChangeEntry): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    menu.open(event.clientX, event.clientY, [
+      {
+        label: t('files.openInFloat'),
+        onSelect: () => openChangeInFloat(entry),
+        disabled: !store.floatAvailable || entry.path.endsWith('/'),
+      },
+    ])
+  }
+
   const doCommit = async (): Promise<void> => {
     if (repoRoot === undefined || message.trim() === '') return
     // A commit is a real state transition and the user expects to wait for it:
@@ -365,6 +399,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         style={depth === 0 ? undefined : { paddingLeft: `${22 + depth * 12}px` }}
         title={expandable ? `${entry.path}\n${t('scm.dirToggle')}` : `${entry.path}\n${t('scm.openHint')}`}
         onClick={activate}
+        onContextMenu={(event) => openRowMenu(event, entry)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') activate() }}
       >
         {/* The chevron slot is reserved on EVERY row (11px), so a directory row
@@ -852,6 +887,9 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
           </>
         )}
       </div>
+      {menu.menu !== undefined && (
+        <ContextMenu x={menu.menu.x} y={menu.menu.y} entries={menu.menu.entries} onClose={menu.close} />
+      )}
     </div>
   )
 }

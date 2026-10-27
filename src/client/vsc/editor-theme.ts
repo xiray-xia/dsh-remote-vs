@@ -29,7 +29,11 @@ function chrome(p: Palette, dark: boolean): Extension {
     '&': {
       backgroundColor: p.bg,
       color: p.fg,
-      fontSize: '13px',
+      // The floating window changes ONLY its own editor's type size (Ctrl+wheel,
+      // see FloatingEditorWindow); the variable is unset everywhere else, so the
+      // normal editor keeps 13px. A plain literal here would freeze the size and
+      // make the zoom silently do nothing.
+      fontSize: 'var(--rvs-editor-font-size, 13px)',
       height: '100%',
     },
     '.cm-content': {

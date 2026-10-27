@@ -240,12 +240,13 @@ export function SearchView(): ReactNode {
   }
 
   /**
-   * Right-click on a name result: the four things one does with a found path.
+   * Right-click on a name result: what one does with a found path.
    *
    * "Relative" is relative to the REPOSITORY when the workspace sits inside one
    * (the same relative form the tree's own menu copies), else absolute — which
    * is what makes the copied value paste straight into a shell that already ran
-   * `cd` into the repo.
+   * `cd` into the repo. Directories only get the copy/reveal/terminal entries:
+   * there is no file to open in the editor.
    */
   const openHitMenu = (event: React.MouseEvent, hit: SearchHit): void => {
     event.preventDefault()
@@ -255,7 +256,13 @@ export function SearchView(): ReactNode {
     menu.open(event.clientX, event.clientY, [
       { label: t('files.copyAbs'), onSelect: () => { void copyText(abs); toast(t('files.copiedClipboard')) } },
       { label: t('files.copyRel'), onSelect: () => { void copyText(rel); toast(t('files.copiedClipboard')) } },
-      { label: t('search.revealInExplorer'), onSelect: () => { store.revealInExplorer(dir) }, separated: true },
+      {
+        label: t('files.openInFloat'),
+        onSelect: () => { store.openInFloatEditor(abs) },
+        disabled: !store.floatAvailable || hit.isDir,
+        separated: true,
+      },
+      { label: t('search.revealInExplorer'), onSelect: () => { store.revealInExplorer(dir) } },
       { label: t('search.openInTerminal'), onSelect: () => { store.openTerminalAt(dir) } },
     ])
   }

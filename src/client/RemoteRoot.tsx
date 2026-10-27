@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { EditorPane } from './EditorPane.tsx'
+import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { RemoteExplorer } from './RemoteExplorer.tsx'
 import { SearchView } from './SearchView.tsx'
 import { HistoryPanel } from './scm/HistoryPanel.tsx'
@@ -171,9 +172,14 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    * that owns it was gone AND the centre tab mounted a second EditorPane on
    * the same store tab — two live buffers with independent undo state, the one
    * state this file declares must never happen.
+   *
+   * Only the CENTRE pixel surface triggers this redirect. While the editor
+   * floats the sidebar keeps whatever view it had: the editor panel renders a
+   * "docked elsewhere" placeholder (see panelFor), and on docking the user
+   * lands back where they were.
    */
   useEffect(() => {
-    if (store.editorSurface !== 'sidebar' && view === 'editor') go('explorer')
+    if (store.editorSurface === 'center' && view === 'editor') go('explorer')
   }, [store.editorSurface, view, go])
 
   useEffect(() => {
@@ -264,11 +270,14 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         // The sidebar editor is the FALLBACK surface, used only when the host
         // has no `conversation.view` slot to mount the editor in (index.tsx
         // stays on 'sidebar' then). It must not render while the centre surface
-        // owns the editor: both read the same store, so two live editors for one
-        // tab fight over the scroll position and the hidden one — sitting at
-        // scrollTop 0 — wins, which is exactly why a tab switch kept snapping
-        // back to the top of the file.
-        return editorInSidebar ? <EditorPane visible={panelLive('editor')} /> : null
+        // or the floating window owns the editor: all of them read the same
+        // store, so two live editors for one tab fight over the scroll position
+        // and the hidden one — sitting at scrollTop 0 — wins, which is exactly
+        // why a tab switch kept snapping back to the top of the file.
+        if (editorInSidebar) return <EditorPane visible={panelLive('editor')} />
+        // Floating the editor away from the sidebar: the panel stays reachable
+        // (so docking returns here) but shows where the editor went.
+        return store.floatOpen ? <FloatingEditorPlaceholder /> : null
       default:
         return (
           <RemoteExplorer
