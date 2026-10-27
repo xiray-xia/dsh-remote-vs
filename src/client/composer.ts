@@ -1,48 +1,115 @@
 /**
- * Remote `@file` insertion into the current session's composer draft: the
- * far-side twin of dsh-better-sidebar's `conversation-draft.ts` /
- * `selection-payload.ts` (logic vendored, see below). The stock local flow
- * projects explorer rows against the host-confirmed workspace root; remote
- * rows are POSIX absolutes on another machine, so they project against the
- * binding's `remotePath` instead — the same workspace-relative spelling the
- * P3 `TransparentFileReferences` router completes, and the `read` tool
- * consumes through the fs router.
+ * Remote `@file` / selection insertion into the current session's composer
+ * draft: the far-side twin of dsh-better-sidebar's `conversation-draft.ts` +
+ * `selection-payload.ts`. The stock local flow projects explorer rows against
+ * the host-confirmed workspace root; remote rows are POSIX absolutes on
+ * another machine, so they project against the binding's `remotePath` instead —
+ * the same workspace-relative spelling the P3 `TransparentFileReferences`
+ * router completes, and the `read` tool consumes through the fs router.
  *
- * Vendored pieces (behavior-identical to better-sidebar 0.25.0):
- * - `spliceInsert` / `insertAtCaret` (whitespace-aware caret splice),
- * - `findComposerTextarea` / `probeComposerCaret` /
- *   `placeComposerCaretAfterInsert` (DOM caret probe; on DSH 0.2.1 the
- *   composer is a Lexical editor, so the probe misses and inserts append at
- *   the end — exactly what the local explorer does there),
- * - `appendToDraft` (draft read + `setDraft` write through
- *   `ctx.get('conversation')`, missing service degrades to a logged no-op),
+ * Vendored behavior (dsh-better-sidebar **0.28.1**, same semantics):
+ * - `leadFor` / `appendText` (the one separating-space rule),
+ * - `foldClipboardOffset` / `appendOffset` (the host keeps TWO coordinate
+ *   systems over the draft: the clipboard projection — `draft` — expands every
+ *   chip to its whole `clipboardText`, while every insert event's `span` speaks
+ *   the editor's DETECT projection, one placeholder character per chip; a span
+ *   derived without folding is rejected by the host on the second chip),
+ * - `insertDraftReference` — mint one structured chip through the host's public
+ *   `insertReference` facade (the method the native `@` picker calls), with a
+ *   leading space pushed through `slash/input-insert-text` when the draft needs
+ *   one,
+ * - `appendToDraft` — plain text: `setDraft` only for a chipless draft;
+ *   anything carrying chips (or a claimed `/command`) is written through the
+ *   span channel, because `setDraft` rebuilds the document from a string and
+ *   FLATTENS every chip,
+ * - `insertReferenceOrText` — the single fallback policy both surfaces use,
  * - `mentionFor` / `directoryMention` (the `@` quoting grammar),
- * - `insertFileReference` (`slash/input-insert-reference`, verified present
- *   in DSH 0.2.1-alpha.2's dsh-client-ui-conversation contract),
- * - `SELECTION_LIMIT` / `buildRemoteSelectionInsert` (the fenced
- *   `rel:lines` payload shape).
+ * - `SELECTION_LIMIT` / `buildRemoteSelectionInsert` (fenced `rel:lines`
+ *   payload; over the limit the content is dropped and the chip carries the
+ *   plain path line, so an empty fenced block never occupies the draft).
+ *
+ * The 0.25.0-era version of this file inserted at the composer's DOM caret and
+ * always wrote plain text through `setDraft`; both are gone on purpose — the
+ * host publishes no caret for the Lexical composer, and `setDraft` silently
+ * destroyed existing chips.
  *
  * Remote adaptations (ours):
  * - `remoteRelativePath`: POSIX-only prefix strip against `remoteRoot`
  *   (case-sensitive; outside/traversal refuses with `undefined`, never an
  *   absolute mention — the local `workspaceRelativePath` policy).
- * - `insertRemoteReference`: the caller passes `remoteRoot` directly; there
- *   is no workspaces-membership lookup here because the binding gate lives
- *   in `use-remote-chat-target.ts` (current session must belong to the
- *   viewed binding, else the button is disabled — a remote-relative mention
- *   in a local session would name nothing).
+ * - `insertRemoteReference`: the caller passes `remoteRoot` directly; there is
+ *   no workspaces-membership lookup here because the binding gate lives in
+ *   `use-remote-chat-target.ts` (current session must belong to the viewed
+ *   binding, else the button is disabled).
  * - `sameLocalDir`: Windows-tolerant alias-dir comparison for that gate.
  *
- * No ctx reads at module scope (explicit `ctx` params only) so every
- * function degrades to a logged no-op when a web-core service is missing,
- * and the pure pieces stay unit-testable. DOM-only: no Node builtins (the
- * client purity gate forbids them).
+ * No ctx reads at module scope (explicit `ctx` params only) so every function
+ * degrades to a logged no-op when a web-core service is missing, and the pure
+ * pieces stay unit-testable. DOM-only: no Node builtins (the client purity gate
+ * forbids them).
  */
 import type { Context } from '@deepseek-ai/cordis'
 
+/** One reference chip's footprint in clipboard-projection coordinates. */
+export interface OccurrenceLike {
+  /** Start offset in the clipboard projection (same plane as `draft`). */
+  offset: number
+  /** Length in the clipboard projection (the chip's whole `clipboardText`). */
+  length: number
+}
+
+/** Pick-time draft span guarded by the input revision (detect coordinates). */
+export interface TokenSpan {
+  start: number
+  end: number
+  draftRev: number
+}
+
+/** The host's structured-reference payload (mirror of `ReferenceInsert`). */
+export interface ReferenceInsert {
+  /** Trigger source id; `'reference'` for a programmatic insert. */
+  source: string
+  /** What the model receives on send — the chip's full serialized form. */
+  ref: string
+  /** What the composer shows in place of `ref`. */
+  label: string
+  /** Chip icon family; the host picks its own default when omitted. */
+  appearance?: 'session' | 'file' | 'folder'
+  /** The text this chip occupies in the draft projection. */
+  clipboardText: string
+}
+
+/**
+ * One reference to insert: the compact `label` the composer shows, and the
+ * `text` the model receives on send. The two are deliberately different — a
+ * selection reads as `docs/a.md:12-15` on screen while the model still gets the
+ * whole fenced block. A plain-text fallback inserts `text` (never the label),
+ * so a chip failure still delivers the payload the user meant.
+ */
+export interface PendingReference {
+  label: string
+  text: string
+  /** What the draft string carries for this chip; defaults to `label`. */
+  clipboardText?: string
+  /** Chip icon family. Omit when `text` is not a path (a selection). */
+  appearance?: 'file' | 'folder' | 'session'
+}
+
+/** Snapshot the insertion logic reads (structural slice of the host's InputState). */
+interface InputSnapshot {
+  draft: string
+  draftRev?: number
+  occurrences?: readonly OccurrenceLike[]
+  phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
+  claim?: { readonly token: string }
+}
+
 /** Structural slice of the web-core conversation service we touch. */
 interface SessionInputLike {
-  state: { getSnapshot(): { draft: string; draftRev?: number } }
+  state: { getSnapshot(): InputSnapshot }
+  /** Replace the trigger span with one reference chip (span-CAS'd). Absent on older hosts. */
+  insertReference?(ref: ReferenceInsert, span: TokenSpan): boolean
+  /** Replace the draft text — flattens every existing chip into its text. */
   setDraft(text: string): void
 }
 
@@ -62,7 +129,11 @@ function conversationOf(ctx: Context): ConversationLike | undefined {
   }
 }
 
-function sessionScope(ctx: Context, sessionId: string): unknown {
+interface SessionScopeLike {
+  emit?(name: string, payload: unknown): void
+}
+
+function sessionScope(ctx: Context, sessionId: string): SessionScopeLike | undefined {
   // Soft read ONLY: direct `ctx.sessions` property access goes through the
   // cordis proxy trap and throws `cannot get property "sessions" without
   // inject` (our client inject is ['slots', 'uiWorkspace'] by design).
@@ -71,171 +142,231 @@ function sessionScope(ctx: Context, sessionId: string): unknown {
     const sessions = (ctx as unknown as { get(name: string): unknown }).get('sessions') as
       | { scope?(id: string): unknown }
       | undefined
-    return typeof sessions?.scope === 'function' ? sessions.scope(sessionId) : undefined
+    return typeof sessions?.scope === 'function' ? (sessions.scope(sessionId) as SessionScopeLike | undefined) : undefined
   } catch {
     return undefined
   }
 }
 
-/** A resolved composer caret/selection in draft coordinates. */
-export interface DraftCaret {
-  start: number
-  end: number
-}
-
 /**
- * The spliced draft plus the caret index (in that draft) right after the
- * inserted text — the left-side separating space shifts the caret by one,
- * which naive `start + text.length` misses (it would land before the tail).
+ * The separating space an append needs on its left — one space, but never
+ * doubled against existing whitespace. Both the string append and the span
+ * channel (which does no splice math of its own) obey this single rule. A blank
+ * draft takes no separator: it is replaced outright.
  */
-interface SpliceResult {
-  draft: string
-  caretAfter: number
+function leadFor(draft: string): string {
+  if (draft.trim() === '') return ''
+  return /\s$/.test(draft) ? '' : ' '
+}
+
+/** `draft` with `text` appended behind one separating space when needed. */
+export function appendText(draft: string, text: string): string {
+  return `${draft}${leadFor(draft)}${text}`
 }
 
 /**
- * Splice `text` into `draft` at `caret` (replacing any live selection) with
- * whitespace-aware joins and report the caret position right after the
- * inserted text. `caret === null` (position unknown) appends at the end,
- * exactly like the original behavior.
- */
-function spliceInsert(draft: string, text: string, caret: DraftCaret | null): SpliceResult {
-  if (caret === null || draft === '') {
-    const next = draft.trim() === '' ? text : `${draft}${/\s$/.test(draft) ? '' : ' '}${text}`
-    return { draft: next, caretAfter: next.length }
-  }
-  const prefix = draft.slice(0, caret.start)
-  const suffix = draft.slice(caret.end)
-  if (prefix === '' && suffix === '') return { draft: text, caretAfter: text.length }
-  // One separating space, but never doubled against adjacent whitespace
-  // (or the string edges) — mirrors how typing in the middle of a sentence
-  // behaves.
-  const left = prefix === '' || /\s$/.test(prefix) ? '' : ' '
-  const right = suffix === '' || /^\s/.test(suffix) || /\s$/.test(text) ? '' : ' '
-  return {
-    draft: `${prefix}${left}${text}${right}${suffix}`,
-    caretAfter: prefix.length + left.length + text.length,
-  }
-}
-
-/**
- * The spliced draft string (see {@link spliceInsert}); pure string math —
- * unit-tested directly.
- */
-export function insertAtCaret(draft: string, text: string, caret: DraftCaret | null): string {
-  return spliceInsert(draft, text, caret).draft
-}
-
-/**
- * Locate the composer `<textarea>` in the conversation column: prefer the
- * `data-phase`-tagged textarea (the composer's marker), falling back to any
- * textarea in the column, then to a bare data-phase textarea (older host
- * layouts without the column attribute). Null in jsdom-less hosts — and on
- * DSH 0.2.1, whose composer is a Lexical contenteditable (the probe then
- * misses and callers append at the end, matching the local explorer).
- */
-function findComposerTextarea(): HTMLTextAreaElement | null {
-  if (typeof document === 'undefined') return null
-  const column = document.querySelector('#root [data-slot="conversation"]')
-  const find = (scope: ParentNode): HTMLTextAreaElement | null =>
-    scope.querySelector('textarea[data-phase]') ?? scope.querySelector('textarea')
-  return column !== null
-    ? find(column)
-    : document.querySelector<HTMLTextAreaElement>('textarea[data-phase]')
-}
-
-/**
- * Resolve the composer's live caret from its DOM `<textarea>`. The draft
- * store has no caret API, so the value-sync check (`el.value === draft`)
- * discards stale or wrong-composer reads — a caret must never be applied
- * against a draft it was not measured on.
+ * Fold one clipboard-projection offset to its detect-projection twin.
  *
- * Returns null when the composer is missing, disabled/read-only, out of
- * sync with the store draft, or has no measurable selection (jsdom/odd
- * hosts report null selectionStart/End).
+ * An offset inside a chip's expansion snaps to that chip's trailing edge (the
+ * host only ever replaces whole chips, never splits one). An offset exactly at
+ * a chip's START resolves to the position BEFORE the chip — the host's own
+ * `detectOffsetOfClipboardOffset` reads that case as "inside" and would move a
+ * caret one chip too far right.
  */
-export function probeComposerCaret(draft: string): DraftCaret | null {
-  const el = findComposerTextarea()
-  if (el === null || el.disabled || el.readOnly) return null
-  if (el.value !== draft) return null
-  let start = el.selectionStart
-  let end = el.selectionEnd
-  if (typeof start !== 'number' || typeof end !== 'number') return null
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null
-  start = Math.max(0, Math.min(start, draft.length))
-  end = Math.max(start, Math.min(end, draft.length))
-  return { start, end }
-}
-
-/**
- * Restore the composer caret to `caretIndex` after a programmatic
- * `setDraft` commit. A controlled textarea update resets the caret (React
- * commits the value asynchronously and the browser moves the caret to the
- * start/end), so the placement is scheduled and retried across at most two
- * animation frames (setTimeout fallback for jsdom), and only applied when
- * the textarea still matches `expectedDraft` — a newer edit or a different
- * composer wins the race untouched. The caret is clamped into the value
- * bounds, mirroring how browsers clamp type-in positions.
- */
-export function placeComposerCaretAfterInsert(expectedDraft: string, caretIndex: number): void {
-  let remaining = 2
-  let scheduled = false
-  const schedule = (fn: () => void): void => {
-    if (scheduled) return
-    scheduled = true
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn)
-    else setTimeout(fn, 0)
-  }
-  const place = (): void => {
-    scheduled = false
-    if (remaining <= 0) return
-    remaining -= 1
-    const el = findComposerTextarea()
-    if (el === null || el.disabled || el.readOnly) return
-    if (el.value !== expectedDraft) {
-      // The commit has not landed yet (or a competing edit won) — one more
-      // frame before giving up.
-      schedule(place)
-      return
+export function foldClipboardOffset(
+  draft: string,
+  occurrences: readonly OccurrenceLike[],
+  offset: number,
+): number {
+  const target = Math.max(0, Math.min(offset, draft.length))
+  let shrink = 0
+  for (const occurrence of occurrences) {
+    if (target >= occurrence.offset + occurrence.length) {
+      shrink += occurrence.length - 1
+      continue
     }
-    const clamped = Math.max(0, Math.min(caretIndex, el.value.length))
-    el.setSelectionRange(clamped, clamped)
+    if (target > occurrence.offset) return occurrence.offset - shrink + 1
+    break
   }
-  schedule(place)
+  return target - shrink
 }
 
 /**
- * Insert `text` into the session's composer draft at the composer's live
- * caret (see {@link probeComposerCaret}), falling back to appending at the
- * end when the caret cannot be resolved. Returns false — and logs — when the
- * conversation service or the session scope is unavailable.
+ * The detect-projection offset that appends at the document end, or
+ * `undefined` when it cannot be derived.
+ *
+ * `foldClipboardOffset` alone is not enough: a command chip (`/goal `, present
+ * while `phase === 'claimed'`) collapses to one detect character but never
+ * appears in `occurrences` — the host only collects REFERENCE chips. The chip
+ * covers exactly `claim.token`, a prefix of the draft, so its own characters
+ * fold away and one placeholder takes their place.
+ */
+export function appendOffset(snapshot: InputSnapshot): number | undefined {
+  const { draft, claim } = snapshot
+  const occurrences = snapshot.occurrences ?? []
+  const token = snapshot.phase === 'claimed' && claim !== undefined && draft.startsWith(claim.token)
+    ? claim.token
+    : ''
+  if (token === '') return foldClipboardOffset(draft, occurrences, draft.length)
+  const rest = draft.slice(token.length)
+  return 1 + foldClipboardOffset(
+    rest,
+    occurrences
+      .filter(occurrence => occurrence.offset >= token.length)
+      .map(occurrence => ({ offset: occurrence.offset - token.length, length: occurrence.length })),
+    rest.length,
+  )
+}
+
+/**
+ * Whether the session's draft revision moved past `revision` — the only
+ * trustworthy success signal after an exception swallowed the host's answer.
+ */
+function revisionChanged(ctx: Context, sessionId: string, revision: number | undefined): boolean {
+  try {
+    const actx = sessionScope(ctx, sessionId)
+    if (actx === undefined) return false
+    const now = conversationOf(ctx)?.input.for(actx).state.getSnapshot().draftRev
+    if (now === undefined || revision === undefined) return false
+    return now !== revision
+  } catch {
+    return false
+  }
+}
+
+/** One session's resolved input facade, or a logged reason why not. */
+function inputFor(
+  ctx: Context,
+  sessionId: string,
+  reason: string,
+): { actx: SessionScopeLike; input: SessionInputLike } | undefined {
+  const actx = sessionScope(ctx, sessionId)
+  if (actx === undefined) {
+    console.warn(`[dsh-remote-vs] ${reason}: no session scope`, sessionId)
+    return undefined
+  }
+  const conversation = conversationOf(ctx)
+  if (conversation === undefined) {
+    console.warn(`[dsh-remote-vs] ${reason}: conversation service unavailable`)
+    return undefined
+  }
+  try {
+    return { actx, input: conversation.input.for(actx) }
+  } catch (error) {
+    console.warn(`[dsh-remote-vs] ${reason}: input facade unavailable`, error)
+    return undefined
+  }
+}
+
+/**
+ * Mint one reference chip through the host's public `insertReference` facade —
+ * the same method the native `@` picker's event listener calls, so the
+ * composer shows a compact chip while the model receives `reference.text`.
+ * The host runs its own admission-phase and revision guards and reports whether
+ * the edit applied.
+ *
+ * The chip's `clipboardText` is the compact `label` by default, not the full
+ * payload: other draft consumers (copy, plain projections) stay short, and the
+ * full payload rides in `text` for send.
+ *
+ * @returns false when the host refused the insert (stale revision, frozen
+ *   submission phase, or no chip channel) so the caller can fall back.
+ */
+export function insertDraftReference(
+  ctx: Context,
+  sessionId: string,
+  reference: PendingReference,
+): boolean {
+  let before: number | undefined
+  try {
+    const resolved = inputFor(ctx, sessionId, 'reference chip skipped')
+    if (resolved === undefined) return false
+    const { actx, input } = resolved
+    const snapshot = input.state.getSnapshot()
+    if (input.insertReference === undefined || snapshot.draftRev === undefined) return false
+    if (snapshot.phase === 'adjudicating' || snapshot.phase === 'submitting') return false
+    before = snapshot.draftRev
+    const at = appendOffset(snapshot)
+    if (at === undefined) return false
+    let rev = snapshot.draftRev
+    let start = at
+    // The host adds a space AFTER a chip, never before it; a chip appended to
+    // a non-empty draft needs its own separator, pushed through the span
+    // channel so the chip insertion itself stays a pure replacement.
+    if (leadFor(snapshot.draft) !== '') {
+      actx.emit?.('slash/input-insert-text', {
+        text: ' ',
+        span: { draftRev: rev, start: at, end: at },
+      })
+      const afterSpace = input.state.getSnapshot()
+      if (afterSpace.draftRev === rev) return false
+      rev = afterSpace.draftRev ?? rev
+      start = at + 1
+    }
+    const chip: ReferenceInsert = {
+      source: 'reference',
+      ref: reference.text,
+      label: reference.label,
+      ...(reference.appearance === undefined ? {} : { appearance: reference.appearance }),
+      clipboardText: reference.clipboardText ?? reference.label,
+    }
+    return input.insertReference(chip, { draftRev: rev, start, end: start })
+  } catch (error) {
+    console.warn('[dsh-remote-vs] reference chip insert failed:', error)
+    return revisionChanged(ctx, sessionId, before)
+  }
+}
+
+/**
+ * Append `text` to the session's composer draft. Returns false — and logs —
+ * when the conversation service or the session scope is unavailable.
+ *
+ * A chipless draft takes the plain `setDraft` path. A draft that CARRIES chips
+ * is written through `slash/input-insert-text` at the folded end offset
+ * instead: `setDraft` rebuilds the document from a string and flattens every
+ * chip, which quietly destroys references the user placed by hand. The same
+ * span path covers a claimed `/command`, whose prefix chip is not in
+ * `occurrences` (see {@link appendOffset}).
  */
 export function appendToDraft(ctx: Context, sessionId: string, text: string): boolean {
   try {
-    const actx = sessionScope(ctx, sessionId)
-    if (actx === undefined) {
-      console.warn('[dsh-remote-vs] draft insert skipped: no session scope', sessionId)
-      return false
+    const resolved = inputFor(ctx, sessionId, 'draft insert skipped')
+    if (resolved === undefined) return false
+    const { actx, input } = resolved
+    const snapshot = input.state.getSnapshot()
+    const draft = snapshot.draft
+    if ((snapshot.occurrences ?? []).length > 0 || snapshot.phase === 'claimed') {
+      const at = appendOffset(snapshot)
+      if (snapshot.draftRev === undefined || at === undefined) {
+        console.warn('[dsh-remote-vs] draft insert skipped: chip draft without a revision')
+        return false
+      }
+      actx.emit?.('slash/input-insert-text', {
+        text: `${leadFor(draft)}${text}`,
+        span: { draftRev: snapshot.draftRev, start: at, end: at },
+      })
+      return input.state.getSnapshot().draftRev !== snapshot.draftRev
     }
-    const conversation = conversationOf(ctx)
-    if (conversation === undefined) {
-      console.warn('[dsh-remote-vs] draft insert skipped: conversation service unavailable')
-      return false
-    }
-    const input = conversation.input.for(actx)
-    const draft = input.state.getSnapshot().draft
-    const caret = probeComposerCaret(draft)
-    const { draft: next, caretAfter } = spliceInsert(draft, text, caret)
-    input.setDraft(next)
-    // Put the caret right after the inserted text once the value commit
-    // lands — see the module doc for why this keeps stacked inserts at the
-    // running position.
-    placeComposerCaretAfterInsert(next, caretAfter)
+    input.setDraft(appendText(draft, text))
     return true
   } catch (error) {
     console.warn('[dsh-remote-vs] draft insert failed:', error)
     return false
   }
+}
+
+/**
+ * Insert one reference as a chip, degrading to its plain-text form when the
+ * host has no chip channel or refuses the insert. This is the ONE place the
+ * fallback policy lives: the explorer's `@` button and the viewer selection
+ * popup both come through here.
+ */
+export function insertReferenceOrText(
+  ctx: Context,
+  sessionId: string,
+  reference: PendingReference,
+): boolean {
+  return insertDraftReference(ctx, sessionId, reference) || appendToDraft(ctx, sessionId, reference.text)
 }
 
 /**
@@ -315,12 +446,12 @@ export function sameLocalDir(left: string, right: string): boolean {
 
 /**
  * Insert one remote explorer entry into the session's composer draft. Files
- * mint a structured chip like the native `@` picker
- * (`insertFileReference`); directories append the folder mention as plain
- * text so DSH's folder decoration and completion keep working. The caller
- * owns the binding gate (the session must belong to the viewed binding —
- * see `use-remote-chat-target.ts`); an unrepresentable path is a logged
- * no-op, never an absolute mention.
+ * mint a structured chip exactly like the native `@` picker (same facade the
+ * viewer selection popup uses, with a plain-text fallback); directories append
+ * the folder mention as plain text so DSH's folder decoration and completion
+ * keep working. The caller owns the binding gate (the session must belong to
+ * the viewed binding — see `use-remote-chat-target.ts`); an unrepresentable
+ * path is a logged no-op, never an absolute mention.
  */
 export function insertRemoteReference(
   ctx: Context | undefined,
@@ -338,63 +469,25 @@ export function insertRemoteReference(
       console.warn('[dsh-remote-vs] reference insert skipped: path outside the remote workspace root')
       return false
     }
-    const mention = isDir ? directoryMention(relative) : mentionFor(relative, 'file')?.mention
-    if (mention === undefined) {
+    const token = isDir ? directoryMention(relative) : mentionFor(relative, 'file')?.mention
+    if (token === undefined) {
       console.warn('[dsh-remote-vs] reference insert skipped: path cannot be represented as a mention')
       return false
     }
-    if (!isDir && insertFileReference(ctx, sessionId, relative)) return true
-    // The host adds space after a file chip, but not before it. Complete
-    // directory inserts need their own separator for the next @ click.
-    return appendToDraft(ctx, sessionId, isDir ? `${mention} ` : mention)
+    if (isDir) {
+      // Complete directory inserts need their own separator for the next @
+      // click; the host adds space after a chip but not before it.
+      return appendToDraft(ctx, sessionId, `${token} `)
+    }
+    const label = mentionFor(relative, 'file')?.label ?? token
+    return insertReferenceOrText(ctx, sessionId, {
+      label,
+      text: token,
+      clipboardText: token,
+      appearance: 'file',
+    })
   } catch (error) {
     console.warn('[dsh-remote-vs] remote-reference insert failed:', error)
-    return false
-  }
-}
-
-/**
- * Insert one FILE reference as a structured chip (like DSH's own `@` picker).
- * The chip displays `@<basename>` but serializes to `@<relative path>` on
- * send, so the reference stays a single link from trigger to basename.
- *
- * Directories keep the plain-text completion behavior (`@dir/`) through
- * `insertRemoteReference`. The rc.1 picker also supports folder chips on
- * explicit selection; its drill action still inserts plain text.
- */
-export function insertFileReference(ctx: Context, sessionId: string, relativePath: string): boolean {
-  const reference = mentionFor(relativePath, 'file')
-  if (reference === undefined) return false
-  try {
-    const actx = sessionScope(ctx, sessionId)
-    if (actx === undefined) return false
-    const conversation = conversationOf(ctx)
-    if (conversation === undefined) return false
-    const input = conversation.input.for(actx)
-    const before = input.state.getSnapshot()
-    if (before.draftRev === undefined) return false
-    // The session-scope Context's typed `emit` is keyed to DSH's closed event
-    // map; this internal composer event is deliberately string-loose at runtime.
-    // Verified present in DSH 0.2.1-alpha.2 (dsh-client-ui-conversation
-    // `input.d.ts`: 'slash/input-insert-reference').
-    ;(actx as unknown as { emit(name: string, payload: unknown): void }).emit('slash/input-insert-reference', {
-      reference: {
-        source: 'reference',
-        ref: reference.mention,
-        label: reference.label,
-        appearance: 'file',
-        clipboardText: reference.mention,
-      },
-      span: {
-        draftRev: before.draftRev,
-        start: before.draft.length,
-        end: before.draft.length,
-      },
-    })
-    const after = input.state.getSnapshot()
-    return after.draftRev !== before.draftRev
-  } catch (error) {
-    console.warn('[dsh-remote-vs] file-reference insert failed:', error)
     return false
   }
 }
@@ -420,17 +513,22 @@ export function remoteHeaderOf(remoteRoot: string, absPath: string, lines?: Sele
 }
 
 /**
- * The full text appended to the composer draft for one selection.
- * Over the limit the content is dropped: the plain path line is the whole
- * payload (an empty fenced block would just occupy the draft).
+ * The composer payload for one selection: the chip label and the model text.
+ *
+ * The chip reads as `rel:start-end` (compact, and it is what the draft
+ * projection carries); the model receives the whole fenced block. Over the
+ * limit the content is dropped and BOTH halves are the plain path line — an
+ * empty fenced block would just occupy the draft. No `appearance` is set: the
+ * host can make `'file'` chips openable, and a selection's `text` is not a
+ * path, so a click must not hand a fenced block to the file opener.
  */
 export function buildRemoteSelectionInsert(
   absPath: string,
   remoteRoot: string,
   lines: SelectionLines | undefined,
   selected: string,
-): string {
+): PendingReference {
   const header = remoteHeaderOf(remoteRoot, absPath, lines)
-  if (selected.length > SELECTION_LIMIT) return header
-  return `\`\`\`${header}\n${selected}\n\`\`\``
+  if (selected.length > SELECTION_LIMIT) return { label: header, text: header }
+  return { label: header, text: `\`\`\`${header}\n${selected}\n\`\`\`` }
 }

@@ -34,7 +34,7 @@ import { shell } from '@codemirror/legacy-modes/mode/shell'
 import { properties } from '@codemirror/legacy-modes/mode/properties'
 import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile'
 import { diff } from '@codemirror/legacy-modes/mode/diff'
-import { appendToDraft, buildRemoteSelectionInsert } from './composer.ts'
+import { buildRemoteSelectionInsert, insertReferenceOrText, type PendingReference } from './composer.ts'
 import { useSelectionPopup } from './selection-popup.ts'
 import { initialEditorTheme, watchEditorScheme } from './vsc/editor-theme.ts'
 
@@ -243,11 +243,14 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    * listeners (outside mousedown, Escape, hidden tab/window, surface
    * leaving the viewport) — see selection-popup.ts.
    */
-  const selectionPopup = useSelectionPopup({
+  const selectionPopup = useSelectionPopup<PendingReference>({
     onCommit: (insert) => {
       const ctx = ctxRef.current
       const sessionId = targetRef.current.sessionId
-      if (ctx !== undefined && sessionId !== undefined) appendToDraft(ctx, sessionId, insert)
+      // The same entry the explorer's @ button uses: mint one structured chip
+      // (compact `rel:start-end` label, fenced block to the model), falling back
+      // to plain text only when the host refuses the chip channel.
+      if (ctx !== undefined && sessionId !== undefined) insertReferenceOrText(ctx, sessionId, insert)
     },
     getSurface: () => hostRef.current,
   })
