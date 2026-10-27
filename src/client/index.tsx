@@ -20,13 +20,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import './vsc/vsc.css'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
 import { FloatingEditorWindow } from './FloatingEditorWindow.tsx'
+import { installFloatTabTrigger } from './float-tab-trigger.ts'
 import { registerNativeExplorer } from './NativeExplorer.tsx'
 import { installRemoteFileOpen } from './remote-file-open.ts'
 import { RemoteEditorView } from './RemoteEditorView.tsx'
 import { RemoteRoot } from './RemoteRoot.tsx'
 import { ChangesDock, type ChangesDockProps } from './changes/ChangesDock.tsx'
 import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
-import { setEditorSurface } from './store.tsx'
+import { openFloatingEditor, setEditorSurface } from './store.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { setIconService, type IconServiceLike } from './vsc/kit.tsx'
 
@@ -284,6 +285,14 @@ export function apply(ctx: Context): void {
       }
     }
   }, 'dsh-remote-vs: conversation view (editor + diff)')
+  // Double-click on the shell's 「远程编辑器」 tab floats the editor. The tab row
+  // belongs to the host's header (we only contribute a view), so the gesture is
+  // recognised by label — the same lookup `reveal.ts` already uses for clicks —
+  // and a miss is a silent no-op.
+  ctx.effect(
+    () => installFloatTabTrigger(viewT('view.editor'), () => { openFloatingEditor() }),
+    'dsh-remote-vs: float on tab double-click',
+  )
   // The floating editor window: hosted by the host's FRAME-WIDE overlay slot,
   // which is the only seat that survives every sidebar tab and conversation
   // view being unmounted. Registering from a narrower surface (the explorer

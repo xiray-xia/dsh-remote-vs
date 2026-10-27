@@ -32,7 +32,7 @@ export function RemoteEditorView(props: { ctx: Context }): ReactNode {
       <DialogHost />
       <div className="rvs-root rvs-center">
         <div className="rvs-column">
-          <div className="rvs-globalbar">
+          <div className="rvs-globalbar" title={store.floatAvailable ? store.t('float.dockViewHint') : store.t('float.unavailable')}>
             <select
               className="rvs-select"
               value={store.workspace?.id ?? ''}

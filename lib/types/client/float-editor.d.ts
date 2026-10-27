@@ -39,6 +39,19 @@ export declare const FLOAT_VIEWPORT_EDGE = 8;
 export declare const FLOAT_FONT_MIN = 9;
 export declare const FLOAT_FONT_MAX = 28;
 export declare const FLOAT_FONT_DEFAULT = 13;
+/** Diameter of the minimized ball, in pixels. */
+export declare const FLOAT_BALL_SIZE = 44;
+/**
+ * How far a pointer may travel and still count as a CLICK: the minimized window
+ * is a single 44px ball, so "click restores / drag moves" has to be decided
+ * from one pointer gesture.
+ */
+export declare const FLOAT_BALL_CLICK_SLOP = 4;
+/** A point in viewport coordinates (the minimized ball's origin). */
+export interface FloatPoint {
+    x: number;
+    y: number;
+}
 /** The effective editor surface: floating wins, otherwise the base mount. */
 export declare function effectiveEditorSurface(base: 'center' | 'sidebar', floatOpen: boolean): EditorSurface;
 /**
@@ -85,3 +98,26 @@ export declare function serializeFloatRect(rect: FloatRect): string;
 export declare function stepFloatZoom(current: number, deltaY: number): number;
 /** Parse the persisted editor font size (fallback = the default 13px). */
 export declare function parseFloatFontSize(raw: string | null | undefined): number;
+/**
+ * Where the minimized ball may sit: fully on screen, whatever position was
+ * asked for (a ball restored on a smaller monitor must stay clickable).
+ */
+export declare function clampBallPosition(pos: FloatPoint, viewport: FloatViewport): FloatPoint;
+/**
+ * The ball's default spot when a window is minimized: its own top-left corner,
+ * so the ball appears where the window was instead of jumping to a corner.
+ */
+export declare function ballFromRect(rect: FloatRect, viewport: FloatViewport): FloatPoint;
+/**
+ * Whether a finished gesture was a CLICK rather than a drag.
+ *
+ * The minimized window is one small target with two actions on the same
+ * pointer: a press that never really moved restores the window, a real drag
+ * moves the ball. Without this distinction every move-by-3px would also
+ * restore, and every click would be a zero-distance drag.
+ */
+export declare function isBallClick(dx: number, dy: number): boolean;
+/** Parse a persisted ball position (stale geometry is clamped, garbage dropped). */
+export declare function parseBallPosition(raw: string | null | undefined, viewport: FloatViewport): FloatPoint | undefined;
+/** Serialize a ball position for localStorage. */
+export declare function serializeBallPosition(pos: FloatPoint): string;

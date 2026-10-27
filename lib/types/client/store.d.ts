@@ -224,6 +224,8 @@ export interface ExplorerValue {
     }) => void;
     /** 同上，只是打开的是工作区 diff（SCM 更改列表的悬浮入口）。 */
     openDiffInFloatEditor: (rel: string, staged: boolean, untracked?: boolean) => void;
+    /** 把当前编辑器整体浮出（双击会话视图的「远程编辑器」标签）。 */
+    openFloatingEditor: () => void;
     /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
     dockFloatingEditor: () => void;
     openDiff: (rel: string, staged: boolean, untracked?: boolean) => void;
@@ -519,6 +521,17 @@ export declare function setEditorSurface(surface: 'center' | 'sidebar'): void;
  * stay disabled instead of opening a surface that cannot paint.
  */
 export declare function setFloatEditorAvailable(available: boolean): void;
+/**
+ * Float the editor in its current state, without opening anything.
+ *
+ * The entry is a double-click on the shell's 「远程编辑器」 tab (see
+ * `float-tab-trigger.ts`): the user is already looking at the editor and wants
+ * it out of the layout — no file, no diff, same tabs and buffers.
+ *
+ * Idempotent: while the editor already floats this does nothing (the window is
+ * on screen; a second trigger must not restart it).
+ */
+export declare function openFloatingEditor(): void;
 /**
  * Open one file in the floating editor (file-tree / search / SCM menu action).
  *

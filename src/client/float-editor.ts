@@ -46,6 +46,21 @@ export const FLOAT_FONT_MIN = 9
 export const FLOAT_FONT_MAX = 28
 export const FLOAT_FONT_DEFAULT = 13
 
+/** Diameter of the minimized ball, in pixels. */
+export const FLOAT_BALL_SIZE = 44
+/**
+ * How far a pointer may travel and still count as a CLICK: the minimized window
+ * is a single 44px ball, so "click restores / drag moves" has to be decided
+ * from one pointer gesture.
+ */
+export const FLOAT_BALL_CLICK_SLOP = 4
+
+/** A point in viewport coordinates (the minimized ball's origin). */
+export interface FloatPoint {
+  x: number
+  y: number
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -201,4 +216,56 @@ export function parseFloatFontSize(raw: string | null | undefined): number {
   const value = Number(raw)
   if (!finite(value)) return FLOAT_FONT_DEFAULT
   return clamp(Math.round(value), FLOAT_FONT_MIN, FLOAT_FONT_MAX)
+}
+
+/**
+ * Where the minimized ball may sit: fully on screen, whatever position was
+ * asked for (a ball restored on a smaller monitor must stay clickable).
+ */
+export function clampBallPosition(pos: FloatPoint, viewport: FloatViewport): FloatPoint {
+  const maxX = Math.max(0, viewport.width - FLOAT_BALL_SIZE)
+  const maxY = Math.max(0, viewport.height - FLOAT_BALL_SIZE)
+  const x = finite(pos.x) ? pos.x : 0
+  const y = finite(pos.y) ? pos.y : 0
+  return { x: Math.round(clamp(x, 0, maxX)), y: Math.round(clamp(y, 0, maxY)) }
+}
+
+/**
+ * The ball's default spot when a window is minimized: its own top-left corner,
+ * so the ball appears where the window was instead of jumping to a corner.
+ */
+export function ballFromRect(rect: FloatRect, viewport: FloatViewport): FloatPoint {
+  return clampBallPosition({ x: rect.x, y: rect.y }, viewport)
+}
+
+/**
+ * Whether a finished gesture was a CLICK rather than a drag.
+ *
+ * The minimized window is one small target with two actions on the same
+ * pointer: a press that never really moved restores the window, a real drag
+ * moves the ball. Without this distinction every move-by-3px would also
+ * restore, and every click would be a zero-distance drag.
+ */
+export function isBallClick(dx: number, dy: number): boolean {
+  return Math.abs(dx) <= FLOAT_BALL_CLICK_SLOP && Math.abs(dy) <= FLOAT_BALL_CLICK_SLOP
+}
+
+/** Parse a persisted ball position (stale geometry is clamped, garbage dropped). */
+export function parseBallPosition(raw: string | null | undefined, viewport: FloatViewport): FloatPoint | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const candidate = parsed as Record<string, unknown>
+  if (!finite(candidate.x) || !finite(candidate.y)) return undefined
+  return clampBallPosition({ x: candidate.x, y: candidate.y }, viewport)
+}
+
+/** Serialize a ball position for localStorage. */
+export function serializeBallPosition(pos: FloatPoint): string {
+  return JSON.stringify({ x: pos.x, y: pos.y })
 }

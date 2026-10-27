@@ -18,17 +18,22 @@ import { EditorPane } from './EditorPane.tsx'
 import { useBootstrap, useExplorer, setFloatEditorAvailable } from './store.tsx'
 import { DialogHost, IconClose } from './vsc/kit.tsx'
 import {
+  FLOAT_BALL_SIZE,
   FLOAT_FONT_DEFAULT,
-  FLOAT_TITLEBAR_HEIGHT,
+  ballFromRect,
+  clampBallPosition,
   clampFloatRect,
   defaultFloatRect,
   dragFloatRect,
+  isBallClick,
   maximizeFloatRect,
   parseFloatFontSize,
   parseFloatRect,
   resizeFloatRect,
+  serializeBallPosition,
   serializeFloatRect,
   stepFloatZoom,
+  type FloatPoint,
   type FloatRect,
   type FloatResizeHandle,
 } from './float-editor.ts'
@@ -37,6 +42,8 @@ import {
 const RECT_KEY = 'dsh-remote-vs.float.rect'
 /** Where the last editor font size is remembered. */
 const FONT_KEY = 'dsh-remote-vs.float.font'
+/** Where the minimized ball's spot is remembered. */
+const BALL_KEY = 'dsh-remote-vs.float.ball'
 
 /** The resize grips, in the order they are rendered. */
 const RESIZE_HANDLES: readonly FloatResizeHandle[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
@@ -44,6 +51,8 @@ const RESIZE_HANDLES: readonly FloatResizeHandle[] = ['n', 's', 'e', 'w', 'ne', 
 type DragState =
   | { kind: 'move'; pointerX: number; pointerY: number; rect: FloatRect }
   | { kind: 'resize'; handle: FloatResizeHandle; pointerX: number; pointerY: number; rect: FloatRect }
+  /** Dragging the minimized ball; `start` is its origin when the press began. */
+  | { kind: 'ball'; pointerX: number; pointerY: number; start: FloatPoint }
 
 function readViewport(): { width: number; height: number } {
   return { width: window.innerWidth, height: window.innerHeight }
@@ -82,6 +91,8 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
   const [maximized, setMaximized] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [dragging, setDragging] = useState(false)
+  /** The minimized ball's origin; undefined until the first minimize. */
+  const [ball, setBall] = useState<FloatPoint | undefined>(undefined)
 
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
@@ -97,10 +108,11 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
   /** Previous `open`, so "opened again" can reset the minimized state. */
   const wasOpenRef = useRef(open)
 
-  /** The geometry a gesture points at right now (used for move AND finalize). */
-  const resolveDrag = (drag: DragState, pointerX: number, pointerY: number): FloatRect => {
+  /** The geometry a drag/resize gesture points at right now (move AND finalize). */
+  const resolveDrag = (drag: DragState, pointerX: number, pointerY: number): FloatRect | FloatPoint => {
     const dx = pointerX - drag.pointerX
     const dy = pointerY - drag.pointerY
+    if (drag.kind === 'ball') return clampBallPosition({ x: drag.start.x + dx, y: drag.start.y + dy }, viewportRef.current)
     return drag.kind === 'move'
       ? dragFloatRect(drag.rect, dx, dy, viewportRef.current)
       : resizeFloatRect(drag.rect, drag.handle, dx, dy, viewportRef.current)
@@ -136,11 +148,13 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
   }, [open])
 
   // The browser window changed size: a maximized frame follows it, a free one
-  // is clamped back on screen (a rect from a larger monitor must stay reachable).
+  // is clamped back on screen (a rect from a larger monitor must stay reachable),
+  // and a minimized ball is pulled back in so it can still be clicked.
   useEffect(() => {
     const onResize = (): void => {
       const next = readViewport()
       setViewport(next)
+      setBall(prev => (prev === undefined ? prev : clampBallPosition(prev, next)))
       setRect(prev => {
         if (prev === undefined) return prev
         return maximized ? maximizeFloatRect(next) : clampFloatRect(prev, next)
@@ -155,6 +169,14 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
       localStorage.setItem(RECT_KEY, serializeFloatRect(next))
     } catch {
       // Private mode: the frame simply is not remembered.
+    }
+  }, [])
+
+  const persistBall = useCallback((next: FloatPoint): void => {
+    try {
+      localStorage.setItem(BALL_KEY, serializeBallPosition(next))
+    } catch {
+      // Private mode: the ball's spot simply is not remembered.
     }
   }, [])
 
@@ -176,7 +198,9 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
         setDragging(false)
         return
       }
-      setRect(resolveDrag(drag, event.clientX, event.clientY))
+      const next = resolveDrag(drag, event.clientX, event.clientY)
+      if (drag.kind === 'ball') setBall(next as FloatPoint)
+      else setRect(next as FloatRect)
     }
     const onUp = (event: PointerEvent): void => {
       // The pointerup may arrive before React re-rendered the last move, so the
@@ -185,10 +209,23 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
       const drag = dragRef.current
       dragRef.current = undefined
       setDragging(false)
-      if (drag === undefined || maximized) return
+      if (drag === undefined) return
       const final = resolveDrag(drag, event.clientX, event.clientY)
-      setRect(final)
-      persistRect(final)
+      if (drag.kind === 'ball') {
+        // One small target, two actions: a press that never really moved
+        // RESTORES the window, a real drag parks the ball where it was dropped.
+        const dropped = final as FloatPoint
+        setBall(dropped)
+        persistBall(dropped)
+        if (isBallClick(event.clientX - drag.pointerX, event.clientY - drag.pointerY)) {
+          setCollapsed(false)
+        }
+        return
+      }
+      if (maximized) return
+      const nextRect = final as FloatRect
+      setRect(nextRect)
+      persistRect(nextRect)
     }
     /**
      * A cancelled gesture must NOT be finalised from the event: Chromium
@@ -208,7 +245,7 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
     }
-  }, [dragging, maximized, persistRect])
+  }, [dragging, maximized, persistRect, persistBall])
 
   /**
    * Ctrl/Cmd + wheel zooms the EDITOR TEXT, not the page.
@@ -274,8 +311,18 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     setRect(maximizeFloatRect(next))
   }
 
+  /**
+   * Minimize to the floating ball.
+   *
+   * The ball appears at the window's own corner first (a minimize should not
+   * teleport the affordance across the screen), and keeps wherever the user
+   * drags it afterwards — persisted per browser profile.
+   */
   const toggleCollapse = (): void => {
-    setCollapsed(previous => !previous)
+    if (!collapsed && rect !== undefined) {
+      setBall(ball === undefined ? ballFromRect(rect, viewportRef.current) : clampBallPosition(ball, viewportRef.current))
+    }
+    setCollapsed(!collapsed)
   }
 
   /**
@@ -300,72 +347,116 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
 
   if (!open || rect === undefined) return null
 
-  const frameStyle: CSSProperties = {
-    left: rect.x,
-    top: rect.y,
-    width: rect.width,
-    height: collapsed ? FLOAT_TITLEBAR_HEIGHT : rect.height,
-    // The editor theme reads this (see `vsc/editor-theme.ts`); only this frame
-    // sets it, so any other editor mount keeps the default 13px. Docking always
-    // renders at the default size (the variable is frame-scoped) — the zoom is
-    // a property of the floating window.
-    ['--rvs-editor-font-size' as never]: `${fontSize}px`,
-  }
+  /**
+   * A minimized window is a BALL, not a full-width bar: it keeps a title-bar
+   * strip's worth of information (that the editor is out, which file, whether it
+   * is dirty) in one small circle the user can park anywhere.
+   */
+  const ballPoint = clampBallPosition(ball ?? ballFromRect(rect, viewport), viewport)
+  const frameStyle: CSSProperties = collapsed
+    ? { left: ballPoint.x, top: ballPoint.y, width: FLOAT_BALL_SIZE, height: FLOAT_BALL_SIZE }
+    : {
+        left: rect.x,
+        top: rect.y,
+        width: rect.width,
+        height: rect.height,
+        // The editor theme reads this (see `vsc/editor-theme.ts`); only this
+        // frame sets it, so any other editor mount keeps the default 13px.
+        // Docking always renders at the default size (the variable is
+        // frame-scoped) — the zoom is a property of the floating window.
+        ['--rvs-editor-font-size' as never]: `${fontSize}px`,
+      }
 
   return (
     <div
-      className={`rvs-root rvs-float-window${dragging ? ' dragging' : ''}`}
+      className={`rvs-root rvs-float-window${collapsed ? ' rvs-float-mini' : ''}${dragging ? ' dragging' : ''}`}
       style={frameStyle}
       data-rvs-float={collapsed ? 'collapsed' : 'open'}
       data-rvs-float-maximized={maximized ? 'true' : undefined}
+      title={collapsed ? t('float.ballHint') : undefined}
+      onPointerDown={collapsed
+        ? (event) => {
+            if (event.button !== 0) return
+            // The whole ball is the drag handle; a press that does not move
+            // restores the window on release (see the pointerup handler).
+            beginDrag(event, { kind: 'ball', pointerX: event.clientX, pointerY: event.clientY, start: ballPoint })
+          }
+        : undefined}
     >
-      <div
-        className="rvs-float-titlebar"
-        onPointerDown={(event) => {
-          if (rect === undefined || maximized) return
-          if ((event.target as HTMLElement).closest('button') !== null) return
-          beginDrag(event, { kind: 'move', pointerX: event.clientX, pointerY: event.clientY, rect })
-        }}
-        onDoubleClick={(event) => {
-          if ((event.target as HTMLElement).closest('button') !== null) return
-          toggleMaximize()
-        }}
-        title={t('float.dragHint')}
-      >
-        <span className="rvs-float-glyph" aria-hidden="true">▣</span>
-        <span className="rvs-float-title">{t('float.title')}</span>
-        {activeTab !== undefined && (
-          <span className="rvs-float-file" title={activeTab.fullPath}>{activeTab.rel}</span>
+      {collapsed
+        ? (
+          <div
+            className="rvs-float-ball"
+            role="button"
+            tabIndex={0}
+            aria-label={t('float.ballHint')}
+            title={t('float.ballHint')}
+            // Keyboard access: the ball is the only affordance left, so it must
+            // also restore without a pointer. Pointer clicks are decided in the
+            // pointerup handler (click vs drag), never here — a drag that ends
+            // on the ball must not also restore it.
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                setCollapsed(false)
+              }
+            }}
+          >
+            <span className="rvs-float-ball-glyph" aria-hidden="true">▣</span>
+            {activeTab !== undefined && activeTab.dirty && (
+              <span className="rvs-float-ball-dot" title={t('editor.unsaved')} aria-hidden="true" />
+            )}
+          </div>
+        )
+        : (
+          <div
+            className="rvs-float-titlebar"
+            onPointerDown={(event) => {
+              if (rect === undefined || maximized) return
+              if ((event.target as HTMLElement).closest('button') !== null) return
+              beginDrag(event, { kind: 'move', pointerX: event.clientX, pointerY: event.clientY, rect })
+            }}
+            onDoubleClick={(event) => {
+              if ((event.target as HTMLElement).closest('button') !== null) return
+              toggleMaximize()
+            }}
+            title={t('float.dragHint')}
+          >
+            <span className="rvs-float-glyph" aria-hidden="true">▣</span>
+            <span className="rvs-float-title">{t('float.title')}</span>
+            {activeTab !== undefined && (
+              <span className="rvs-float-file" title={activeTab.fullPath}>{activeTab.rel}</span>
+            )}
+            <span className="rvs-float-spacer" />
+            <button
+              type="button"
+              className="rvs-float-btn"
+              title={t('float.minimize')}
+              aria-label={t('float.minimize')}
+              onClick={toggleCollapse}
+            >
+              —
+            </button>
+            <button
+              type="button"
+              className="rvs-float-btn"
+              title={maximized ? t('float.restore') : t('float.maximize')}
+              aria-label={maximized ? t('float.restore') : t('float.maximize')}
+              onClick={toggleMaximize}
+            >
+              {maximized ? '❐' : '□'}
+            </button>
+            <button
+              type="button"
+              className="rvs-float-btn rvs-float-close"
+              title={t('float.dock')}
+              aria-label={t('float.dock')}
+              onClick={() => { store.dockFloatingEditor() }}
+            >
+              <IconClose size={12} />
+            </button>
+          </div>
         )}
-        <span className="rvs-float-spacer" />
-        <button
-          type="button"
-          className="rvs-float-btn"
-          title={collapsed ? t('float.expand') : t('float.minimize')}
-          aria-label={collapsed ? t('float.expand') : t('float.minimize')}
-          onClick={toggleCollapse}
-        >
-          {collapsed ? '▣' : '—'}
-        </button>
-        <button
-          type="button"
-          className="rvs-float-btn"
-          title={maximized ? t('float.restore') : t('float.maximize')}
-          aria-label={maximized ? t('float.restore') : t('float.maximize')}
-          onClick={toggleMaximize}
-        >
-          {maximized ? '❐' : '□'}
-        </button>
-        <button
-          type="button"
-          className="rvs-float-btn rvs-float-close"
-          title={t('float.dock')}
-          aria-label={t('float.dock')}
-          onClick={() => { store.dockFloatingEditor() }}
-        >
-          <IconClose size={12} />
-        </button>
-      </div>
       {body}
       <DialogHost />
       {!collapsed && !maximized && RESIZE_HANDLES.map(handle => (

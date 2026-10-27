@@ -2097,10 +2097,67 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   pointer-events: auto;
 }
 
-/* Minimized: the frame shrinks to its title bar (the body is hidden, not
-   unmounted — see FloatingEditorWindow). */
+/* Minimized: the frame IS the ball (see `.rvs-float-mini`); the body stays
+   mounted but hidden, and it must not impose a minimum height. */
 .rvs-float-window[data-rvs-float="collapsed"] {
   min-height: 0;
+}
+
+/**
+ * Minimized window = floating ball.
+ *
+ * A full-width 34px bar was too long: it read as a broken window and covered a
+ * whole strip. The ball is a small circle at the window's own corner, draggable
+ * anywhere, restored by a click (or Enter/Space). It keeps the dirty dot, so
+ * "the editor is out and has unsaved edits" is still one glance away.
+ */
+.rvs-float-window.rvs-float-mini {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: move;
+  touch-action: none;
+}
+
+.rvs-float-ball {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  border-radius: 50%;
+  color: var(--rvs-brand);
+  font-size: 16px;
+  line-height: 1;
+  cursor: move;
+  outline: none;
+}
+
+.rvs-float-ball:hover,
+.rvs-float-ball:focus-visible {
+  background: var(--rvs-hover);
+}
+
+.rvs-float-ball-glyph {
+  pointer-events: none;
+}
+
+/* Unsaved edits stay visible while minimized. */
+.rvs-float-ball-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rvs-git-m);
+  box-shadow: 0 0 0 2px var(--rvs-code-bg);
+  pointer-events: none;
 }
 
 /* While a drag/resize gesture runs the pointer must not select editor text. */
