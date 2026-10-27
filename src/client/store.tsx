@@ -1661,17 +1661,26 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
      * The remote file now holds `text`, so that becomes the disk-side dirty
      * baseline (a later remount compares against it).
      *
-     * The dirty FLAG is deliberately not written here when a live editor is
-     * mounted for this tab: the user may have typed while the write was in
-     * flight, and clearing it would mark that newer buffer saved. The editor
-     * re-derives it (`markLiveEditorSaved` below) — and if the pane was
-     * remounted mid-write, the correction reaches the replacement through the
-     * `savedText` prop effect in `CodeEditor`. Only a tab with NO mounted
-     * editor (closed while saving, or never focused) has nothing that could be
-     * newer, and there the flag is cleared directly.
+     * The dirty FLAG is deliberately NOT cleared while the tab may still hold
+     * something newer than what was written. Two ways that happens, and both
+     * must keep the flag:
+     *
+     *  - a live editor is mounted for this tab: the user may have typed while
+     *    the write was in flight, and only the editor can tell (it re-derives
+     *    through `markLiveEditorSaved` below);
+     *  - the tab was switched away from mid-write: its stored `text` is then the
+     *    handoff copy of that newer buffer, so comparing it with what was
+     *    written detects the difference without an editor.
+     *
+     * Only a tab whose stored text IS the written text, with no mounted editor,
+     * has nothing newer — there the flag is cleared directly. (Clearing it
+     * otherwise is how a tab read "saved" while its buffer was not: dot off,
+     * Save disabled, close guard silent.)
      */
     const liveEditor = isLiveEditorFor(id)
-    patchTab(id, { saving: false, baseline: text, ...(liveEditor ? {} : { dirty: false }) })
+    const current = state.tabs.find(item => item.id === id)
+    const newer = current !== undefined && current.text !== text
+    patchTab(id, { saving: false, baseline: text, ...(liveEditor || newer ? {} : { dirty: false }) })
     markLiveEditorSaved(id, text)
     toast(`${t('editor.saved')} · ${tab.rel}`, false)
     await afterWrite()
