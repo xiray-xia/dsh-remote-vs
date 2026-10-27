@@ -5,8 +5,8 @@
  * the workspace REGISTRY, so this string is the only label the user ever sees
  * there. It used to be built from the remote PATH's last segment, which threw
  * away the one name the user had chosen: a workspace created as
- * "P710_userdebug" showed up as `… > P710`, and two bindings that differ only
- * deeper down (`…/userdebug/P710` and `…/userdebug/P710_fac`) became
+ * "build_variant_a" showed up as `… > build`, and two bindings that differ only
+ * deeper down (`…/userdebug/build_a` and `…/userdebug/build_a_fac`) became
  * indistinguishable.
  *
  * The alias stays in front: it is what tells two hosts apart, and the part after
