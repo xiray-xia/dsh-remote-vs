@@ -435,12 +435,16 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // editor is then a different file and must not adopt the other tab's
       // baseline.
       if (propsRef.current.tabId !== tabId) return
-      savedRef.current = view.state.doc.toString()
-      savedDocRef.current = EditorState.create({ doc: savedText }).doc
-      const saved = savedDocRef.current
+      // The written bytes themselves: no document copy needed (this string came
+      // from the caller's own `getContent`, or from the tab's baseline).
+      savedRef.current = savedText
+      const saved = EditorState.create({ doc: savedText }).doc
+      savedDocRef.current = saved
       const dirty = view.state.doc !== saved && !view.state.doc.eq(saved)
-      dirtyRef.current = dirty
-      propsRef.current.onDirty(dirty)
+      if (dirty !== dirtyRef.current) {
+        dirtyRef.current = dirty
+        propsRef.current.onDirty(dirty)
+      }
     },
     getViewState: () => {
       const view = viewRef.current
@@ -489,6 +493,34 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     if (props.visible === false) return
     viewRef.current?.requestMeasure()
   }, [props.visible])
+
+  /**
+   * A save that landed AFTER this editor mounted.
+   *
+   * The save path moves the tab's `baseline` (the bytes now on disk) and asks
+   * the live editor to re-derive its dirty flag. That works while the same
+   * instance is mounted, but the pane can be remounted while the remote write
+   * is in flight (a surface flip, a dock, a tab switch): the replacement
+   * derives against the baseline it saw at MOUNT, and the corrected value only
+   * arrives later as a prop. Without this effect the tab keeps the `dirty:false`
+   * the save optimistically wrote, while the buffer holds newer text — dot off,
+   * Save disabled, close guard silent. Re-derive, never touch the document.
+   */
+  useEffect(() => {
+    const view = viewRef.current
+    const savedText = props.savedText
+    if (view === undefined || savedText === undefined) return
+    const baseline = EditorState.create({ doc: savedText }).doc
+    const previous = savedDocRef.current
+    if (previous !== undefined && previous.eq(baseline)) return
+    savedDocRef.current = baseline
+    savedRef.current = savedText
+    const dirty = view.state.doc !== baseline && !view.state.doc.eq(baseline)
+    if (dirty !== dirtyRef.current) {
+      dirtyRef.current = dirty
+      propsRef.current.onDirty(dirty)
+    }
+  }, [props.savedText])
 
   // The chat gate may flip while a popup is open (session switched away):
   // never commit into a session the file no longer belongs to.
@@ -711,14 +743,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       : view.state.doc
     savedDocRef.current = baseline
     if (savedText !== undefined) {
+      savedRef.current = savedText
       // Report the dirty state AT MOUNT: the buffer can already be newer than
       // the disk bytes (a handoff remount). Waiting for the first keystroke
       // left exactly such a file shown as clean — dot off, Save disabled,
       // close guard silent — which is the failure this baseline exists to
       // prevent.
       const dirty = view.state.doc !== baseline && !view.state.doc.eq(baseline)
-      dirtyRef.current = dirty
-      propsRef.current.onDirty(dirty)
+      // Only a CHANGE is worth a store write: this runs on every mount, and a
+      // clean tab reporting `false` would cost every subscriber a re-render for
+      // nothing.
+      if (dirty !== dirtyRef.current) {
+        dirtyRef.current = dirty
+        propsRef.current.onDirty(dirty)
+      }
     }
     setView(view)
     /**

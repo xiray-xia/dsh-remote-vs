@@ -34,7 +34,7 @@ import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
-import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty } from './live-editor.ts'
+import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, isLiveEditorFor, markLiveEditorSaved } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
@@ -1657,12 +1657,22 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
   patchTab(id, { saving: true, text })
   try {
     await api.fileOp.write(workspace.alias, tab.fullPath, text)
-    // The remote file now holds `text`: it becomes the disk-side dirty
-    // baseline as well, so a later remount compares against the right bytes.
-    // The flag is still re-derived from the LIVE buffer by the caller: the user
-    // may have typed while the write was in flight, and that newer text must
-    // keep the tab dirty.
-    patchTab(id, { saving: false, dirty: false, baseline: text })
+    /**
+     * The remote file now holds `text`, so that becomes the disk-side dirty
+     * baseline (a later remount compares against it).
+     *
+     * The dirty FLAG is deliberately not written here when a live editor is
+     * mounted for this tab: the user may have typed while the write was in
+     * flight, and clearing it would mark that newer buffer saved. The editor
+     * re-derives it (`markLiveEditorSaved` below) — and if the pane was
+     * remounted mid-write, the correction reaches the replacement through the
+     * `savedText` prop effect in `CodeEditor`. Only a tab with NO mounted
+     * editor (closed while saving, or never focused) has nothing that could be
+     * newer, and there the flag is cleared directly.
+     */
+    const liveEditor = isLiveEditorFor(id)
+    patchTab(id, { saving: false, baseline: text, ...(liveEditor ? {} : { dirty: false }) })
+    markLiveEditorSaved(id, text)
     toast(`${t('editor.saved')} · ${tab.rel}`, false)
     await afterWrite()
     return true
@@ -1752,11 +1762,15 @@ export function setFloatEditorAvailable(available: boolean): void {
     patch({ floatAvailable: true })
     return
   }
-  // The host went away while the editor floated (plugin unmount / host swap):
-  // keeping `floatOpen` would leave the main surfaces showing the "docked
-  // elsewhere" placeholder with no window to dock from. Try the buffer handoff
-  // first — it may still succeed here; if it does not, the main mount revives
-  // from the tab's last copy.
+  // The host went away while the editor floated (plugin unmount / host swap).
+  // Keeping `floatOpen` would leave the main surfaces showing the "docked
+  // elsewhere" placeholder with no window to dock from, so the flag has to go.
+  //
+  // The capture below is BEST EFFORT and usually cannot carry the text: React
+  // detaches a child's ref before the parent's passive cleanup runs, so the
+  // editor handle is already gone by the time the overlay entry unmounts. The
+  // tab therefore keeps whatever the last switch captured — this call must not
+  // be read as a guarantee.
   if (!state.floatAvailable && !state.floatOpen) return
   captureLiveBuffer()
   patch({ floatAvailable: false, floatOpen: false })

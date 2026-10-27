@@ -101,6 +101,37 @@ export function captureLiveEditorText(): { tabId: string; text: string } | undef
   }
 }
 
+/**
+ * Whether one tab's file editor is the one registered right now.
+ *
+ * The save path asks this before it clears a tab's dirty flag: if an editor IS
+ * mounted for that tab, the flag belongs to the live buffer and only the
+ * editor may clear it (see `markLiveEditorSaved`).
+ */
+export function isLiveEditorFor(tabId: string): boolean {
+  return registration?.tabId === tabId
+}
+
+/**
+ * Advance the registered editor's dirty baseline to the bytes a save wrote.
+ *
+ * Routed through the MODULE-LEVEL registration rather than a React ref on
+ * purpose: the pane can be remounted while the remote write is in flight (a
+ * surface flip, a dock, a tab switch), and the ref the save started with is
+ * then detached — that is exactly how a tab ended up reported clean while its
+ * live buffer was newer than the file. The registration always names the editor
+ * mounted NOW, so the correction lands on whichever instance is on screen, and
+ * it is skipped (never misapplied) when that editor shows another tab: that tab
+ * heals on its next mount from `savedText` (see `CodeEditor`).
+ * @returns true when an editor for this tab took the new baseline.
+ */
+export function markLiveEditorSaved(tabId: string, savedText: string): boolean {
+  const entry = registration
+  if (entry === undefined || entry.tabId !== tabId) return false
+  entry.getHandle()?.markSaved(savedText, tabId)
+  return true
+}
+
 /** Remember one tab's scroll + caret (reported by the editor, see EditorPane). */
 export function rememberEditorViewState(tabId: string, state: CodeEditorViewState): void {
   viewStates.set(tabId, state)

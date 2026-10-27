@@ -319,15 +319,12 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
       toast(t('editor.needSource'), true)
       return
     }
-    const saved = await store.saveTab(tab.id, text)
-    if (!saved) return
-    // Advance the LIVE editor's baseline to the bytes that actually reached the
-    // remote file. If the user typed while the write was in flight, `markSaved`
-    // re-derives the dirty flag against those bytes, so the newer buffer keeps
-    // the tab dirty instead of the save silently clearing it. It also no-ops
-    // when the pane has switched to another tab in the meantime (the tabId
-    // guard inside the handle).
-    editorRef.current?.markSaved(text, tab.id)
+    // The store advances the disk baseline and re-derives the dirty flag on the
+    // MOUNTED editor through the module-level registration (see
+    // `markLiveEditorSaved`), so this works even when the pane is remounted
+    // while the write is in flight. Nothing is left to do here beyond handing
+    // it the live buffer.
+    await store.saveTab(tab.id, text)
   }
 
   if (tabs.length === 0) {
