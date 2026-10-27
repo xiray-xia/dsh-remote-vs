@@ -11,20 +11,17 @@
  * store is: `EditorPane` is unmounted before the replacement mounts, so no
  * React state survives the swap.
  *
- * Two things travel:
+ * Two things travel, and they are captured SEPARATELY because their costs
+ * differ by orders of magnitude:
  *   - the buffer text (the store copies it onto the tab before the surface
- *     flips, so the replacement mounts with it as `initial`);
+ *     flips, so the replacement mounts with it as `initial`) — materializes the
+ *     whole document, so it is taken only when the tab may differ from disk;
  *   - scroll + caret (kept here and read back by the replacement, which is how
  *     a tab switch already restored its position — same storage, now shared by
- *     every surface instead of one component's `useRef`).
+ *     every surface instead of one component's `useRef`) — cheap, taken on
+ *     every switch.
  */
 import type { CodeEditorHandle, CodeEditorViewState } from './CodeEditor.tsx';
-/** What was handed over when the live editor was snapshotted. */
-export interface LiveEditorSnapshot {
-    tabId: string;
-    text: string;
-    viewState: CodeEditorViewState | undefined;
-}
 /**
  * Register the editor that is on screen right now.
  *
@@ -35,14 +32,33 @@ export interface LiveEditorSnapshot {
  */
 export declare function registerLiveEditor(tabId: string, getHandle: () => CodeEditorHandle | null): () => void;
 /**
- * Snapshot the live buffer (text + position) before its mount goes away.
+ * Snapshot the live position (scroll + caret) without touching the document.
  *
- * Called from the store BEFORE flipping the surface: at that moment the editor
- * is still mounted and its CodeMirror view still owns the edits.
+ * Cheap, so the store can call it on EVERY switch: a surface flip remounts the
+ * very same tab, and the replacement's render happens before the old view's
+ * unmount report — the position has to be in the map before that render.
+ */
+export declare function captureLiveEditorPosition(): void;
+/**
+ * Whether the live buffer differs from its disk baseline.
+ *
+ * The store uses this to skip the O(document) text copy on clean tabs (see
+ * `captureLiveBuffer`): the boolean is cheap, `getContent()` materializes the
+ * whole file as a string.
+ */
+export declare function isLiveEditorDirty(): boolean;
+/**
+ * Copy the live buffer's text, for a switch that would otherwise lose it.
+ *
+ * Called from the store BEFORE the tab switch / surface flip: at that moment
+ * the editor is still mounted and its CodeMirror view still owns the edits.
  * @returns undefined when no file editor is live (a diff tab, or a view that
  *   was never the selected one) — there is nothing to carry over then.
  */
-export declare function captureLiveEditor(): LiveEditorSnapshot | undefined;
+export declare function captureLiveEditorText(): {
+    tabId: string;
+    text: string;
+} | undefined;
 /** Remember one tab's scroll + caret (reported by the editor, see EditorPane). */
 export declare function rememberEditorViewState(tabId: string, state: CodeEditorViewState): void;
 /** The stored position for one tab, or undefined when it was never seen. */

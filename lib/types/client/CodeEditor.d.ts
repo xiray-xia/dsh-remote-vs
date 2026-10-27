@@ -23,7 +23,18 @@ export interface CodeEditorViewState {
 export interface CodeEditorHandle {
     getContent: () => string;
     isDirty: () => boolean;
-    markSaved: () => void;
+    /**
+     * Advance the dirty baseline to the bytes a save just wrote to the remote
+     * file, and re-derive the dirty flag from the LIVE buffer against them.
+     *
+     * Takes the saved text explicitly because the user may have typed while the
+     * remote write was in flight: the buffer is then NEWER than the file, and
+     * declaring it saved would be the same silent-loss bug in the other
+     * direction. `tabId` guards against the pane having switched to another tab
+     * while the save awaited — marking that editor saved would corrupt ITS
+     * baseline.
+     */
+    markSaved: (savedText: string, tabId: string) => void;
     /** Snapshot scroll + selection, for restoring after a remount. */
     getViewState: () => CodeEditorViewState | undefined;
     /** Scroll back and put the caret where it was. */

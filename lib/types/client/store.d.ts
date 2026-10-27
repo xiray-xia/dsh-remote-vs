@@ -242,7 +242,12 @@ export interface ExplorerValue {
      * `changeSet.marks`，`hunk` 是 `patches` 的下标）。
      */
     undoChange: (tabId: string, mark: ChangeMark) => Promise<void>;
-    saveTab: (id: string, content: string) => Promise<void>;
+    /**
+     * Write one file tab back to the remote host.
+     * @returns true only when the write really succeeded — the caller uses it to
+     *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
+     */
+    saveTab: (id: string, content: string) => Promise<boolean>;
     reloadTab: (id: string) => Promise<void>;
     info: (text: string) => void;
     fail: (text: string) => void;
@@ -482,8 +487,8 @@ export declare function openCommitFile(hash: string, rel: string): void;
 export declare function activateTab(id: string): void;
 export declare function closeTab(id: string): void;
 export declare function updateTab(id: string, next: Partial<EditorTab>): void;
-/** Write one tab back to the remote host. */
-export declare function saveTab(id: string, content: string): Promise<void>;
+/** Write one tab back to the remote host. @returns true when the write landed. */
+export declare function saveTab(id: string, content: string): Promise<boolean>;
 /**
  * Re-read one tab (file content or diff payload).
  *

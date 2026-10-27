@@ -278,6 +278,26 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     setCollapsed(previous => !previous)
   }
 
+  /**
+   * The body subtree is memoised on `collapsed` alone so a drag/resize update
+   * (one per pointermove) does not re-render the whole EditorPane through the
+   * parent: the element identity stays stable while only the frame geometry
+   * moves. The pane is still hidden, never unmounted, while minimized — it owns
+   * the live CodeMirror buffer.
+   *
+   * HOOK ORDER: this must stay ABOVE the `!open || rect === undefined` early
+   * return. Hooks cannot be skipped on a render, and the first open reaches
+   * this line one render later than every previous render did — placing it
+   * below the return throws "Rendered more hooks than during the previous
+   * render" exactly when the feature is used (in production too; React's
+   * error 310 is not dev-only).
+   */
+  const body = useMemo(() => (
+    <div className="rvs-float-body" ref={bodyRef} style={{ display: collapsed ? 'none' : 'flex' }}>
+      <EditorPane visible={!collapsed} />
+    </div>
+  ), [collapsed])
+
   if (!open || rect === undefined) return null
 
   const frameStyle: CSSProperties = {
@@ -291,19 +311,6 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     // a property of the floating window.
     ['--rvs-editor-font-size' as never]: `${fontSize}px`,
   }
-
-  /**
-   * The body subtree is memoised on `collapsed` alone so a drag/resize update
-   * (one per pointermove) does not re-render the whole EditorPane through the
-   * parent: the element identity stays stable while only the frame geometry
-   * moves. The pane is still hidden, never unmounted, while minimized — it owns
-   * the live CodeMirror buffer.
-   */
-  const body = useMemo(() => (
-    <div className="rvs-float-body" ref={bodyRef} style={{ display: collapsed ? 'none' : 'flex' }}>
-      <EditorPane visible={!collapsed} />
-    </div>
-  ), [collapsed])
 
   return (
     <div

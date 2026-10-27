@@ -34,7 +34,7 @@ import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
-import { captureLiveEditor } from './live-editor.ts'
+import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
@@ -467,7 +467,12 @@ export interface ExplorerValue {
    * `changeSet.marks`，`hunk` 是 `patches` 的下标）。
    */
   undoChange: (tabId: string, mark: ChangeMark) => Promise<void>
-  saveTab: (id: string, content: string) => Promise<void>
+  /**
+   * Write one file tab back to the remote host.
+   * @returns true only when the write really succeeded — the caller uses it to
+   *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
+   */
+  saveTab: (id: string, content: string) => Promise<boolean>
   reloadTab: (id: string) => Promise<void>
   info: (text: string) => void
   fail: (text: string) => void
@@ -1330,7 +1335,20 @@ function patchTab(id: string, next: Partial<EditorTab>): void {
  * `live-editor.ts`.
  */
 function captureLiveBuffer(): void {
-  const captured = captureLiveEditor()
+  // The position is cheap and is needed even for a CLEAN tab: a surface flip
+  // remounts the very same tab, and the replacement's render happens before
+  // the old view's unmount report.
+  captureLiveEditorPosition()
+  const active = state.tabs.find(item => item.id === state.activeTabId)
+  // The whole document is only materialized when the tab may hold something the
+  // store does not: the buffer is edited, or a previous handoff already copied
+  // unsaved text into `text` (so undoing back to the disk bytes must still be
+  // carried). A clean, already-synced tab skips the O(file) copy.
+  const synced = active !== undefined
+    && active.kind === 'file'
+    && active.text === (active.baseline ?? active.text)
+  if (synced && !isLiveEditorDirty()) return
+  const captured = captureLiveEditorText()
   if (captured === undefined) return
   const tab = state.tabs.find(item => item.id === captured.tabId)
   // Diffs and previews have no CodeMirror buffer; and an unchanged buffer
@@ -1620,11 +1638,11 @@ export function updateTab(id: string, next: Partial<EditorTab>): void {
   patchTab(id, next)
 }
 
-/** Write one tab back to the remote host. */
-export async function saveTab(id: string, content: string): Promise<void> {
+/** Write one tab back to the remote host. @returns true when the write landed. */
+export async function saveTab(id: string, content: string): Promise<boolean> {
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
-  if (workspace === undefined || tab === undefined || tab.kind !== 'file' || tab.binary || tab.truncated) return
+  if (workspace === undefined || tab === undefined || tab.kind !== 'file' || tab.binary || tab.truncated) return false
   // Never fall back to the tab's loaded text. `tab.text` is only ever written
   // by a load/reload or by the surface handoff (`captureLiveBuffer`), never as
   // a fallback for a caller without a live buffer, so substituting it here
@@ -1633,21 +1651,25 @@ export async function saveTab(id: string, content: string): Promise<void> {
   // without a live buffer must refuse to save instead (see EditorPane.saveActive).
   if (typeof content !== 'string') {
     toast(t('editor.needSource'), true)
-    return
+    return false
   }
   const text = content
   patchTab(id, { saving: true, text })
   try {
     await api.fileOp.write(workspace.alias, tab.fullPath, text)
     // The remote file now holds `text`: it becomes the disk-side dirty
-    // baseline as well, so the remount after a later handoff compares against
-    // the right bytes.
+    // baseline as well, so a later remount compares against the right bytes.
+    // The flag is still re-derived from the LIVE buffer by the caller: the user
+    // may have typed while the write was in flight, and that newer text must
+    // keep the tab dirty.
     patchTab(id, { saving: false, dirty: false, baseline: text })
     toast(`${t('editor.saved')} · ${tab.rel}`, false)
     await afterWrite()
+    return true
   } catch (error) {
     patchTab(id, { saving: false })
     toast(error instanceof Error ? error.message : String(error), true)
+    return false
   }
 }
 
@@ -1753,6 +1775,12 @@ export function setFloatEditorAvailable(available: boolean): void {
  * instead (with the reason toasted), so the click is never a dead end.
  */
 export function openInFloatEditor(fullPath: string, options: { line?: number } = {}): void {
+  // Mirror `openFile`'s precondition: with no binding or no path there is no tab
+  // to show, and floating an empty editor is worse than not floating at all.
+  if (currentWorkspace() === undefined || fullPath === '') {
+    openFile(fullPath, options)
+    return
+  }
   captureLiveBuffer()
   enterFloatSurface()
   openFile(fullPath, options)
@@ -1768,7 +1796,7 @@ export function openDiffInFloatEditor(rel: string, staged: boolean, untracked = 
   // `openDiff` refuses (with its own toast) without a repository or a path;
   // floating the editor onto a tab that will never open is worse than not
   // floating at all.
-  if (state.repoRoot === undefined || rel === '') {
+  if (currentWorkspace() === undefined || state.repoRoot === undefined || rel === '') {
     openDiff(rel, staged, untracked)
     return
   }
