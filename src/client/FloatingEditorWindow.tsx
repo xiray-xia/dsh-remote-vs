@@ -27,6 +27,7 @@ import {
   dragFloatRect,
   isBallClick,
   maximizeFloatRect,
+  parseBallPosition,
   parseFloatFontSize,
   parseFloatRect,
   resizeFloatRect,
@@ -74,6 +75,23 @@ function readStoredFontSize(): number {
     return parseFloatFontSize(localStorage.getItem(FONT_KEY))
   } catch {
     return FLOAT_FONT_DEFAULT
+  }
+}
+
+/**
+ * The ball's remembered spot, or undefined the first time.
+ *
+ * Read at open, not at minimize: the spot belongs to the feature (per browser
+ * profile), and re-deriving it from the window corner on every minimize is what
+ * made the "remembered" claim false. A stale spot from a bigger screen is
+ * clamped by the parser, so it stays clickable.
+ */
+function readStoredBall(): FloatPoint | undefined {
+  const viewport = readViewport()
+  try {
+    return parseBallPosition(localStorage.getItem(BALL_KEY), viewport)
+  } catch {
+    return undefined
   }
 }
 
@@ -128,13 +146,14 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     return () => setFloatEditorAvailable(false)
   }, [])
 
-  // First open: resolve the persisted frame (or the default one).
+  // First open: resolve the persisted frame, font size and ball spot.
   useEffect(() => {
     if (!open || rect !== undefined) return
     const next = readViewport()
     setViewport(next)
     setRect(readStoredRect())
     setFontSize(readStoredFontSize())
+    setBall(readStoredBall())
   }, [open, rect])
 
   /**
