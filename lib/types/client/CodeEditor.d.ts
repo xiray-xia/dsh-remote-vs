@@ -120,6 +120,21 @@ export declare const CodeEditor: import("react").ForwardRefExoticComponent<{
      * where a file was when its tab is re-selected.
      */
     viewState?: CodeEditorViewState;
+    /**
+     * The text as it was last LOADED from / SAVED to the remote file — the dirty
+     * baseline.
+     *
+     * Separate from `initial` because a tab switch or a surface flip remounts the
+     * editor with the LIVE buffer as `initial` (that is how unsaved edits survive
+     * the remount), while the file on disk is still the older `savedText`. Using
+     * `initial` as the baseline would declare the unsaved text clean: the dirty
+     * dot and status would lie, the close guard would stop prompting and Save
+     * would disable — a silent way to lose the very edits the handoff preserved.
+     *
+     * Absent (diff panes, older callers): the mount's own document is the
+     * baseline, which is the historical behaviour.
+     */
+    savedText?: string;
     onSave: () => void;
     onDirty: (dirty: boolean) => void;
 } & import("react").RefAttributes<CodeEditorHandle>>;

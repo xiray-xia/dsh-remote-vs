@@ -1037,6 +1037,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         // above whatever conversation view is selected. Disabled only when the
         // host has no frame-wide overlay slot to host the window (see
         // `FloatingEditorWindow`'s availability handshake).
+        //
+        // Deliberately opens the FILE, not the working-tree diff the adjacent
+        // "Open" entry may choose for a changed file: this is the editor, and a
+        // diff is not an editing surface (SCM's own entry keeps the diff
+        // semantics because that list is about changes).
         entries.push({
           label: t('files.openInFloat'),
           onSelect: () => { store.openInFloatEditor(entry.path) },

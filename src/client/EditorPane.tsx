@@ -489,6 +489,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       key={editorKey(activeTab)}
                       ref={editorRef}
                       initial={activeTab.text}
+                      savedText={activeTab.baseline}
                       path={activeTab.fullPath}
                       tabId={activeTab.id}
                       readOnly={activeTab.truncated}

@@ -33,7 +33,7 @@ import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, pr
 import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
-import { canFloatEditor, effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
+import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
 import { captureLiveEditor } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
@@ -51,6 +51,16 @@ export interface EditorTab {
   error: string | undefined
   /** File payload. */
   text: string
+  /**
+   * The text as last LOADED from / SAVED to the remote file.
+   *
+   * `text` is the live-buffer handoff copy (see `captureLiveBuffer`) and may
+   * therefore hold unsaved edits; this is the disk-side reference the editor
+   * uses as its dirty baseline. Without the split, a remount with the handoff
+   * text would label unsaved edits "clean" (dirty dot off, Save disabled, close
+   * guard silent) — the exact silent-loss path the handoff exists to avoid.
+   */
+  baseline?: string
   dirty: boolean
   saving: boolean
   binary: boolean
@@ -1303,19 +1313,21 @@ function patchTab(id: string, next: Partial<EditorTab>): void {
 }
 
 /**
- * Copy the live editor buffer onto its tab before the editor surface changes.
+ * Copy the live editor buffer onto its tab before the editor is remounted.
  *
  * Why this exists: `CodeEditor` reads its `initial` text ONCE, on mount
  * (`src/client/CodeEditor.tsx`), and the tab's stored text is only ever written
- * by a load/reload — typing lives exclusively in CodeMirror. Moving the editor
- * between the centre/sidebar mount and the floating window therefore unmounts
- * and remounts it, and without this handoff the edits typed since the load
- * would silently disappear (and a later Ctrl+S would write the pre-edit text
- * back).
+ * by a load/reload/handoff — typing lives exclusively in CodeMirror. Every tab
+ * switch (a normal file click, another tab in the strip, a diff) and every
+ * editor-surface flip therefore unmounts and remounts the editor, and without
+ * this handoff the edits typed since the load would silently disappear (and a
+ * later Ctrl+S would write the pre-edit text back).
  *
  * The text is written into the tab, which is exactly the input the replacement
- * mount reads: no extra channel exists or is needed. The scroll + caret half of
- * the handoff lives in `live-editor.ts`.
+ * mount reads: no extra channel exists or is needed. The DISK-side baseline is
+ * deliberately left alone (`EditorTab.baseline`), so the remount still knows
+ * the text is unsaved. The scroll + caret half of the handoff lives in
+ * `live-editor.ts`.
  */
 function captureLiveBuffer(): void {
   const captured = captureLiveEditor()
@@ -1335,7 +1347,7 @@ function captureLiveBuffer(): void {
  * opens the file, just on the normal surface.
  */
 function enterFloatSurface(): void {
-  if (!canFloatEditor(state.floatAvailable)) {
+  if (!state.floatAvailable) {
     toast(t('float.unavailable'), true)
     return
   }
@@ -1385,6 +1397,7 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
 
 /** Open (or focus) a remote file in the editor tab strip. */
 export function openFile(fullPath: string, options: { line?: number } = {}): void {
+  captureLiveBuffer()
   const workspace = currentWorkspace()
   if (workspace === undefined || fullPath === '') return
   const id = `file:${workspace.alias}:${fullPath}`
@@ -1434,6 +1447,8 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
         binary: read.binary,
         truncated: read.truncated,
         text: read.binary ? '' : (read.text ?? ''),
+        // The disk side of the dirty comparison (see EditorTab.baseline).
+        ...(read.binary ? {} : { baseline: read.text ?? '' }),
       })
     } catch (error) {
       patchTab(id, { loading: false, error: error instanceof Error ? error.message : String(error) })
@@ -1492,6 +1507,7 @@ export function isEditorTakeoverActive(): boolean {
 
 /** Open (or focus) a working-tree diff of one repository path. */
 export function openDiff(rel: string, staged: boolean, untracked = false): void {
+  captureLiveBuffer()
   const workspace = currentWorkspace()
   if (workspace === undefined || state.repoRoot === undefined || rel === '') {
     toast(t('git.notARepo'), true)
@@ -1538,6 +1554,7 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
 
 /** Open (or focus) one file of one commit (`ref^` against `ref`). */
 export function openCommitFile(hash: string, rel: string): void {
+  captureLiveBuffer()
   const workspace = currentWorkspace()
   const root = state.repoRoot
   if (workspace === undefined || root === undefined || rel === '') return
@@ -1581,6 +1598,12 @@ export function openCommitFile(hash: string, rel: string): void {
 }
 
 export function activateTab(id: string): void {
+  // Switching away from a file tab remounts the editor, so the outgoing live
+  // buffer has to be captured first — otherwise every tab click silently
+  // discards edits typed since that tab was loaded (the tab's `text` is only
+  // the last load/handoff copy). Same protection for the pre-existing paths
+  // that switch tabs below (`openFile`/`openDiff`/`openCommitFile`).
+  captureLiveBuffer()
   patch({ activeTabId: id })
 }
 
@@ -1603,10 +1626,11 @@ export async function saveTab(id: string, content: string): Promise<void> {
   const tab = state.tabs.find(item => item.id === id)
   if (workspace === undefined || tab === undefined || tab.kind !== 'file' || tab.binary || tab.truncated) return
   // Never fall back to the tab's loaded text. `tab.text` is only ever written
-  // by a load/reload, never by typing, so substituting it here would push the
-  // PRE-EDIT bytes to the remote file and report success — destroying the
-  // user's edit with a confirmation. A caller without a live buffer must
-  // refuse to save instead (see EditorPane.saveActive).
+  // by a load/reload or by the surface handoff (`captureLiveBuffer`), never as
+  // a fallback for a caller without a live buffer, so substituting it here
+  // would push the PRE-EDIT (or the lost-buffer) bytes to the remote file and
+  // report success — destroying the user's edit with a confirmation. A caller
+  // without a live buffer must refuse to save instead (see EditorPane.saveActive).
   if (typeof content !== 'string') {
     toast(t('editor.needSource'), true)
     return
@@ -1615,7 +1639,10 @@ export async function saveTab(id: string, content: string): Promise<void> {
   patchTab(id, { saving: true, text })
   try {
     await api.fileOp.write(workspace.alias, tab.fullPath, text)
-    patchTab(id, { saving: false, dirty: false })
+    // The remote file now holds `text`: it becomes the disk-side dirty
+    // baseline as well, so the remount after a later handoff compares against
+    // the right bytes.
+    patchTab(id, { saving: false, dirty: false, baseline: text })
     toast(`${t('editor.saved')} · ${tab.rel}`, false)
     await afterWrite()
   } catch (error) {
@@ -1656,6 +1683,7 @@ export async function reloadTab(id: string): Promise<void> {
         binary: read.binary,
         truncated: read.truncated,
         dirty: false,
+        ...(read.binary ? {} : { baseline: read.text ?? '' }),
       })
       // Only now: the new text must already be in the tab when the editor remounts.
       patchTab(id, { reloadNonce: (tab.reloadNonce ?? 0) + 1 })
@@ -1704,8 +1732,11 @@ export function setFloatEditorAvailable(available: boolean): void {
   }
   // The host went away while the editor floated (plugin unmount / host swap):
   // keeping `floatOpen` would leave the main surfaces showing the "docked
-  // elsewhere" placeholder with no window to dock from.
+  // elsewhere" placeholder with no window to dock from. Try the buffer handoff
+  // first — it may still succeed here; if it does not, the main mount revives
+  // from the tab's last copy.
   if (!state.floatAvailable && !state.floatOpen) return
+  captureLiveBuffer()
   patch({ floatAvailable: false, floatOpen: false })
 }
 
@@ -1734,6 +1765,13 @@ export function openInFloatEditor(fullPath: string, options: { line?: number } =
  * its own, but the file editor that WAS on screen still does.
  */
 export function openDiffInFloatEditor(rel: string, staged: boolean, untracked = false): void {
+  // `openDiff` refuses (with its own toast) without a repository or a path;
+  // floating the editor onto a tab that will never open is worse than not
+  // floating at all.
+  if (state.repoRoot === undefined || rel === '') {
+    openDiff(rel, staged, untracked)
+    return
+  }
   captureLiveBuffer()
   enterFloatSurface()
   openDiff(rel, staged, untracked)

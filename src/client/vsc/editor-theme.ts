@@ -32,7 +32,8 @@ function chrome(p: Palette, dark: boolean): Extension {
       // The floating window changes ONLY its own editor's type size (Ctrl+wheel,
       // see FloatingEditorWindow); the variable is unset everywhere else, so the
       // normal editor keeps 13px. A plain literal here would freeze the size and
-      // make the zoom silently do nothing.
+      // make the zoom silently do nothing. The zoom is a property of the window,
+      // so a docked editor always renders at the default size.
       fontSize: 'var(--rvs-editor-font-size, 13px)',
       height: '100%',
     },

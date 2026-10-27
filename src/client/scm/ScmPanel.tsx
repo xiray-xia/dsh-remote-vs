@@ -252,6 +252,9 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     const abs = `${repoRoot?.replace(/\/+$/, '') ?? store.root}/${entry.path}`
     if (entry.status === 'U' || isPreviewOnlyFile(entry.path)) {
       store.openInFloatEditor(abs)
+      // Same explanation the row click gives: a conflicted path has no single
+      // diff, so the file itself is what opened.
+      if (entry.status === 'U') toast(t('scm.conflictOpen'), false)
       return
     }
     store.openDiffInFloatEditor(entry.path, entry.staged, entry.status === '?')

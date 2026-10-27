@@ -18,6 +18,16 @@ export interface EditorTab {
     error: string | undefined;
     /** File payload. */
     text: string;
+    /**
+     * The text as last LOADED from / SAVED to the remote file.
+     *
+     * `text` is the live-buffer handoff copy (see `captureLiveBuffer`) and may
+     * therefore hold unsaved edits; this is the disk-side reference the editor
+     * uses as its dirty baseline. Without the split, a remount with the handoff
+     * text would label unsaved edits "clean" (dirty dot off, Save disabled, close
+     * guard silent) — the exact silent-loss path the handoff exists to avoid.
+     */
+    baseline?: string;
     dirty: boolean;
     saving: boolean;
     binary: boolean;

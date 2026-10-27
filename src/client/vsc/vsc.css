@@ -2080,6 +2080,9 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
 .rvs-float-window {
   position: fixed;
   flex-direction: column;
+  /* The rect maths (clamp/persist) is in border-box terms; without this the
+     painted border would sit one pixel outside the computed rectangle. */
+  box-sizing: border-box;
   min-width: 360px;
   min-height: 220px;
   overflow: hidden;
@@ -2191,20 +2194,22 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   min-width: 0;
 }
 
-/* Eight grips; corners are larger so they can actually be hit. */
+/* Eight grips, placed INSIDE the border box: the window clips overflow (rounded
+   corners), so grips hanging outside would lose half their hit area. Corners
+   are larger so they can actually be hit. */
 .rvs-float-resize {
   position: absolute;
   z-index: 3;
 }
 
-.rvs-float-resize-n { top: -3px; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
-.rvs-float-resize-s { bottom: -3px; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
-.rvs-float-resize-e { top: 10px; bottom: 10px; right: -3px; width: 6px; cursor: ew-resize; }
-.rvs-float-resize-w { top: 10px; bottom: 10px; left: -3px; width: 6px; cursor: ew-resize; }
-.rvs-float-resize-ne { top: -4px; right: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
-.rvs-float-resize-nw { top: -4px; left: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
-.rvs-float-resize-se { bottom: -4px; right: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
-.rvs-float-resize-sw { bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
+.rvs-float-resize-n { top: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.rvs-float-resize-s { bottom: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.rvs-float-resize-e { top: 10px; bottom: 10px; right: 0; width: 6px; cursor: ew-resize; }
+.rvs-float-resize-w { top: 10px; bottom: 10px; left: 0; width: 6px; cursor: ew-resize; }
+.rvs-float-resize-ne { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.rvs-float-resize-nw { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.rvs-float-resize-se { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.rvs-float-resize-sw { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
 
 /* Shown by whichever surface the single editor left behind (centre tab or the
    sidebar's editor panel). */

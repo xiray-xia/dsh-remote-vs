@@ -211,7 +211,8 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
   menus lifts the editor into a window above the shell (same tabs and buffers; closing or docking puts it
   back on its original surface). Drag the title bar, resize from the eight edges/corners, maximize/restore,
   minimize to the title bar, zoom the text with `Ctrl+wheel`; unsaved text is explicitly handed over between
-  the main surface and the floating window so the switch cannot swallow it.
+  the main surface, the floating window and tab switches (the disk-side baseline is kept separately, so the
+  dirty mark can never be mistaken for saved).
 - **Find and jump**: `Ctrl+F` opens a widget pinned to the editor's top-right corner
   (`position: fixed` anchored to the editor's rect, so no ancestor scroller can carry it away);
   a selection is carried into it by `Ctrl+F`; a jump from the search results centres the line and

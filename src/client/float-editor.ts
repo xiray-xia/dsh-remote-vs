@@ -61,17 +61,6 @@ export function effectiveEditorSurface(base: 'center' | 'sidebar', floatOpen: bo
 }
 
 /**
- * Whether a floating editor can exist at all.
- *
- * The window is hosted by the host's frame-wide overlay slot; a host without
- * that slot keeps the menu entry disabled instead of hiding the editor behind a
- * surface that can never paint.
- */
-export function canFloatEditor(available: boolean): boolean {
-  return available
-}
-
-/**
  * The rect a fresh floating window opens at: about two thirds of the frame,
  * centred, with a hard size cap so a 4K monitor does not produce a 2600px
  * editor for a 40-column file.

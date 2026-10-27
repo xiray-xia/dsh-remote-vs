@@ -12,7 +12,7 @@
  * conversation view and the sidebar fallback render a placeholder while
  * `editorSurface === 'float'` (see `FloatingEditorPlaceholder`).
  */
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import { EditorPane } from './EditorPane.tsx'
 import { useBootstrap, useExplorer, setFloatEditorAvailable } from './store.tsx'
@@ -89,8 +89,13 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
   /** The normal (non-maximized) rect, restored by the restore button. */
   const restoreRectRef = useRef<FloatRect | undefined>(undefined)
   const bodyRef = useRef<HTMLDivElement>(null)
+  /** Latest font size, so the wheel handler never has to read stale state. */
+  const fontRef = useRef(fontSize)
+  fontRef.current = fontSize
   /** True once the frame has a resolved rect (body/zoom effects depend on it). */
   const rectReady = rect !== undefined
+  /** Previous `open`, so "opened again" can reset the minimized state. */
+  const wasOpenRef = useRef(open)
 
   /** The geometry a gesture points at right now (used for move AND finalize). */
   const resolveDrag = (drag: DragState, pointerX: number, pointerY: number): FloatRect => {
@@ -119,6 +124,16 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     setRect(readStoredRect())
     setFontSize(readStoredFontSize())
   }, [open, rect])
+
+  /**
+   * A window that was minimized when it was docked must not come back as a
+   * bare 34px title bar: "open in floating editor" would look broken. Every
+   * fresh open starts expanded; a minimize made WHILE open is kept.
+   */
+  useEffect(() => {
+    if (open && !wasOpenRef.current) setCollapsed(false)
+    wasOpenRef.current = open
+  }, [open])
 
   // The browser window changed size: a maximized frame follows it, a free one
   // is clamped back on screen (a rect from a larger monitor must stay reachable).
@@ -153,6 +168,14 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     const onMove = (event: PointerEvent): void => {
       const drag = dragRef.current
       if (drag === undefined) return
+      // A pointerup lost outside the window (another app, an iframe) must not
+      // leave the frame glued to the cursor: the same `buttons` guard the
+      // sidebar divider uses.
+      if ((event.buttons & 1) === 0) {
+        dragRef.current = undefined
+        setDragging(false)
+        return
+      }
       setRect(resolveDrag(drag, event.clientX, event.clientY))
     }
     const onUp = (event: PointerEvent): void => {
@@ -167,13 +190,23 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
       setRect(final)
       persistRect(final)
     }
+    /**
+     * A cancelled gesture must NOT be finalised from the event: Chromium
+     * reports `clientX/clientY = 0` on pointercancel, which would clamp the
+     * window to the top-left corner and PERSIST that. Keep the last painted
+     * rect instead.
+     */
+    const onCancel = (): void => {
+      dragRef.current = undefined
+      setDragging(false)
+    }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onUp)
+    window.addEventListener('pointercancel', onCancel)
     return () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('pointercancel', onCancel)
     }
   }, [dragging, maximized, persistRect])
 
@@ -191,17 +224,18 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     const onWheel = (event: WheelEvent): void => {
       if (!(event.ctrlKey || event.metaKey)) return
       event.preventDefault()
-      setFontSize((previous) => {
-        const next = stepFloatZoom(previous, event.deltaY)
-        if (next === previous) return previous
-        try {
-          localStorage.setItem(FONT_KEY, String(next))
-        } catch {
-          // Private mode: zoom still works for this session.
-        }
-        window.requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
-        return next
-      })
+      const next = stepFloatZoom(fontRef.current, event.deltaY)
+      if (next === fontRef.current) return
+      // Side effects stay OUT of a state updater: an updater may run twice
+      // (StrictMode/concurrent), which would double-dispatch the resize event.
+      fontRef.current = next
+      setFontSize(next)
+      try {
+        localStorage.setItem(FONT_KEY, String(next))
+      } catch {
+        // Private mode: zoom still works for this session.
+      }
+      window.requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
     }
     element.addEventListener('wheel', onWheel, { passive: false })
     return () => element.removeEventListener('wheel', onWheel)
@@ -210,6 +244,14 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
   const beginDrag = (event: ReactPointerEvent, drag: DragState): void => {
     if (event.button !== 0) return
     event.preventDefault()
+    // Pointer capture keeps the gesture alive over an `<iframe>` (an HTML
+    // preview tab in the window) and over any element that would otherwise
+    // swallow the pointer. The window-level listeners still do the maths.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Older engine: the window-level listeners still see the events.
+    }
     dragRef.current = drag
     setDragging(true)
   }
@@ -220,6 +262,9 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     setViewport(next)
     if (maximized) {
       setMaximized(false)
+      // A restore always restores an expanded window (a minimized+maximized
+      // frame would otherwise stay at 34px with maximized=false).
+      setCollapsed(false)
       setRect(clampFloatRect(restoreRectRef.current ?? defaultFloatRect(next), next))
       return
     }
@@ -241,10 +286,24 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
     width: rect.width,
     height: collapsed ? FLOAT_TITLEBAR_HEIGHT : rect.height,
     // The editor theme reads this (see `vsc/editor-theme.ts`); only this frame
-    // sets it, so the main editor keeps its 13px unless the user docks a zoomed
-    // window — which is the expected behaviour of a per-window zoom.
+    // sets it, so any other editor mount keeps the default 13px. Docking always
+    // renders at the default size (the variable is frame-scoped) — the zoom is
+    // a property of the floating window.
     ['--rvs-editor-font-size' as never]: `${fontSize}px`,
   }
+
+  /**
+   * The body subtree is memoised on `collapsed` alone so a drag/resize update
+   * (one per pointermove) does not re-render the whole EditorPane through the
+   * parent: the element identity stays stable while only the frame geometry
+   * moves. The pane is still hidden, never unmounted, while minimized — it owns
+   * the live CodeMirror buffer.
+   */
+  const body = useMemo(() => (
+    <div className="rvs-float-body" ref={bodyRef} style={{ display: collapsed ? 'none' : 'flex' }}>
+      <EditorPane visible={!collapsed} />
+    </div>
+  ), [collapsed])
 
   return (
     <div
@@ -300,15 +359,7 @@ export function FloatingEditorWindow(props: { ctx: Context }): ReactNode {
           <IconClose size={12} />
         </button>
       </div>
-      {/*
-        Hidden, not unmounted, while minimized: `EditorPane` owns the live
-        CodeMirror buffer, and unmounting it would drop every unsaved edit
-        (the tab's stored text is only the last load). Same rule the preview
-        toggle follows.
-      */}
-      <div className="rvs-float-body" ref={bodyRef} style={{ display: collapsed ? 'none' : 'flex' }}>
-        <EditorPane visible={!collapsed} />
-      </div>
+      {body}
       <DialogHost />
       {!collapsed && !maximized && RESIZE_HANDLES.map(handle => (
         <div

@@ -42,14 +42,6 @@ export declare const FLOAT_FONT_DEFAULT = 13;
 /** The effective editor surface: floating wins, otherwise the base mount. */
 export declare function effectiveEditorSurface(base: 'center' | 'sidebar', floatOpen: boolean): EditorSurface;
 /**
- * Whether a floating editor can exist at all.
- *
- * The window is hosted by the host's frame-wide overlay slot; a host without
- * that slot keeps the menu entry disabled instead of hiding the editor behind a
- * surface that can never paint.
- */
-export declare function canFloatEditor(available: boolean): boolean;
-/**
  * The rect a fresh floating window opens at: about two thirds of the frame,
  * centred, with a hard size cap so a 4K monitor does not produce a 2600px
  * editor for a 40-column file.
