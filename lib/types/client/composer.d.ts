@@ -118,9 +118,17 @@ export declare function foldClipboardOffset(draft: string, occurrences: readonly
  *
  * `foldClipboardOffset` alone is not enough: a command chip (`/goal `, present
  * while `phase === 'claimed'`) collapses to one detect character but never
- * appears in `occurrences` — the host only collects REFERENCE chips. The chip
- * covers exactly `claim.token`, a prefix of the draft, so its own characters
- * fold away and one placeholder takes their place.
+ * appears in `occurrences` — the host only collects REFERENCE chips.
+ *
+ * CORRECTION over the upstream 0.28.1 formula: the chip's clipboard text is
+ * `claim.token.trimEnd()` and the separator is a SEPARATE text node, so the
+ * detect projection is `1 (chip) + separator.length + rest`. Upstream folds the
+ * whole `claim.token` into that one placeholder, which lands one character
+ * short — a selection or `@file` appended while a slash command is claimed then
+ * splices INSIDE the command's last argument word (`/goal do it` became
+ * `/goal do i <payload>t`). Verified against the installed host:
+ * `CommandChipNode.getTextContent()` returns the token without its separator,
+ * and `insertCommand` inserts the separator as its own text node.
  */
 export declare function appendOffset(snapshot: InputSnapshot): number | undefined;
 /**
