@@ -26,6 +26,8 @@ import {
 } from './actions.ts'
 import type { ChangeEntry } from './status-map.ts'
 import { rowVerb } from './status-map.ts'
+import { ReadQueue } from './read-queue.ts'
+import { readScmExtras, repoCacheKey, writeScmExtras, type ScmExtrasSnapshot } from './panel-cache.ts'
 import { RepoPicker } from './RepoPicker.tsx'
 import {
   IconBranch,
@@ -54,6 +56,17 @@ import {
 } from '../vsc/kit.tsx'
 
 const MSG_KEY = 'dsh-remote-vs.commitMsg'
+
+/**
+ * One extras read per repository at a time.
+ *
+ * The panel can ask for the same three lists twice at once — the visibility
+ * effect when it comes back on screen and the ⟳ refresh — and two identical
+ * `for-each-ref` / `stash list` walks of a monorepo are pure waste. Same
+ * contracts as the git reads (`scm/read-queue.ts`): `join` for the automatic
+ * path, `fresh` for a manual refresh.
+ */
+const extrasReads = new ReadQueue()
 
 function messageOf(error: unknown): string {
   return error instanceof GitOpError || error instanceof Error ? error.message : String(error)
@@ -92,22 +105,43 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     }
   }, [message])
 
-  const loadExtras = useCallback(async (): Promise<void> => {
+  /**
+   * The repository the extras on screen belong to (`repoCacheKey`).
+   *
+   * A read that is still in flight when the workspace changes must not paint its
+   * answer over the new repository's lists: the panel is kept alive across
+   * switches, so the response needs to be checked against where the panel is
+   * NOW, not where it was when the request went out.
+   */
+  const extrasKeyRef = useRef('')
+
+  const loadExtras = useCallback(async (mode: 'join' | 'fresh' = 'join'): Promise<void> => {
     if (alias === '' || repoRoot === undefined) {
+      extrasKeyRef.current = ''
       setStashes([])
       setBranches([])
       setRemotes([])
       return
     }
+    const repoKey = repoCacheKey(alias, repoRoot)
+    extrasKeyRef.current = repoKey
     try {
-      const [stashList, branchList, remoteList] = await Promise.all([
-        loadStashes(alias, repoRoot),
-        loadBranches(alias, repoRoot, head?.branch ?? ''),
-        loadRemotes(alias, repoRoot),
-      ])
-      setStashes(stashList)
-      setBranches(branchList)
-      setRemotes(remoteList)
+      const snapshot = await extrasReads.run(repoKey, async (): Promise<ScmExtrasSnapshot> => {
+        const [stashList, branchList, remoteList] = await Promise.all([
+          loadStashes(alias, repoRoot),
+          loadBranches(alias, repoRoot, head?.branch ?? ''),
+          loadRemotes(alias, repoRoot),
+        ])
+        const answer: ScmExtrasSnapshot = { stashes: stashList, branches: branchList, remotes: remoteList, at: Date.now() }
+        // Remember the answer: coming back to this repository repaints these
+        // lists immediately instead of blanking three sections again.
+        writeScmExtras(repoKey, answer)
+        return answer
+      }, mode)
+      if (extrasKeyRef.current !== repoKey) return
+      setStashes(snapshot.stashes)
+      setBranches(snapshot.branches)
+      setRemotes(snapshot.remotes)
     } catch {
       // The panel degrades: status stays usable without the extras.
     }
@@ -130,12 +164,25 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     // change made while parked still reads as pending.
     if (props.visible === false || listedExtras.current === extrasKey) return
     listedExtras.current = extrasKey
-    void loadExtras()
-  }, [extrasKey, loadExtras, props.visible])
+    const repoKey = repoRoot === undefined ? '' : repoCacheKey(alias, repoRoot)
+    extrasKeyRef.current = repoKey
+    // Repaint the cached lists of this repository BEFORE the read: a switch back
+    // must not blank the stash / branch / remote sections while their own three
+    // git commands run (see `scm/panel-cache.ts`).
+    const cached = repoKey === '' ? undefined : readScmExtras(repoKey)
+    if (cached !== undefined) {
+      setStashes(cached.stashes)
+      setBranches(cached.branches)
+      setRemotes(cached.remotes)
+    }
+    void loadExtras('join')
+  }, [extrasKey, loadExtras, props.visible, alias, repoRoot])
 
   const refreshAll = useCallback(async (): Promise<void> => {
+    // The ⟳ / post-verb refresh must describe the state as of NOW: `afterWrite`
+    // runs a `fresh` status read and the extras are forced to re-read as well.
     await store.afterWrite()
-    await loadExtras()
+    await loadExtras('fresh')
   }, [store, loadExtras])
 
   /**
@@ -459,6 +506,17 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
       <div className="rvs-header">
         <span className="rvs-title">{t('scm.title')}</span>
         {store.gitBusy && <MiniSpinner />}
+        {/*
+          A cached slice is shown so the switch is instant, and the background
+          read can take minutes on a monorepo: saying so is what stops an old
+          change list from being read as the current one. The actions stay
+          enabled — they target this binding's repository, cache or not.
+        */}
+        {store.gitCached && (
+          <span className="rvs-pill rvs-pill-cached" title={t('scm.cachedHint')}>
+            {store.gitBusy ? t('scm.cachedRefreshing') : t('scm.cached')}
+          </span>
+        )}
         <IconButton title={t('scm.refresh')} onClick={() => { void refreshAll() }} disabled={store.gitBusy}>
           <IconRefresh size={14} />
         </IconButton>
@@ -502,6 +560,12 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
             void store.setRepoSubdir(subdir).then(() => toast(t('scm.repoDirSwitched')))
           }}
         />
+      )}
+      {/* A failed background read keeps the last good / cached list on screen
+          (see `paintGit`); the reason has to be visible, or the panel would look
+          current while nothing is being refreshed. */}
+      {repoRoot !== undefined && store.gitError !== undefined && (
+        <div className="rvs-banner error">{t('scm.refreshFailed')} {store.gitError}</div>
       )}
       <div className="rvs-scroll">
         {repoRoot === undefined && (
@@ -647,7 +711,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                 <IconButton title={t('scm.stashSave')} disabled={busy !== undefined} onClick={() => { void saveStash() }}>
                   <IconPlus size={13} />
                 </IconButton>
-                <IconButton title={t('scm.refresh')} disabled={busy !== undefined} onClick={() => { void loadExtras() }}>
+                <IconButton title={t('scm.refresh')} disabled={busy !== undefined} onClick={() => { void loadExtras('fresh') }}>
                   <IconRefresh size={13} />
                 </IconButton>
               </>,

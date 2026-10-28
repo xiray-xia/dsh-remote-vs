@@ -7,6 +7,11 @@
  * repository shows the newest GIT_LOG_MAX commits and is filtered client-side.
  * The docstring here used to promise scroll-triggered paging that does not
  * exist, which is worse than no comment: a reader trusts it.
+ *
+ * Each repository's last answer is kept in memory (`./panel-cache.ts`), so a
+ * switch back to a workspace repaints its commit list at once and the log is
+ * re-read behind it — the tab used to blank on every switch, and worse, kept the
+ * PREVIOUS repository's rows until the new log arrived.
  */
 import { type ReactNode } from 'react';
 export declare function HistoryPanel(): ReactNode;

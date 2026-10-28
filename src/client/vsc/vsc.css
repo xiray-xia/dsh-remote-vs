@@ -684,6 +684,16 @@ body[data-ds-dark-theme] .rvs-root {
   color: var(--rvs-fg);
 }
 
+/* "cached · refreshing" badge: quieter than a pill that carries information the
+   user asked for (a branch), because it is a qualifier on the list beside it. */
+.rvs-pill-cached {
+  flex: none;
+  font-weight: 500;
+  color: var(--rvs-fg3);
+  border: 1px solid var(--rvs-border2);
+  background: transparent;
+}
+
 .rvs-subpanel {
   margin: 6px 8px;
   padding: 8px;

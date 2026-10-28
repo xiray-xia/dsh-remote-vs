@@ -7,6 +7,11 @@
  * repository shows the newest GIT_LOG_MAX commits and is filtered client-side.
  * The docstring here used to promise scroll-triggered paging that does not
  * exist, which is worse than no comment: a reader trusts it.
+ *
+ * Each repository's last answer is kept in memory (`./panel-cache.ts`), so a
+ * switch back to a workspace repaints its commit list at once and the log is
+ * re-read behind it — the tab used to blank on every switch, and worse, kept the
+ * PREVIOUS repository's rows until the new log arrived.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
@@ -14,6 +19,8 @@ import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
 import { useExplorer } from '../store.tsx'
 import { checkoutCommit, loadCommitFiles } from './actions.ts'
+import { ReadQueue } from './read-queue.ts'
+import { readHistorySnapshot, repoCacheKey, writeHistorySnapshot } from './panel-cache.ts'
 import {
   IconButton,
   IconChevronDown,
@@ -31,6 +38,16 @@ const ROW_H = 22
 const LANE_W = 13
 const PAD_X = 9
 const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79c0ff', '#7ee787', '#ffa657']
+
+/**
+ * One log read per repository at a time.
+ *
+ * Same contracts as the git status queue (`./read-queue.ts`): the automatic
+ * read on entering the tab `join`s one in flight, and the ⟳ button asks for a
+ * `fresh` one. Without it, flipping tabs while a log read runs could start a
+ * second `git log` of the same repository and let the slower answer repaint.
+ */
+const logReads = new ReadQueue()
 
 /**
  * Ref badge decoration for one `%D` entry. Extracted from a pair of nested
@@ -138,23 +155,33 @@ export function HistoryPanel(): ReactNode {
    */
   const loadSeq = useRef(0)
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (mode: 'join' | 'fresh' = 'join'): Promise<void> => {
     if (alias === '' || repoRoot === undefined) {
       loadSeq.current += 1
       setCommits([])
       setLoading(false)
       return
     }
+    const repoKey = repoCacheKey(alias, repoRoot)
     const ticket = ++loadSeq.current
+    // NEVER leave the previous repository's commits on screen while this
+    // repository's log is being read: the rows carry checkout buttons, which
+    // would then act on the new repository with the old one's hashes. The cache
+    // of THIS repository, when it was read before, is what replaces them at once
+    // (see `panel-cache.ts`) — a switch back is instant instead of a blank tab.
+    const cached = readHistorySnapshot(repoKey)
+    setCommits(cached?.commits ?? [])
     setLoading(true)
     setError(undefined)
     try {
-      const list = await api.git.log(alias, repoRoot, GIT_LOG_MAX)
+      const list = await logReads.run(repoKey, () => api.git.log(alias, repoRoot, GIT_LOG_MAX), mode)
+      writeHistorySnapshot(repoKey, { commits: list, at: Date.now() })
       if (loadSeq.current !== ticket) return
       setCommits(list)
     } catch (caught) {
       if (loadSeq.current !== ticket) return
-      setCommits([])
+      // A failed re-read keeps what is on screen (it was a real read) and says
+      // why: blanking the tab would hide that anything went wrong.
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       if (loadSeq.current === ticket) setLoading(false)
@@ -199,7 +226,8 @@ export function HistoryPanel(): ReactNode {
       <div className="rvs-header">
         <span className="rvs-title">{t('tab.history')}</span>
         {head !== '' && <span className="rvs-pill">⑂ {store.head?.detached === true ? t('scm.detached') : head}</span>}
-        <IconButton title={t('scm.refresh')} onClick={() => { void load() }} disabled={loading}>
+        {loading && <MiniSpinner />}
+        <IconButton title={t('scm.refresh')} onClick={() => { void load('fresh') }} disabled={loading}>
           <IconRefresh size={14} />
         </IconButton>
       </div>

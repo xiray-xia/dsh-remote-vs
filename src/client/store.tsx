@@ -32,6 +32,17 @@ import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, o
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeStatusDir, probeStatusPaths, resolveRepoRoot, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
 import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
+import { ReadQueue } from './scm/read-queue.ts'
+import {
+  gitCacheKey,
+  parseGitCacheKey,
+  patchCachedGitStatus,
+  patchCachedUntrackedDirs,
+  readGitSnapshot,
+  retainGitSnapshots,
+  writeGitSnapshot,
+  type GitSnapshot,
+} from './scm/git-cache.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
 import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, isLiveEditorFor, markLiveEditorSaved } from './live-editor.ts'
@@ -132,6 +143,16 @@ interface State {
   repoMissing: boolean
   gitBusy: boolean
   gitError: string | undefined
+  /**
+   * True while the git slice on screen is a CACHED read of this workspace whose
+   * background refresh has not landed yet (see `scm/git-cache.ts`).
+   *
+   * It is what lets the panel say so: a monorepo re-read can take minutes, and
+   * a change list that old must not be mistaken for a fresh one. Cleared the
+   * moment a real read paints, or when the workspace was read moments ago and
+   * the refresh was skipped as redundant.
+   */
+  gitCached: boolean
   /** Effective per-git-command budget (ms), from the Host's config. */
   gitDeadlineMs: number
   tabs: EditorTab[]
@@ -338,6 +359,7 @@ const state: State = {
   repoMissing: false,
   gitBusy: false,
   gitError: undefined,
+  gitCached: false,
   gitDeadlineMs: DEFAULT_GIT_TIMEOUT_MS,
   tabs: [],
   activeTabId: undefined,
@@ -382,6 +404,8 @@ export interface ExplorerValue {
   head: HeadInfo | undefined
   gitBusy: boolean
   gitError: string | undefined
+  /** The painted git slice is a cached one; a background refresh is running. */
+  gitCached: boolean
   /** Effective per-git-command budget (ms), for the loading hint. */
   gitDeadlineMs: number
   tabs: EditorTab[]
@@ -428,7 +452,16 @@ export interface ExplorerValue {
   /** Repositories found under the workspace root, as workspace-relative dirs. */
   discoverRepos: () => Promise<string[]>
   refreshAll: () => void
-  refreshGit: () => Promise<void>
+  /**
+   * Re-read git for the binding on screen.
+   *
+   * `join` shares a read that is already in flight — the right contract for an
+   * automatic refresh, since a second walk of the same repository answers
+   * exactly the same question. `fresh` (the default) waits for a running read
+   * and then reads again: the answer must include whatever the caller just
+   * wrote.
+   */
+  refreshGit: (mode?: 'join' | 'fresh') => Promise<void>
   afterWrite: () => Promise<void>
   /**
    * Stage / unstage paths: the row moves at once, and ONE path-limited status
@@ -545,6 +578,7 @@ function build(): ExplorerValue {
     head: state.head,
     gitBusy: state.gitBusy,
     gitError: state.gitError,
+    gitCached: state.gitCached,
     gitDeadlineMs: state.gitDeadlineMs,
     tabs: state.tabs,
     activeTab: state.tabs.find(item => item.id === state.activeTabId),
@@ -643,13 +677,101 @@ function activeBinding(): { workspace: RemoteWorkspaceBinding | undefined; key: 
 }
 
 /**
- * Monotonic ticket for git refreshes. Two refreshes can overlap whenever the
- * binding changes or a write lands mid-read, and both panels stay mounted, so
- * an older response arriving last would otherwise write ITS repository into
- * the state the newer binding is using — after which every staged/discard
- * button would act on the wrong repo (scm/actions.ts takes alias + repoRoot).
+ * Git reads, one walk at a time per (workspace, repository directory).
+ *
+ * Two reads can be wanted at once — the background refresh of the binding on
+ * screen and a ⟳ / post-write read — and on a large repository a second walk of
+ * the same tree is minutes of duplicate work whose answers disagree about which
+ * one is current. The queue gives callers two contracts instead of that race
+ * (`scm/read-queue.ts`): `join` shares a read already in flight (automatic
+ * refreshes, workspace switches), `fresh` waits for it and reads again (⟳, and
+ * every write, whose answer must include the write).
  */
-let gitGeneration = 0
+const gitReads = new ReadQueue(refreshGitBusy)
+
+/**
+ * Which read may repaint the visible slice, per binding.
+ *
+ * The repo picker can ask for a DIFFERENT directory of the same workspace while
+ * a read of another one is still walking; the older answer describes the
+ * directory the user just left and must not land on top of the newer request.
+ * Cache writes are deliberately not gated: they belong to the directory the read
+ * was about, and are what makes the next visit instant.
+ */
+const latestGitRead = new Map<string, number>()
+let gitReadTicket = 0
+
+/** True when `bindingId`'s read `ticket` may paint the on-screen slice. */
+function gitReadIsCurrent(bindingId: string, ticket: number): boolean {
+  return latestGitRead.get(bindingId) === ticket && activeBinding().key === bindingId
+}
+
+/** Recompute the busy flag from the queue (called on every start/settle). */
+function refreshGitBusy(): void {
+  const bindingId = activeBinding().key
+  const busy = gitReads.inflightKeys().some(key => parseGitCacheKey(key)?.bindingId === bindingId)
+  if (state.gitBusy !== busy) patch({ gitBusy: busy })
+}
+
+/**
+ * A cached read this young is what a refresh would answer anyway.
+ *
+ * Flipping between two workspaces must not start a monorepo-wide walk on every
+ * hop: within this window the cached slice is treated as current. Every explicit
+ * refresh (⟳, a write) and every switch to an OLDER snapshot still re-reads.
+ */
+const CACHED_FRESH_MS = 5_000
+
+/**
+ * The state fields one cached read stands for — the switch's synchronous paint.
+ *
+ * A MISS clears the slice exactly like the old code did: the workspace has never
+ * been read, so there is nothing honest to show and the read about to start owns
+ * the "Loading…" state. `repoSubdir` keeps the persisted choice so that read
+ * runs in the directory the user last used.
+ *
+ * `refreshing` says whether a background read was actually started; when it is
+ * false the slice is merely a few seconds old and is presented as current — a
+ * "cached" badge with nothing refreshing would be noise, not information.
+ */
+function cachedGitSlice(bindingId: string, refreshing: boolean): Partial<State> {
+  const subdir = readRepoSubdir(bindingId)
+  const snapshot = readGitSnapshot(gitCacheKey(bindingId, subdir))
+  if (snapshot === undefined) {
+    return {
+      status: undefined,
+      head: undefined,
+      repoRoot: undefined,
+      repoSubdir: subdir,
+      repoMissing: false,
+      untrackedDirs: new Map(),
+      gitError: undefined,
+      gitCached: false,
+    }
+  }
+  return {
+    status: snapshot.status,
+    head: snapshot.head,
+    repoRoot: snapshot.repoRoot,
+    repoSubdir: snapshot.repoSubdir,
+    repoMissing: snapshot.repoMissing,
+    untrackedDirs: snapshot.untrackedDirs,
+    gitError: undefined,
+    gitCached: refreshing,
+  }
+}
+
+/** Paint the cached slice of `bindingId` (a selection moved there). */
+function adoptCachedGit(bindingId: string): void {
+  patch(cachedGitSlice(bindingId, true))
+}
+
+/** Mirror the expansion set into the cached snapshot of the binding on screen. */
+function mirrorUntrackedDirs(): void {
+  const { workspace, key } = activeBinding()
+  if (workspace === undefined) return
+  patchCachedUntrackedDirs(gitCacheKey(key, state.repoSubdir), state.repoRoot, state.untrackedDirs)
+}
 
 // -------------------------------------------------------------- lifecycle
 
@@ -689,7 +811,15 @@ export function refreshAll(): void {
         ready: true,
         error: undefined,
       })
-      void refreshGit()
+      // A snapshot of a workspace the table no longer holds must never be
+      // handed to another one: its change list names paths of a foreign tree.
+      retainGitSnapshots(new Set(payload.workspaces.map(item => item.id)))
+      // The selection can resolve ELSEWHERE after the table changed (a deleted
+      // workspace falls back to the first entry). That is a switch like any
+      // other, and its cached slice is what keeps the panel from "Loading…".
+      const resolved = activeBinding().key
+      if (resolved !== key) adoptCachedGit(resolved)
+      void refreshGit('join')
     },
     (error: unknown) => {
       patch({ ready: true, error: error instanceof RemoteApiError ? error.message : String(error) })
@@ -798,22 +928,27 @@ function applyWorkspaceSelection(id: string, byUser: boolean): void {
   // repository-relative too.
   stageOverrides = new Map()
   stageOverrideTarget = ''
+  // Hydrate in the SAME frame as the selection: a workspace that was read once
+  // repaints its whole change list here instead of showing "Loading…" for the
+  // minutes a repository-wide walk takes. A miss clears the slice and the read
+  // started below owns the loading state (see `scm/git-cache.ts`).
+  const snapshot = readGitSnapshot(gitCacheKey(id, readRepoSubdir(id)))
+  const stale = snapshot === undefined || Date.now() - snapshot.at >= CACHED_FRESH_MS
   patch({
     workspaceId: id,
     tabs: [],
     activeTabId: undefined,
-    status: undefined,
-    head: undefined,
-    repoRoot: undefined,
-    repoSubdir: readRepoSubdir(id),
-    untrackedDirs: new Map(),
+    ...cachedGitSlice(id, stale),
   })
   try {
     localStorage.setItem(WS_KEY, id)
   } catch {
     // Private mode: ignore.
   }
-  void refreshGit()
+  // A join can be a read that is ALREADY running (flip away and back): the busy
+  // flag must reflect that before anything is published again.
+  refreshGitBusy()
+  if (stale) void refreshGit('join')
 }
 
 let searchSeq = 0
@@ -1066,8 +1201,12 @@ export async function setRepoSubdir(subdir: string): Promise<void> {
   const { workspace, key } = activeBinding()
   const clean = normalizeRepoSubdir(subdir)
   if (workspace !== undefined) writeRepoSubdir(key, clean)
-  patch({ repoSubdir: clean, repoRoot: undefined, gitError: undefined })
-  await refreshGit()
+  // Pointing git at another DIRECTORY of the workspace is a switch like any
+  // other: a directory that was read before paints its cached slice at once, and
+  // the read below replaces it. A directory never read clears the slice, exactly
+  // like before (`cachedGitSlice` reads the persisted choice, just written).
+  adoptCachedGit(key)
+  await refreshGit('fresh')
 }
 
 /** Repositories found under the workspace root (workspace-relative, root first). */
@@ -1080,39 +1219,72 @@ export async function discoverRepos(): Promise<string[]> {
     .filter((dir): dir is string => dir !== undefined)
 }
 
-/** Re-read git status for the current binding. */
-export async function refreshGit(): Promise<void> {
+/**
+ * Re-read git for the binding on screen.
+ *
+ * Reads go through `scm/read-queue.ts`, keyed by (binding, repository directory):
+ * `join` shares a read that is already in flight — an automatic refresh has no
+ * reason to duplicate a walk — while `fresh` waits for it and then reads again,
+ * because the caller just wrote something and the answer must include it. Either
+ * mode never runs two walks of the same repository at once, which is what lets a
+ * background refresh and the ⟳ button coexist instead of racing.
+ *
+ * The answer is cached under the key the read STARTED with (even when the user
+ * has already switched away: the walk is paid for either way, and the cache is
+ * what makes the next visit instant) and repaints only while it is still that
+ * binding's latest read.
+ *
+ * @param mode - `fresh` (default) never reuses a read that started before the
+ *   call; `join` shares a running one (workspace switches, bootstrap).
+ */
+export async function refreshGit(mode: 'join' | 'fresh' = 'fresh'): Promise<void> {
   const { workspace, key } = activeBinding()
   if (workspace === undefined) return
-  const gen = ++gitGeneration
-  // Discard a response that is no longer about the binding on screen (the
-  // user switched) or is superseded by a newer refresh. Without this the
-  // slower request wins the last write and the panel shows one workspace's
-  // repository while the selector and every action use another's.
-  const stale = (): boolean => gen !== gitGeneration || activeBinding().key !== key
-  // A local stage/unstage that happens while this read is in flight cannot be
-  // in its answer: remember where the local timeline stood when it started.
+  const subdir = state.repoSubdir
+  const cacheKey = gitCacheKey(key, subdir)
+  await gitReads.run(cacheKey, () => readGit(key, subdir, cacheKey), mode)
+}
+
+/**
+ * One real read: probe the repository root, then status + branch header together,
+ * then cache the answer and paint it when it still owns the screen.
+ */
+async function readGit(bindingId: string, subdir: string, cacheKey: string): Promise<void> {
+  // The binding can disappear from the table while this read waits in the queue.
+  const workspace = state.workspaces.find(item => item.id === bindingId)
+  if (workspace === undefined) return
+  const ticket = ++gitReadTicket
+  latestGitRead.set(bindingId, ticket)
+  // A local stage/unstage that happens while this read is in flight cannot be in
+  // its answer: remember where the local timeline stood when it started.
   const stageAt = stageSeq
-  patch({ gitBusy: true })
   try {
-    const workdir = repoWorkdir(workspace.remotePath, state.repoSubdir)
+    const workdir = repoWorkdir(workspace.remotePath, subdir)
     const root = await resolveRepoRoot(workspace.alias, workdir)
-    if (stale()) return
     if (root === undefined) {
-      patch({ repoRoot: undefined, repoMissing: true, status: EMPTY_STATUS, head: undefined, gitBusy: false, gitError: undefined })
+      const snapshot: GitSnapshot = {
+        repoRoot: undefined,
+        repoSubdir: subdir,
+        status: EMPTY_STATUS,
+        head: undefined,
+        repoMissing: true,
+        untrackedDirs: new Map(),
+        at: Date.now(),
+      }
+      writeGitSnapshot(cacheKey, snapshot)
+      paintGit(bindingId, ticket, snapshot)
       return
     }
     const [detail, head] = await Promise.all([
       withDeadline(loadStatusDetail(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
       withDeadline(loadHead(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
     ])
-    if (stale()) return
     // A directory INSIDE a repository settles on that repository's root, so the
     // stored choice is what git actually uses (and what the picker shows).
-    const settled = repoSubdirOf(workspace.remotePath, root) ?? state.repoSubdir
-    if (settled !== state.repoSubdir) writeRepoSubdir(key, settled)
-    // Keep the local stage results this read could not have seen, and retire
-    // the ones it did see (they are in `detail` now, for better or worse).
+    const settled = repoSubdirOf(workspace.remotePath, root) ?? subdir
+    if (settled !== readRepoSubdir(bindingId)) writeRepoSubdir(bindingId, settled)
+    // Keep the local stage results this read could not have seen, and retire the
+    // ones it did see (they are in `detail` now, for better or worse).
     const target = stageTargetKey({ alias: workspace.alias, root })
     const status = stageOverrideTarget === target ? applyStageOverrides(detail, stageOverrides, stageAt) : detail
     if (stageOverrideTarget === target) {
@@ -1120,34 +1292,61 @@ export async function refreshGit(): Promise<void> {
         if (override.at <= stageAt) stageOverrides.delete(path)
       }
     }
-    // An expanded untracked directory survives this refresh only while git still
-    // reports the same directory row (see `pruneDirExpansions`).
-    patch({
+    // An expanded untracked directory survives a read only while git still
+    // reports the same directory row (see `pruneDirExpansions`). The live set
+    // belongs to the binding on screen; a read of a workspace in the background
+    // must prune ITS OWN cached set instead of borrowing another binding's.
+    const onScreen = bindingId === activeBinding().key
+    const priorDirs: DirExpansions = onScreen
+      ? state.untrackedDirs
+      : (readGitSnapshot(cacheKey)?.untrackedDirs ?? new Map())
+    const dirs = pruneDirExpansions(priorDirs, status)
+    const snapshot: GitSnapshot = {
       repoRoot: root,
       repoSubdir: settled,
-      repoMissing: false,
       status,
       head,
-      gitBusy: false,
-      gitError: undefined,
-      untrackedDirs: pruneDirExpansions(state.untrackedDirs, status),
-    })
+      repoMissing: false,
+      untrackedDirs: dirs,
+      at: Date.now(),
+    }
+    writeGitSnapshot(cacheKey, snapshot)
+    // The settled directory is a DIFFERENT cache key, and a switch back looks the
+    // snapshot up under the PERSISTED choice — so both keys have to answer.
+    if (settled !== subdir) writeGitSnapshot(gitCacheKey(bindingId, settled), snapshot)
+    paintGit(bindingId, ticket, snapshot)
   } catch (error) {
-    if (stale()) return
-    // Clear the repo identity too. Leaving a previous binding's `repoRoot` in
-    // place kept its branch, change list and sync buttons painted while the
-    // selector said something else — and ScmPanel keys "Loading…" off
-    // repoRoot === undefined, so NOT clearing it showed a stale repo while
-    // clearing it without an error message showed a spinner forever. The
-    // message is now rendered by the panel (see ScmPanel's empty state).
+    if (!gitReadIsCurrent(bindingId, ticket)) return
+    // A failed read discards nothing that was already known: the panel keeps the
+    // last good (or cached) slice and prints the message above it, so a transient
+    // host error cannot blank a change list the user is working in. The slice is
+    // marked cached because it now predates the failure.
     patch({
-      repoRoot: undefined,
-      head: undefined,
-      status: EMPTY_STATUS,
-      gitBusy: false,
       gitError: error instanceof Error ? error.message : String(error),
+      gitCached: state.repoRoot !== undefined,
     })
   }
+}
+
+/**
+ * Adopt one read's answer when it still owns the screen.
+ *
+ * The ticket is what keeps two workspaces apart: a slow read of the workspace
+ * the user just left still refreshes THAT workspace's cache — so switching back
+ * is instant — but it never paints over the repository now on screen.
+ */
+function paintGit(bindingId: string, ticket: number, snapshot: GitSnapshot): void {
+  if (!gitReadIsCurrent(bindingId, ticket)) return
+  patch({
+    repoRoot: snapshot.repoRoot,
+    repoSubdir: snapshot.repoSubdir,
+    repoMissing: snapshot.repoMissing,
+    status: snapshot.status,
+    head: snapshot.head,
+    untrackedDirs: snapshot.untrackedDirs,
+    gitError: undefined,
+    gitCached: false,
+  })
 }
 
 /** Refresh everything a working-tree change can invalidate. */
@@ -1198,7 +1397,17 @@ export function applyLocalStage(paths: readonly string[], staged: boolean): void
   // directory row that stopped being untracked takes its whole expansion with
   // it (see `pruneDirExpansions`).
   const dirs = staged ? dropExpandedRows(state.untrackedDirs, paths) : state.untrackedDirs
-  patch({ status: next, untrackedDirs: pruneDirExpansions(dirs, next) })
+  const nextDirs = pruneDirExpansions(dirs, next)
+  patch({ status: next, untrackedDirs: nextDirs })
+  // Mirror the local move into the per-workspace cache: switching away and back
+  // must not resurrect the list as it stood before the click. The paths are
+  // repository-relative, so the guard is the snapshot's own repoRoot.
+  const { workspace, key: bindingId } = activeBinding()
+  if (workspace !== undefined) {
+    const cacheKey = gitCacheKey(bindingId, state.repoSubdir)
+    patchCachedGitStatus(cacheKey, state.repoRoot, next)
+    patchCachedUntrackedDirs(cacheKey, state.repoRoot, nextDirs)
+  }
 }
 
 /**
@@ -1240,6 +1449,7 @@ export async function toggleUntrackedDir(dirPath: string): Promise<void> {
   if (dirPath === '' || !dirPath.endsWith('/')) return
   if (state.untrackedDirs.has(dirPath)) {
     patch({ untrackedDirs: collapseDir(state.untrackedDirs, dirPath) })
+    mirrorUntrackedDirs()
     return
   }
   // A double click must not buy two probes: the second click only arrives while
@@ -1253,6 +1463,7 @@ export async function toggleUntrackedDir(dirPath: string): Promise<void> {
     // Read the state AFTER the round trip: another directory may have been
     // expanded (or this one collapsed) while the probe was in flight.
     patch({ untrackedDirs: expandDir(state.untrackedDirs, dirPath, stdout) })
+    mirrorUntrackedDirs()
   } finally {
     dirProbes.delete(dirPath)
   }

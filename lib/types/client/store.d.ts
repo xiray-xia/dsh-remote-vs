@@ -149,6 +149,8 @@ export interface ExplorerValue {
     head: HeadInfo | undefined;
     gitBusy: boolean;
     gitError: string | undefined;
+    /** The painted git slice is a cached one; a background refresh is running. */
+    gitCached: boolean;
     /** Effective per-git-command budget (ms), for the loading hint. */
     gitDeadlineMs: number;
     tabs: EditorTab[];
@@ -199,7 +201,16 @@ export interface ExplorerValue {
     /** Repositories found under the workspace root, as workspace-relative dirs. */
     discoverRepos: () => Promise<string[]>;
     refreshAll: () => void;
-    refreshGit: () => Promise<void>;
+    /**
+     * Re-read git for the binding on screen.
+     *
+     * `join` shares a read that is already in flight — the right contract for an
+     * automatic refresh, since a second walk of the same repository answers
+     * exactly the same question. `fresh` (the default) waits for a running read
+     * and then reads again: the answer must include whatever the caller just
+     * wrote.
+     */
+    refreshGit: (mode?: 'join' | 'fresh') => Promise<void>;
     afterWrite: () => Promise<void>;
     /**
      * Stage / unstage paths: the row moves at once, and ONE path-limited status
@@ -394,8 +405,25 @@ export declare function selectedWorkspaceId(): string;
 export declare function setRepoSubdir(subdir: string): Promise<void>;
 /** Repositories found under the workspace root (workspace-relative, root first). */
 export declare function discoverRepos(): Promise<string[]>;
-/** Re-read git status for the current binding. */
-export declare function refreshGit(): Promise<void>;
+/**
+ * Re-read git for the binding on screen.
+ *
+ * Reads go through `scm/read-queue.ts`, keyed by (binding, repository directory):
+ * `join` shares a read that is already in flight — an automatic refresh has no
+ * reason to duplicate a walk — while `fresh` waits for it and then reads again,
+ * because the caller just wrote something and the answer must include it. Either
+ * mode never runs two walks of the same repository at once, which is what lets a
+ * background refresh and the ⟳ button coexist instead of racing.
+ *
+ * The answer is cached under the key the read STARTED with (even when the user
+ * has already switched away: the walk is paid for either way, and the cache is
+ * what makes the next visit instant) and repaints only while it is still that
+ * binding's latest read.
+ *
+ * @param mode - `fresh` (default) never reuses a read that started before the
+ *   call; `join` shares a running one (workspace switches, bootstrap).
+ */
+export declare function refreshGit(mode?: 'join' | 'fresh'): Promise<void>;
 /** Refresh everything a working-tree change can invalidate. */
 export declare function afterWrite(): Promise<void>;
 /** The repository the SCM panel is pointed at, or undefined when none. */

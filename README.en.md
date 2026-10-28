@@ -205,6 +205,13 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
   hidden it does **no remote work** (directory listings, the SCM stash/branch/remote queries and editor
   image reads all wait for the next foreground pass), and visibility is MEASURED on the plugin root
   (IntersectionObserver) instead of being taken from a host prop.
+- **No blank wait when switching workspaces**: the last git state read for each (workspace, repository
+  directory) is kept in memory, so switching back paints the change list, branch and tree marks **in the
+  same frame** and re-reads behind it. The panel says "cached · refreshing" meanwhile and the buttons still
+  act on that workspace. The manual ⟳ and the background read never overlap (one git read per repository at
+  a time; ⟳ and post-write reads queue after the running one and get a post-click answer; a read of a
+  workspace you left behind only fills its own cache and never repaints). A failed background read keeps the
+  list and shows why. The first visit to a workspace still waits — cache cannot invent a read.
 - **Editor**: tabs plus an info bar (path, language, **build stamp**, `tok N` coloured-token count,
   saved state, reload/save). Those three marks exist for troubleshooting: the stamp answers "is the
   browser running the bundle I just built?", `tok 0` answers "did a grammar match this extension?".
