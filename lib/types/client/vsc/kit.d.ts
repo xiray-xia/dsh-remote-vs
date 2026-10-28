@@ -17,6 +17,14 @@ type IconProps = {
     className?: string;
 };
 export declare function IconChevronRight(props: IconProps): ReactNode;
+/** Mirror of {@link IconChevronRight}, for the commit pane's "previous file". */
+export declare function IconChevronLeft(props: IconProps): ReactNode;
+/** Expand: two arrows pushing the corners apart (the pane's full-height toggle). */
+export declare function IconExpand(props: IconProps): ReactNode;
+/** Restore: the same two arrows pulling the corners back in. */
+export declare function IconCollapse(props: IconProps): ReactNode;
+/** Wrap long lines: a line turning back on itself instead of running off. */
+export declare function IconWrap(props: IconProps): ReactNode;
 export declare function IconChevronDown(props: IconProps): ReactNode;
 /** Mirror of `IconChevronDown`, for the diff's "previous change" button. */
 export declare function IconChevronUp(props: IconProps): ReactNode;
@@ -29,6 +37,12 @@ export declare function IconPlus(props: IconProps): ReactNode;
 export declare function IconNewFolder(props: IconProps): ReactNode;
 export declare function IconTrash(props: IconProps): ReactNode;
 export declare function IconClose(props: IconProps): ReactNode;
+/** Copy glyph: two offset sheets, the front one the clipboard's payload. */
+export declare function IconCopy(props: IconProps): ReactNode;
+/** Author glyph for the commit pane's metadata rows. */
+export declare function IconUser(props: IconProps): ReactNode;
+/** Date glyph, the pair of {@link IconUser} in the commit pane's metadata. */
+export declare function IconClock(props: IconProps): ReactNode;
 export declare function IconSearch(props: IconProps): ReactNode;
 /**
  * "Search file NAMES": a page with a magnifier tucked into its lower-right

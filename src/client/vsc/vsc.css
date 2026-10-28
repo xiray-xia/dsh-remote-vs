@@ -2075,6 +2075,502 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   font-size: 11px;
 }
 
+/* ------------------------------------------------------- commit pane */
+
+/**
+ * The history panel's bottom half: the graph keeps the top, the selected
+ * commit takes this pane below the drag handle (same gesture and styling as
+ * the editor split, so `.rvs-vsplit-handle` is reused rather than copied).
+ */
+.rvs-history-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rvs-hpane {
+  flex: none;
+  min-height: 140px;
+  max-height: 82%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-top: 1px solid var(--rvs-border);
+  background: var(--rvs-code-bg);
+}
+
+/* Full-height mode: the graph is hidden by the panel, so the pane takes the
+   remaining column instead of its persisted pixel height. */
+.rvs-hpane.expanded {
+  flex: 1;
+  max-height: none;
+}
+
+/* A toolbar toggle that is currently ON (wrap, for example). */
+.rvs-hbtn.active {
+  color: var(--rvs-brand);
+}
+
+.rvs-hpane-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Tab strip: same underline idiom as the editor's diff/worktree switch, but
+   scoped so the pane's three views cannot be confused with editor tabs. */
+.rvs-htabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-htab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--rvs-fg3);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px 4px;
+  cursor: pointer;
+}
+
+.rvs-htab:hover {
+  color: var(--rvs-fg);
+}
+
+.rvs-htab.active {
+  color: var(--rvs-fg);
+  border-bottom-color: var(--rvs-brand);
+}
+
+.rvs-htabs-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.rvs-hhash-mini {
+  flex: none;
+  margin-right: 2px;
+  font-family: var(--rvs-mono);
+  font-size: 10.5px;
+  color: var(--rvs-fg3);
+}
+
+/**
+ * Every tab body stays mounted (the patch's scroll position and parse survive
+ * a look at 提交详情) and is hidden with the `hidden` attribute. The class
+ * declares `flex`, which outranks the UA `[hidden]` rule, so hiding needs an
+ * explicit rule of its own.
+ */
+.rvs-hbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 14px;
+}
+
+.rvs-hbody[hidden] {
+  display: none;
+}
+
+/* -- 提交详情 -- */
+
+.rvs-hsubject {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.rvs-hmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 21px;
+  font-size: 11.5px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-hmeta-icon {
+  flex: none;
+  display: flex;
+  width: 13px;
+  align-items: center;
+  color: var(--rvs-fg3);
+}
+
+.rvs-hmeta-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-hmeta-label {
+  flex: none;
+}
+
+.rvs-hhash {
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 4px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg2);
+  user-select: all;
+}
+
+.rvs-hparent {
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 4px;
+  color: var(--rvs-fg2);
+}
+
+.rvs-hdash {
+  color: var(--rvs-fg3);
+}
+
+.rvs-hrefs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.rvs-hmsg {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--rvs-border);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--rvs-fg2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.rvs-hfooter {
+  display: flex;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+/* -- 内容 -- */
+
+.rvs-hhint {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+/* One line: how many files, and the path filter that makes a 60-file commit
+   narrowable without scrolling. */
+.rvs-hcontent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.rvs-hcount {
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-hfilter {
+  flex: 1;
+  min-width: 0;
+}
+
+.rvs-hfiles {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* Directory row of the 内容 tree: chevron + folder glyph + path + count. */
+.rvs-hfolder {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--rvs-fg2);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rvs-hfolder:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-hfolder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--rvs-mono);
+  font-size: 11.5px;
+}
+
+.rvs-hfolder-count {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--rvs-fg3);
+}
+
+/* Files under a folder keep the editor tree's indent idiom. */
+.rvs-file-row.indent {
+  padding-left: 18px;
+}
+
+.rvs-file-row.active {
+  background: var(--rvs-active);
+}
+
+/* The row's quick "open in editor" affordance: invisible until the row is
+   hovered/focused, so the path keeps the whole width at rest. */
+.rvs-file-open {
+  opacity: 0;
+}
+
+.rvs-file-row:hover .rvs-file-open,
+.rvs-file-row:focus-within .rvs-file-open,
+.rvs-file-row:focus .rvs-file-open {
+  opacity: 1;
+}
+
+/* -- 差异 -- */
+
+/**
+ * The diff tab is a column: a PINNED tool row, then the one scroller. The
+ * reference pane made the whole tab a scroll area, so the file you were in and
+ * the controls both disappeared on a long patch.
+ */
+.rvs-hdiff {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.rvs-hdiff[hidden] {
+  display: none;
+}
+
+.rvs-ptoolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 30px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--rvs-border);
+  background: var(--rvs-layer3);
+}
+
+.rvs-pfile-index {
+  flex: none;
+  min-width: 32px;
+  font-family: var(--rvs-mono);
+  font-size: 10.5px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-pfile-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--rvs-fg2);
+}
+
+.rvs-pscroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 14px;
+}
+
+.rvs-patch-file {
+  margin-bottom: 10px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+}
+
+.rvs-patch-file.folded .rvs-patch-head {
+  border-bottom: none;
+  border-radius: 6px;
+}
+
+.rvs-patch-file.active {
+  border-color: var(--rvs-brand);
+}
+
+/* Sticky per-file header: scrolling a 3000-line hunk keeps saying which file
+   it belongs to. `position: sticky` needs the nearest scrollport, which is
+   `.rvs-pscroll` — no `overflow` on the section itself. */
+.rvs-patch-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--rvs-border);
+  border-radius: 6px 6px 0 0;
+  background: var(--rvs-layer3);
+  cursor: pointer;
+}
+
+.rvs-patch-head:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-patch-chevron {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--rvs-fg3);
+  cursor: pointer;
+  transform: rotate(0deg);
+}
+
+.rvs-patch-chevron.open {
+  transform: rotate(90deg);
+}
+
+.rvs-patch-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.rvs-patch-letter {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rvs-patch-counts {
+  flex: none;
+  display: flex;
+  gap: 5px;
+  font-family: var(--rvs-mono);
+  font-size: 10.5px;
+}
+
+.rvs-patch-add-count {
+  color: var(--rvs-git-a);
+}
+
+.rvs-patch-del-count {
+  color: var(--rvs-git-d);
+}
+
+.rvs-patch-rows {
+  padding: 2px 0 6px;
+  font-family: var(--rvs-mono);
+  font-size: 11.5px;
+  line-height: 17px;
+}
+
+.rvs-patch-row {
+  display: flex;
+  align-items: stretch;
+  min-width: max-content;
+  white-space: pre;
+}
+
+/* Wrap mode: the row gives up its horizontal runway and the text wraps under
+   the gutter instead (the whole point on a narrow sidebar). */
+.rvs-patch-rows.wrap .rvs-patch-row {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rvs-patch-rows.wrap .rvs-patch-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rvs-patch-row.add {
+  background: var(--rvs-add-bg);
+}
+
+.rvs-patch-row.del {
+  background: var(--rvs-del-bg);
+}
+
+.rvs-patch-num {
+  flex: none;
+  width: 42px;
+  padding-right: 6px;
+  text-align: right;
+  color: var(--rvs-fg3);
+  user-select: none;
+}
+
+.rvs-patch-sign {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--rvs-fg3);
+  user-select: none;
+}
+
+.rvs-patch-text {
+  flex: 1;
+  padding-right: 12px;
+  user-select: text;
+}
+
+/* One "the hunk jumped ahead" marker, so a patch never pretends its line
+   numbers are contiguous. */
+.rvs-patch-skip {
+  margin: 2px 0;
+  border-top: 1px dashed var(--rvs-border);
+  border-bottom: 1px dashed var(--rvs-border);
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  text-align: center;
+  user-select: none;
+}
+
+.rvs-patch-note {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
 /* ---------------------------------------------------- floating editor window */
 
 /**

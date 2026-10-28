@@ -30,5 +30,10 @@ export declare function parseStatus(stdout: string): GitStatus;
 export declare function parseLog(stdout: string): GitCommit[];
 /** Parse for-each-ref branch lines. */
 export declare function parseBranches(stdout: string, current: string): GitBranch[];
+/** Split a raw `%B` message into its subject line and the body below it. */
+export declare function parseMessage(text: string): {
+    subject: string;
+    body: string;
+};
 /** Assemble commit detail from message + stat outputs. */
 export declare function parseShow(hash: string, message: string, stat: string): GitShow;

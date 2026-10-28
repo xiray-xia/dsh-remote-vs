@@ -9,7 +9,7 @@
  */
 import { REMOTE_API } from '../../protocol.ts'
 import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts'
-import { assertRef, shQuote } from '../../git-format.ts'
+import { assertRef, messageCommand, parseMessage, shQuote } from '../../git-format.ts'
 import {
   addRemoteCommand,
   allBranchesCommand,
@@ -19,12 +19,14 @@ import {
   cleanUntrackedCommand,
   commitCommand,
   commitFilesCommand,
+  commitPatchCommand,
   createBranchCommand,
   deleteBranchCommand,
   diffCommand,
   fetchCommand,
   fileAtRevCommand,
   gitErrorHint,
+  GIT_CAP,
   headMessageCommand,
   mergeCommand,
   parseAllBranches,
@@ -282,6 +284,25 @@ export async function loadCommitFileDiff(alias: string, root: string, hash: stri
     newText: stripTrailingNewline(newText),
     unsupported: /^Binary files .* differ$/m.test(out.stdout),
   }
+}
+
+/** Raw message of one commit, split into its subject line and the body. */
+export async function loadCommitMessage(alias: string, root: string, hash: string): Promise<{ subject: string; body: string }> {
+  const out = await run(alias, messageCommand(root, hash), 60_000)
+  return parseMessage(out.stdout)
+}
+
+/**
+ * Whole patch of one commit (the commit header is stripped: starts at
+ * `diff --git`).
+ *
+ * `truncated` answers whether the read hit `commitPatchCommand`'s byte cap: a
+ * capped read returns exactly `GIT_CAP` bytes, and the pane must SAY so rather
+ * than silently presenting the first half of a huge commit as the whole diff.
+ */
+export async function loadCommitPatch(alias: string, root: string, hash: string): Promise<{ text: string; truncated: boolean }> {
+  const out = await run(alias, commitPatchCommand(root, hash), 90_000)
+  return { text: out.stdout, truncated: out.stdout.length >= GIT_CAP }
 }
 
 /** Local + remote-tracking branches. */

@@ -51,6 +51,42 @@ export function IconChevronRight(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M6 3.5 L10.5 8 L6 12.5" />, props.className)
 }
 
+/** Mirror of {@link IconChevronRight}, for the commit pane's "previous file". */
+export function IconChevronLeft(props: IconProps): ReactNode {
+  return svg(props.size ?? 14, <path d="M10 3.5 L5.5 8 L10 12.5" />, props.className)
+}
+
+/** Expand: two arrows pushing the corners apart (the pane's full-height toggle). */
+export function IconExpand(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <path d="M9.4 2.6h4v4M13.4 2.6 9 7" />
+      <path d="M6.6 13.4h-4v-4M2.6 13.4 7 9" />
+    </>
+  ), props.className)
+}
+
+/** Restore: the same two arrows pulling the corners back in. */
+export function IconCollapse(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <path d="M13.4 6.6h-4v-4M9.4 6.6 13.4 2.6" />
+      <path d="M2.6 9.4h4v4M6.6 9.4 2.6 13.4" />
+    </>
+  ), props.className)
+}
+
+/** Wrap long lines: a line turning back on itself instead of running off. */
+export function IconWrap(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <path d="M2.6 4.4h8.6a2.6 2.6 0 0 1 0 5.2H6.4" />
+      <path d="M8.2 7.4 6.2 9.6l2 2.2" />
+      <path d="M2.6 11.6h1.8" />
+    </>
+  ), props.className)
+}
+
 export function IconChevronDown(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M3.5 6 L8 10.5 L12.5 6" />, props.className)
 }
@@ -88,6 +124,36 @@ export function IconTrash(props: IconProps): ReactNode {
 
 export function IconClose(props: IconProps): ReactNode {
   return svg(props.size ?? 12, <path d="M4 4l8 8M12 4l-8 8" />, props.className)
+}
+
+/** Copy glyph: two offset sheets, the front one the clipboard's payload. */
+export function IconCopy(props: IconProps): ReactNode {
+  return svg(props.size ?? 14, (
+    <>
+      <rect x="5.4" y="5.4" width="7.8" height="7.8" rx="1.2" />
+      <path d="M10.6 5.4V3.6a1.2 1.2 0 0 0-1.2-1.2H3.6a1.2 1.2 0 0 0-1.2 1.2v5.8a1.2 1.2 0 0 0 1.2 1.2h1.8" />
+    </>
+  ), props.className)
+}
+
+/** Author glyph for the commit pane's metadata rows. */
+export function IconUser(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <circle cx="8" cy="5.4" r="2.6" />
+      <path d="M2.8 13.4c.5-2.4 2.6-3.8 5.2-3.8s4.7 1.4 5.2 3.8" />
+    </>
+  ), props.className)
+}
+
+/** Date glyph, the pair of {@link IconUser} in the commit pane's metadata. */
+export function IconClock(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <circle cx="8" cy="8" r="5.6" />
+      <path d="M8 4.8V8l2.2 1.6" />
+    </>
+  ), props.className)
 }
 
 export function IconSearch(props: IconProps): ReactNode {

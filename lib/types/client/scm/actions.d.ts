@@ -92,6 +92,23 @@ export declare function loadDiff(alias: string, root: string, path: string, stag
 export declare function loadCommitFiles(alias: string, root: string, hash: string): Promise<GitCommitFile[]>;
 /** Diff of one path inside a commit (used by the history file drill-down). */
 export declare function loadCommitFileDiff(alias: string, root: string, hash: string, path: string): Promise<DiffPayload>;
+/** Raw message of one commit, split into its subject line and the body. */
+export declare function loadCommitMessage(alias: string, root: string, hash: string): Promise<{
+    subject: string;
+    body: string;
+}>;
+/**
+ * Whole patch of one commit (the commit header is stripped: starts at
+ * `diff --git`).
+ *
+ * `truncated` answers whether the read hit `commitPatchCommand`'s byte cap: a
+ * capped read returns exactly `GIT_CAP` bytes, and the pane must SAY so rather
+ * than silently presenting the first half of a huge commit as the whole diff.
+ */
+export declare function loadCommitPatch(alias: string, root: string, hash: string): Promise<{
+    text: string;
+    truncated: boolean;
+}>;
 /** Local + remote-tracking branches. */
 export declare function loadBranches(alias: string, root: string, current: string): Promise<GitBranch[]>;
 /** Configured remotes. */

@@ -196,10 +196,14 @@ export function parseBranches(stdout: string, current: string): GitBranch[] {
   return branches
 }
 
+/** Split a raw `%B` message into its subject line and the body below it. */
+export function parseMessage(text: string): { subject: string; body: string } {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  return { subject: (lines[0] ?? '').trim(), body: lines.slice(1).join('\n').trim() }
+}
+
 /** Assemble commit detail from message + stat outputs. */
 export function parseShow(hash: string, message: string, stat: string): GitShow {
-  const lines = message.split('\n')
-  const subject = (lines[0] ?? '').trim()
-  const body = lines.slice(1).join('\n').trim()
+  const { subject, body } = parseMessage(message)
   return { hash, subject, body, stat: stat.trim() }
 }

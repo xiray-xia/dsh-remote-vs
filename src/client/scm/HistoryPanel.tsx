@@ -1,43 +1,97 @@
 /**
  * History view: the commit graph with branch lanes and merge curves (lane
- * layout ported from the previous Git view), plus click-to-expand changed
- * files and a per-file diff of that commit.
+ * layout ported from the previous Git view), plus a COMMIT PANE below it —
+ * the selected commit's 提交详情 / 内容 / 差异 tabs (see `./CommitPane.tsx`).
+ *
+ * The pane replaced the old per-row inline expansion: a commit is a subject
+ * with three answers, not a disclosure widget, and the pane keeps the graph
+ * readable while one commit is open. Clicking a row selects (the pane opens on
+ * 提交详情), clicking a changed file shows its patch in 差异, and a commit's
+ * per-file two-sided diff still opens in the editor through `openCommitFile`.
  *
  * Loading is a SINGLE capped call (`api.git.log(..., GIT_LOG_MAX)`); a deep
  * repository shows the newest GIT_LOG_MAX commits and is filtered client-side.
- * The docstring here used to promise scroll-triggered paging that does not
- * exist, which is worse than no comment: a reader trusts it.
  *
  * Each repository's last answer is kept in memory (`./panel-cache.ts`), so a
  * switch back to a workspace repaints its commit list at once and the log is
  * re-read behind it — the tab used to blank on every switch, and worse, kept the
  * PREVIOUS repository's rows until the new log arrived.
+ *
+ * Per-commit reads are cached separately (message + files, and the lazy patch),
+ * keyed by repository AND hash, so switching repositories can never show one
+ * host's commit body under another host's graph.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
 import { gitReadSettleMs, useExplorer } from '../store.tsx'
-import { checkoutCommit, loadCommitFiles } from './actions.ts'
+import { checkoutCommit, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
+import { CommitPane } from './CommitPane.tsx'
+import { isHistoryTab, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
 import { ReadQueue } from './read-queue.ts'
 import { readHistorySnapshot, repoCacheKey, writeHistorySnapshot } from './panel-cache.ts'
 import {
+  ContextMenu,
   IconButton,
-  IconChevronDown,
-  IconChevronRight,
   IconRefresh,
   MiniSpinner,
   confirmDialog,
-  FileIcon,
-  gitStatusClass,
+  copyText,
   relTime,
   toast,
+  useContextMenu,
 } from '../vsc/kit.tsx'
 
 const ROW_H = 22
 const LANE_W = 13
 const PAD_X = 9
 const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79c0ff', '#7ee787', '#ffa657']
+
+/** Persisted pane geometry / view: one profile-wide preference, like the split. */
+const PANE_HEIGHT_KEY = 'dsh-remote-vs.historyPane'
+const PANE_TAB_KEY = 'dsh-remote-vs.historyTab'
+const PANE_MIN_HEIGHT = 140
+
+function readPaneHeight(): number {
+  try {
+    const saved = Number(localStorage.getItem(PANE_HEIGHT_KEY))
+    if (Number.isFinite(saved) && saved >= PANE_MIN_HEIGHT) return Math.round(saved)
+  } catch {
+    // Ignore.
+  }
+  return 300
+}
+
+function readPaneTab(): HistoryTab | undefined {
+  try {
+    const saved = localStorage.getItem(PANE_TAB_KEY)
+    if (isHistoryTab(saved)) return saved
+  } catch {
+    // Ignore.
+  }
+  return undefined
+}
+
+/** Bounded cache insert (Map keeps insertion order: the first key is oldest). */
+function cacheSet<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+  map.set(key, value)
+  while (map.size > max) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) break
+    map.delete(oldest)
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** The tab strip's choice plus whether the USER made it (first click lands on 提交详情). */
+interface TabChoice {
+  id: HistoryTab
+  touched: boolean
+}
 
 /**
  * One log read per repository at a time.
@@ -48,22 +102,6 @@ const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79
  * second `git log` of the same repository and let the slower answer repaint.
  */
 const logReads = new ReadQueue()
-
-/**
- * Ref badge decoration for one `%D` entry. Extracted from a pair of nested
- * ternaries (forbidden by this project's review checklist) that were doing two
- * different jobs — CSS modifier and display text — inside one JSX expression.
- */
-function refBadgeClass(ref: string): string {
-  if (ref.startsWith('HEAD ->')) return ' head'
-  if (ref.startsWith('tag:')) return ' tag'
-  return ''
-}
-
-function refBadgeLabel(ref: string): string {
-  if (ref.startsWith('HEAD -> ')) return ref.slice('HEAD -> '.length)
-  return ref.replace(/^tag: /, '')
-}
 
 interface GraphRow {
   commit: GitCommit
@@ -140,6 +178,23 @@ function laneColor(lane: number): string {
 /** A stable empty list: the "this repository was never read" fallback. */
 const EMPTY_COMMITS: GitCommit[] = []
 
+/** What one commit's lazy detail reads produced (keyed by repo + hash). */
+interface CommitDetail {
+  /** The `${repoKey}|${hash}` the values belong to. */
+  key: string
+  body: string
+  files?: GitCommitFile[]
+  filesError?: string
+}
+
+interface CommitPatchState {
+  key: string
+  text?: string
+  /** The remote read hit the byte cap (the pane says so). */
+  truncated?: boolean
+  error?: string
+}
+
 export function HistoryPanel(): ReactNode {
   const store = useExplorer()
   const { t, lang, alias, repoRoot } = store
@@ -155,9 +210,21 @@ export function HistoryPanel(): ReactNode {
   const [commitsKey, setCommitsKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [expanded, setExpanded] = useState<string | undefined>(undefined)
-  const [files, setFiles] = useState<Record<string, GitCommitFile[]>>({})
   const [filter, setFilter] = useState('')
+  const [selectedHash, setSelectedHash] = useState<string | undefined>(undefined)
+  const [focusPath, setFocusPath] = useState<string | undefined>(undefined)
+  const [tabChoice, setTabChoice] = useState<TabChoice>(() => {
+    const saved = readPaneTab()
+    return { id: saved ?? 'details', touched: saved !== undefined }
+  })
+  const [paneHeight, setPaneHeight] = useState<number>(readPaneHeight)
+  const [dragging, setDragging] = useState(false)
+  /** Full-height mode: the graph makes room and the pane takes the panel. */
+  const [paneExpanded, setPaneExpanded] = useState(false)
+  const commitMenu = useContextMenu()
+  const [detail, setDetail] = useState<CommitDetail>({ key: '', body: '' })
+  const [patchState, setPatchState] = useState<CommitPatchState>({ key: '' })
+  const [reloadSeq, setReloadSeq] = useState(0)
   const head = store.head?.branch ?? ''
   /**
    * Ticket for the log request. The panel stays mounted across binding
@@ -166,6 +233,12 @@ export function HistoryPanel(): ReactNode {
    * buttons that act on the currently bound repository.
    */
   const loadSeq = useRef(0)
+  /** Per-commit caches: message+files (bounded 20) and patch text (bounded 4). */
+  const detailCache = useRef(new Map<string, { body: string; files: GitCommitFile[] }>())
+  const patchCache = useRef(new Map<string, string>())
+  const containerRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{ startY: number; startHeight: number } | undefined>(undefined)
+  const paneHeightRef = useRef(paneHeight)
 
   const repoKey = alias === '' || repoRoot === undefined ? '' : repoCacheKey(alias, repoRoot)
   /** The cached log of the repository being shown, when it was read before. */
@@ -214,6 +287,75 @@ export function HistoryPanel(): ReactNode {
     void load()
   }, [load])
 
+  /** The selected commit as the graph currently knows it. */
+  const selectedCommit = useMemo(
+    () => (selectedHash === undefined ? undefined : rows.find(commit => commit.hash === selectedHash)),
+    [rows, selectedHash],
+  )
+  /** Cache key of the selected commit ('' = nothing selected / no binding). */
+  const detailKey = selectedCommit === undefined || repoKey === '' ? '' : `${repoKey}|${selectedCommit.hash}`
+
+  // A repository switch drops the selection: the hash belongs to the old graph.
+  useEffect(() => {
+    setSelectedHash(undefined)
+    setFocusPath(undefined)
+  }, [repoKey])
+
+  // Message + file list: what 提交详情 and 内容 need. The patch is NOT read here
+  // (see the lazy effect below), so clicking through commits stays cheap.
+  useEffect(() => {
+    if (detailKey === '' || selectedCommit === undefined || alias === '' || repoRoot === undefined) {
+      setDetail({ key: '', body: '' })
+      return
+    }
+    const cached = detailCache.current.get(detailKey)
+    if (cached !== undefined) {
+      setDetail({ key: detailKey, body: cached.body, files: cached.files })
+      return
+    }
+    let cancelled = false
+    setDetail({ key: detailKey, body: '' })
+    void (async () => {
+      const [message, files] = await Promise.allSettled([
+        loadCommitMessage(alias, repoRoot, selectedCommit.hash),
+        loadCommitFiles(alias, repoRoot, selectedCommit.hash),
+      ])
+      if (cancelled) return
+      const body = message.status === 'fulfilled' ? message.value.body : ''
+      const fileRows = files.status === 'fulfilled' ? files.value : undefined
+      const filesError = files.status === 'rejected' ? errorText(files.reason) : undefined
+      if (fileRows !== undefined) cacheSet(detailCache.current, detailKey, { body, files: fileRows }, 20)
+      setDetail({ key: detailKey, body, files: fileRows, filesError })
+    })()
+    return () => { cancelled = true }
+  }, [detailKey, alias, repoRoot, selectedCommit, reloadSeq])
+
+  // The patch is read only while 差异 is on screen, and cached per commit: a
+  // reader of 提交详情 never pays a `git show --patch` round trip.
+  useEffect(() => {
+    if (tabChoice.id !== 'diff' || detailKey === '' || selectedCommit === undefined || alias === '' || repoRoot === undefined) return
+    if (patchState.key === detailKey) return
+    const cached = patchCache.current.get(detailKey)
+    if (cached !== undefined) {
+      setPatchState({ key: detailKey, text: cached })
+      return
+    }
+    let cancelled = false
+    setPatchState({ key: detailKey })
+    void (async () => {
+      try {
+        const result = await loadCommitPatch(alias, repoRoot, selectedCommit.hash)
+        if (cancelled) return
+        cacheSet(patchCache.current, detailKey, result.text, 4)
+        setPatchState({ key: detailKey, text: result.text, truncated: result.truncated })
+      } catch (caught) {
+        if (cancelled) return
+        setPatchState({ key: detailKey, error: errorText(caught) })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [tabChoice.id, detailKey, alias, repoRoot, selectedCommit, patchState.key, reloadSeq])
+
   const visible = useMemo(() => {
     if (filter.trim() === '') return rows
     const needle = filter.trim().toLowerCase()
@@ -225,18 +367,147 @@ export function HistoryPanel(): ReactNode {
 
   const graph = useMemo(() => layoutLanes(visible), [visible])
 
-  const toggleCommit = async (hash: string): Promise<void> => {
-    if (expanded === hash) {
-      setExpanded(undefined)
+  const selectCommit = (hash: string): void => {
+    setSelectedHash(hash)
+    setFocusPath(undefined)
+    // The FIRST selection of a panel life lands on 提交详情; once the user has
+    // picked a tab by hand (or restored one), selection keeps it.
+    if (!tabChoice.touched) setTabChoice({ id: 'details', touched: false })
+  }
+
+  const chooseTab = useCallback((next: HistoryTab): void => {
+    setTabChoice({ id: next, touched: true })
+    try {
+      localStorage.setItem(PANE_TAB_KEY, next)
+    } catch {
+      // Ignore.
+    }
+  }, [])
+
+  const focusCommitFile = (path: string): void => {
+    setFocusPath(path)
+    chooseTab('diff')
+  }
+
+  const openCommitFile = (path: string): void => {
+    if (selectedCommit === undefined) return
+    store.openCommitFile(selectedCommit.hash, path)
+  }
+
+  const closePane = (): void => {
+    setSelectedHash(undefined)
+    setFocusPath(undefined)
+    setPaneExpanded(false)
+  }
+
+  /** Up/Down move the graph selection (the list handles its own keys). */
+  const onListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    if (visible.length === 0) return
+    event.preventDefault()
+    const current = selectedHash === undefined ? -1 : visible.findIndex(commit => commit.hash === selectedHash)
+    const direction = event.key === 'ArrowDown' ? 1 : -1
+    let next: number
+    if (current < 0) next = direction === 1 ? 0 : visible.length - 1
+    else next = Math.min(visible.length - 1, Math.max(0, current + direction))
+    const commit = visible[next]
+    if (commit === undefined) return
+    selectCommit(commit.hash)
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-hash="${commit.hash}"]`)?.focus()
+  }
+
+  /** Graph context menu: the commit actions that do not need the pane open. */
+  const openCommitMenu = (event: React.MouseEvent, commit: GitCommit): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (commit.hash !== selectedHash) selectCommit(commit.hash)
+    commitMenu.open(event.clientX, event.clientY, [
+      {
+        label: t('history.copyHash'),
+        onSelect: () => { void copyText(commit.hash).then(() => toast(t('history.copiedHash'))) },
+      },
+      {
+        label: t('history.copySubject'),
+        onSelect: () => { void copyText(commit.subject).then(() => toast(t('history.copiedSubject'))) },
+      },
+      {
+        label: t('scm.checkout'),
+        separated: true,
+        onSelect: () => { void checkoutCommitFlow(commit) },
+      },
+    ])
+  }
+
+  /** Drop the caches of the selected commit and re-read what the pane shows. */
+  const reloadSelected = (): void => {
+    if (detailKey !== '') {
+      detailCache.current.delete(detailKey)
+      patchCache.current.delete(detailKey)
+    }
+    setDetail({ key: '', body: '' })
+    setPatchState({ key: '' })
+    setReloadSeq(value => value + 1)
+  }
+
+  const checkoutCommitFlow = (commit: GitCommit): void => {
+    if (repoRoot === undefined) return
+    void (async () => {
+      const ok = await confirmDialog({
+        title: t('scm.checkoutCommitTitle'),
+        text: t('scm.checkoutCommitText').replace('{hash}', commit.hash.slice(0, 10)),
+        okText: t('scm.checkout'),
+      })
+      if (!ok) return
+      try {
+        await checkoutCommit(alias, repoRoot, commit.hash)
+        await store.afterWrite()
+        toast(t('scm.checkedOut'))
+      } catch (caught) {
+        toast(errorText(caught), true)
+      }
+    })()
+  }
+
+  const checkoutSelected = (): void => {
+    if (selectedCommit !== undefined) checkoutCommitFlow(selectedCommit)
+  }
+
+  // ── Pane splitter: drag up grows the pane (same gesture as the editor split;
+  //    the handle reuses `.rvs-vsplit-handle`'s row-resize styling). ─────────
+  const onPaneDown = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Older engine: the button gate covers it.
+    }
+    dragRef.current = { startY: event.clientY, startHeight: paneHeightRef.current }
+    setDragging(true)
+  }
+  const onPaneMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    if (drag === undefined) return
+    if ((event.buttons & 1) === 0) {
+      dragRef.current = undefined
+      setDragging(false)
       return
     }
-    setExpanded(hash)
-    if (files[hash] !== undefined || repoRoot === undefined) return
+    const total = containerRef.current?.clientHeight ?? 0
+    if (total < 220) return
+    const max = Math.max(PANE_MIN_HEIGHT + 60, total * 0.82)
+    const next = Math.round(Math.max(PANE_MIN_HEIGHT, Math.min(max, drag.startHeight + (drag.startY - event.clientY))))
+    paneHeightRef.current = next
+    setPaneHeight(next)
+  }
+  const onPaneEnd = (): void => {
+    if (dragRef.current === undefined) return
+    dragRef.current = undefined
+    setDragging(false)
     try {
-      const rows = await loadCommitFiles(alias, repoRoot, hash)
-      setFiles(prev => ({ ...prev, [hash]: rows }))
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), true)
+      localStorage.setItem(PANE_HEIGHT_KEY, String(paneHeightRef.current))
+    } catch {
+      // Ignore.
     }
   }
 
@@ -263,24 +534,24 @@ export function HistoryPanel(): ReactNode {
         />
       </div>
       {error !== undefined && <div className="rvs-banner error">{error}</div>}
-      <div className="rvs-scroll">
-        {loading && rows.length === 0 && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
-        {!loading && rows.length === 0 && error === undefined && <div className="rvs-empty">{t('scm.logEmpty')}</div>}
-        {graph.rows.map((row, index) => {
-          const commit = row.commit
-          const isOpen = expanded === commit.hash
-          const changed = files[commit.hash]
-          return (
-            <div key={commit.hash}>
+      <div className="rvs-history-body" ref={containerRef}>
+        <div className="rvs-scroll" hidden={paneExpanded} onKeyDown={onListKeyDown}>
+          {loading && rows.length === 0 && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
+          {!loading && rows.length === 0 && error === undefined && <div className="rvs-empty">{t('scm.logEmpty')}</div>}
+          {graph.rows.map((row, index) => {
+            const commit = row.commit
+            const isSelected = commit.hash === selectedHash
+            return (
               <button
+                key={commit.hash}
                 type="button"
-                className={`rvs-commit-item${isOpen ? ' selected' : ''}`}
+                data-hash={commit.hash}
+                className={`rvs-commit-item${isSelected ? ' selected' : ''}`}
                 title={`${commit.hash}\n${commit.author} <${commit.email}>\n${commit.subject}`}
-                onClick={() => { void toggleCommit(commit.hash) }}
+                aria-current={isSelected ? 'true' : undefined}
+                onClick={() => selectCommit(commit.hash)}
+                onContextMenu={(event) => { openCommitMenu(event, commit) }}
               >
-                <span className="rvs-node-icon" style={{ width: 12 }}>
-                  {isOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
-                </span>
                 <svg className="rvs-graph-svg" width={PAD_X * 2 + (graph.laneCount - 1) * LANE_W} height={ROW_H}>
                   {row.before.map((hash, lane) => {
                     const after = row.after[lane] ?? null
@@ -341,63 +612,63 @@ export function HistoryPanel(): ReactNode {
                 <span className="rvs-commit-msg">{commit.subject}</span>
                 <span className="rvs-commit-date">{relTime(commit.date, lang)}</span>
               </button>
-              {isOpen && (
-                <div className="rvs-detail">
-                  <div className="rvs-detail-meta">
-                    {commit.author} &lt;{commit.email}&gt; · {relTime(commit.date, lang)} · {commit.hash.slice(0, 10)}
-                  </div>
-                  {changed === undefined
-                    ? <div className="rvs-empty" style={{ padding: 8 }}><MiniSpinner /> {t('common.loading')}</div>
-                    : changed.length === 0
-                      ? <div className="rvs-empty" style={{ padding: 8 }}>{t('scm.logEmpty')}</div>
-                      : changed.slice(0, 200).map(file => (
-                        <div
-                          key={`${file.status}:${file.path}`}
-                          className="rvs-file-row"
-                          title={file.origPath === undefined ? file.path : `${file.origPath} → ${file.path}`}
-                          onClick={() => { store.openCommitFile(commit.hash, file.path) }}
-                        >
-                          <span className="rvs-node-icon"><FileIcon path={file.path} size={13} /></span>
-                          <span className="rvs-file-path">
-                            {file.origPath === undefined ? file.path : `${file.origPath} → ${file.path}`}
-                          </span>
-                          <span className={`rvs-file-status rvs-letter-${gitStatusClass(file.status)}`}>{file.status[0]}</span>
-                        </div>
-                      ))}
-                  <div className="rvs-commit-row">
-                    <button
-                      type="button"
-                      className="rvs-chip"
-                      onClick={() => {
-                        void (async () => {
-                          const ok = await confirmDialog({
-                            title: t('scm.checkoutCommitTitle'),
-                            text: t('scm.checkoutCommitText').replace('{hash}', commit.hash.slice(0, 10)),
-                            okText: t('scm.checkout'),
-                          })
-                          if (!ok || repoRoot === undefined) return
-                          try {
-                            await checkoutCommit(alias, repoRoot, commit.hash)
-                            await store.afterWrite()
-                            toast(t('scm.checkedOut'))
-                          } catch (caught) {
-                            toast(caught instanceof Error ? caught.message : String(caught), true)
-                          }
-                        })()
-                      }}
-                    >
-                      {t('scm.checkout')}
-                    </button>
-                  </div>
-                </div>
-              )}
+            )
+          })}
+          {visible.length >= GIT_LOG_MAX && (
+            <div className="rvs-empty">{t('scm.logCapped').replace('{n}', String(GIT_LOG_MAX))}</div>
+          )}
+        </div>
+        {selectedCommit !== undefined && (
+          <>
+            {paneExpanded ? null : (
+              <div
+                className="rvs-vsplit-handle"
+                data-dragging={dragging ? 'true' : 'false'}
+                title={t('history.resizeHint')}
+                onPointerDown={onPaneDown}
+                onPointerMove={onPaneMove}
+                onPointerUp={onPaneEnd}
+                onPointerCancel={onPaneEnd}
+              />
+            )}
+            <div
+              className={`rvs-hpane${paneExpanded ? ' expanded' : ''}`}
+              style={paneExpanded ? undefined : { height: `${paneHeight}px` }}
+            >
+              <CommitPane
+                commit={selectedCommit}
+                tab={tabChoice.id}
+                onTab={chooseTab}
+                onClose={closePane}
+                expanded={paneExpanded}
+                onToggleExpand={() => { setPaneExpanded(value => !value) }}
+                body={detail.key === detailKey ? detail.body : ''}
+                files={detail.key === detailKey ? detail.files : undefined}
+                filesError={detail.key === detailKey ? detail.filesError : undefined}
+                patch={patchState.key === detailKey ? patchState.text : undefined}
+                patchTruncated={patchState.key === detailKey && patchState.truncated === true}
+                patchLoading={tabChoice.id === 'diff' && patchState.key !== detailKey}
+                patchError={patchState.key === detailKey ? patchState.error : undefined}
+                focusPath={focusPath}
+                onFocusPath={focusCommitFile}
+                onOpenFile={openCommitFile}
+                onCheckout={checkoutSelected}
+                onReload={reloadSelected}
+                t={t}
+                lang={lang}
+              />
             </div>
-          )
-        })}
-        {visible.length >= GIT_LOG_MAX && (
-          <div className="rvs-empty">{t('scm.logCapped').replace('{n}', String(GIT_LOG_MAX))}</div>
+          </>
         )}
       </div>
+      {commitMenu.menu !== undefined && (
+        <ContextMenu
+          x={commitMenu.menu.x}
+          y={commitMenu.menu.y}
+          entries={commitMenu.menu.entries}
+          onClose={commitMenu.close}
+        />
+      )}
     </div>
   )
 }

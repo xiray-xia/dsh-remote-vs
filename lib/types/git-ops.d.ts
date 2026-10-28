@@ -99,6 +99,13 @@ export interface DiffRequest {
 export declare function diffCommand(workdir: string, request?: DiffRequest): string;
 /** Files touched by one commit (`--name-status`, no patch body). */
 export declare function commitFilesCommand(workdir: string, ref: string): string;
+/**
+ * Whole patch of one commit, with the commit header stripped (`--format=`), so
+ * the output starts at the first `diff --git` line and parses as a plain
+ * unified diff. Capped like every read-only builder: a commit that rewrites a
+ * generated file would otherwise ship megabytes for one sidebar pane.
+ */
+export declare function commitPatchCommand(workdir: string, ref: string): string;
 /** One file's content at a revision (`rev` may also be `:0` for the index). */
 export declare function fileAtRevCommand(workdir: string, rev: string, path: string): string;
 /** Local + remote-tracking branches with their upstream and tip. */
