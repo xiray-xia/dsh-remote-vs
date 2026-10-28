@@ -706,6 +706,11 @@ function gitReadIsCurrent(bindingId: string, ticket: number): boolean {
   return latestGitRead.get(bindingId) === ticket && activeBinding().key === bindingId
 }
 
+/** The cache key of what the panel is showing (workspace + repository directory). */
+function currentGitKey(): string {
+  return gitCacheKey(activeBinding().key, state.repoSubdir)
+}
+
 /** Recompute the busy flag from the queue (called on every start/settle). */
 function refreshGitBusy(): void {
   const bindingId = activeBinding().key
@@ -1246,19 +1251,17 @@ export async function refreshGit(mode: 'join' | 'fresh' = 'fresh'): Promise<void
   if (workspace === undefined) return
   const subdir = state.repoSubdir
   const cacheKey = gitCacheKey(key, subdir)
-  // Outer bound for ONE read: the probe and the two loaders each have the
-  // configured git budget (`withDeadline`), so a read needing more than twice
-  // that plus slack is not slow, it is stuck. Releasing the key here is what
-  // stops one hung host call from freezing every later refresh of this
-  // workspace — the queue would otherwise keep handing out its pending flight
-  // (see `scm/read-queue.ts`).
-  const settleMs = gitDeadlineMs() * 2 + 30_000
+  const settleMs = gitReadSettleMs()
   try {
     await gitReads.run(cacheKey, () => readGit(key, subdir, cacheKey), mode, settleMs)
   } catch (error) {
     // Only the settle deadline (or a throw before the read's own try) lands
-    // here: `readGit` handles read failures itself.
-    if (activeBinding().key !== key) return
+    // here: `readGit` handles read failures itself. The failure belongs to the
+    // key this read STARTED with — the repo picker may have moved the panel to
+    // another directory of the same workspace while this read was stuck, and
+    // reporting it there would put a bogus "stuck" error and the cached badge on
+    // top of that directory's successful answer.
+    if (activeBinding().key !== key || currentGitKey() !== cacheKey) return
     patch({
       gitError: error instanceof Error ? error.message : String(error),
       gitCached: state.repoRoot !== undefined,
@@ -1309,9 +1312,15 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
       withDeadline(loadHead(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
     ])
     // A directory INSIDE a repository settles on that repository's root, so the
-    // stored choice is what git actually uses (and what the picker shows).
+    // stored choice is what git actually uses (and what the picker shows). Only
+    // the binding's LATEST read may rewrite that persisted choice: a read
+    // superseded by a repo-picker switch must not put the OLD directory back
+    // (its answer is still cached under the key it started with, which is what a
+    // later switch to that directory needs).
     const settled = repoSubdirOf(workspace.remotePath, root) ?? subdir
-    if (settled !== readRepoSubdir(bindingId)) writeRepoSubdir(bindingId, settled)
+    if (settled !== readRepoSubdir(bindingId) && latestGitRead.get(bindingId) === ticket) {
+      writeRepoSubdir(bindingId, settled)
+    }
     // Keep the local stage results this read could not have seen, and retire the
     // ones it did see (they are in `detail` now, for better or worse).
     const target = stageTargetKey({ alias: workspace.alias, root })
@@ -1658,6 +1667,25 @@ function enterFloatSurface(): void {
  */
 function gitDeadlineMs(): number {
   return clientDeadlineFor(gitTimeoutMs())
+}
+
+/**
+ * Hard settle deadline for ONE queued git read (`scm/read-queue.ts`).
+ *
+ * A read that never settles would keep its key reserved forever: later `join`
+ * calls reuse the dead promise, `fresh` callers wait for it, and the busy flag
+ * stays up — one hung host call would freeze that key for the rest of the page
+ * (the pre-cache code could always re-read, so this is the one regression a
+ * shared flight introduces). The bound is generous on purpose: the status read
+ * issues its probe and then its two loaders SEQUENTIALLY, so twice the configured
+ * git budget plus slack is "stuck", not "slow".
+ *
+ * Exported because the panels own their own queues (SCM side lists, history log)
+ * and must pass the same bound — a queue without one is a permanent lock waiting
+ * for a host hiccup.
+ */
+export function gitReadSettleMs(): number {
+  return gitDeadlineMs() * 2 + 30_000
 }
 
 /** Deadline for one SFTP file read (editor, diff sides, preview). */

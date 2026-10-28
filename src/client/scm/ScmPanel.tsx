@@ -10,7 +10,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash } from '../../protocol.ts'
-import { useExplorer } from '../store.tsx'
+import { gitReadSettleMs, useExplorer } from '../store.tsx'
 import {
   branchOp,
   commitAll,
@@ -152,7 +152,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         // lists immediately instead of blanking three sections again.
         writeScmExtras(repoKey, answer)
         return answer
-      }, mode)
+      }, mode, gitReadSettleMs())
       if (extrasKeyRef.current !== repoKey) return
       setListedRepoKey(repoKey)
       setStashes(snapshot.stashes)

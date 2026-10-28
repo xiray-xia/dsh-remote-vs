@@ -55,8 +55,9 @@ interface Flight {
 function withSettleDeadline<T>(read: () => Promise<T>, ms: number): () => Promise<T> {
   return () => {
     const pending = read()
-    // The race below stops observing `pending`; a late rejection would then be
-    // an unhandled one, so it is marked handled here.
+    // `Promise.race` already attaches a handler to both racers, so this is not
+    // what makes the deadline safe; it only keeps the console quiet when the
+    // abandoned read rejects AFTER the deadline already won.
     pending.catch(() => undefined)
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<never>((_, reject) => {

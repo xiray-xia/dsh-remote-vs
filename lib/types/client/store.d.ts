@@ -493,6 +493,22 @@ export declare function stageOptimistic(paths: readonly string[], staged: boolea
  * @param dirPath - the directory row's repo-relative path (with its `/`).
  */
 export declare function toggleUntrackedDir(dirPath: string): Promise<void>;
+/**
+ * Hard settle deadline for ONE queued git read (`scm/read-queue.ts`).
+ *
+ * A read that never settles would keep its key reserved forever: later `join`
+ * calls reuse the dead promise, `fresh` callers wait for it, and the busy flag
+ * stays up — one hung host call would freeze that key for the rest of the page
+ * (the pre-cache code could always re-read, so this is the one regression a
+ * shared flight introduces). The bound is generous on purpose: the status read
+ * issues its probe and then its two loaders SEQUENTIALLY, so twice the configured
+ * git budget plus slack is "stuck", not "slow".
+ *
+ * Exported because the panels own their own queues (SCM side lists, history log)
+ * and must pass the same bound — a queue without one is a permanent lock waiting
+ * for a host hiccup.
+ */
+export declare function gitReadSettleMs(): number;
 /** Open (or focus) a remote file in the editor tab strip. */
 export declare function openFile(fullPath: string, options?: {
     line?: number;

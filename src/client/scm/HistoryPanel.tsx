@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
-import { useExplorer } from '../store.tsx'
+import { gitReadSettleMs, useExplorer } from '../store.tsx'
 import { checkoutCommit, loadCommitFiles } from './actions.ts'
 import { ReadQueue } from './read-queue.ts'
 import { readHistorySnapshot, repoCacheKey, writeHistorySnapshot } from './panel-cache.ts'
@@ -195,7 +195,7 @@ export function HistoryPanel(): ReactNode {
     setLoading(true)
     setError(undefined)
     try {
-      const list = await logReads.run(key, () => api.git.log(alias, repoRoot, GIT_LOG_MAX), mode)
+      const list = await logReads.run(key, () => api.git.log(alias, repoRoot, GIT_LOG_MAX), mode, gitReadSettleMs())
       writeHistorySnapshot(key, { commits: list, at: Date.now() })
       if (loadSeq.current !== ticket) return
       setCommitsKey(key)
