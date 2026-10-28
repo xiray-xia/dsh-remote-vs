@@ -16,6 +16,31 @@ export declare class GitOpError extends Error {
 export declare function joinRemote(dir: string, rel: string): string;
 /** The repository that encloses a workspace directory (undefined when none). */
 export declare function resolveRepoRoot(alias: string, workspaceRoot: string): Promise<string | undefined>;
+/**
+ * The same probe, telling "not a repository" apart from "the probe failed".
+ *
+ * `git rev-parse --show-toplevel` exits non-zero BOTH when the directory is not
+ * inside a work tree and for every way a remote command can fail (host gone,
+ * budget blown, sshd refusing, no answer at all). `resolveRepoRoot` folds the two
+ * into `undefined`, which is right for the workspace wizard — there "unknown" and
+ * "none" both mean "nothing to offer". The SCM panel cannot take that shortcut:
+ * treating a failed probe as "no repository" writes an EMPTY snapshot over the
+ * cached change list and tells the user their workspace has no git repository.
+ * That is exactly the blank state the snapshot cache exists to prevent, so this
+ * variant asks a command that KEEPS the answer (`repoProbeDetailCommand`: exit
+ * code + merged streams, `LC_ALL=C`) and reports the failure to the caller.
+ */
+export type RepoRootProbe = {
+    kind: 'repo';
+    root: string;
+} | {
+    kind: 'none';
+} | {
+    kind: 'failed';
+    error: string;
+};
+/** The repository root, or WHY the probe could not answer. */
+export declare function probeRepoRoot(alias: string, workspaceRoot: string): Promise<RepoRootProbe>;
 /** Repositories under a workspace root (the workspace itself sorts first). */
 export declare function findRepos(alias: string, workspaceRoot: string): Promise<string[]>;
 /** Every changed path plus the ignored half. */

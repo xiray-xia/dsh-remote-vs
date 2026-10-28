@@ -121,6 +121,32 @@ export function repoProbeCommand(workdir: string): string {
   return `${git(workdir)} rev-parse --show-toplevel 2>/dev/null`
 }
 
+/**
+ * Repository probe that keeps the ANSWER (exit code + both streams) on stdout.
+ *
+ * `repoProbeCommand` throws the exit code and stderr away — everything that is
+ * not a root line reads as "nothing". That is fine for the workspace wizard
+ * ("nothing to offer") but not for the SCM panel, where "this is not a
+ * repository" and "git could not answer" are DIFFERENT states: the first is a
+ * fact that may be cached, the second must keep the last known change list and
+ * report the reason. So this command always exits 0 and prints
+ *
+ *     RVS_RC=<git exit code>
+ *     <everything git wrote, stderr merged>
+ *
+ * `LC_ALL=C` pins git's wording (the client matches `not a git repository`; a
+ * localized host would otherwise read as a failure), and merging the streams is
+ * what makes that message survive — git writes it to stderr, which the plain
+ * probe discards.
+ */
+export function repoProbeDetailCommand(workdir: string): string {
+  // `printf` is last in the pipeline, so the exec route sees success and the
+  // caller can read the REAL git exit code out of the first line.
+  return capped(
+    `out=$(LC_ALL=C LANG=C ${git(workdir)} rev-parse --show-toplevel 2>&1); rc=$?; printf 'RVS_RC=%s\\n%s\\n' "$rc" "$out"`,
+  )
+}
+
 /** Discover repositories under a workspace root (depth-capped). */
 export function repoDiscoveryCommand(root: string): string {
   const dir = shQuote(assertRemoteDir(root))
@@ -397,6 +423,40 @@ export function applyPatchCommand(workdir: string, patchPath: string, mode: 'sta
 export function parseRepoRoot(stdout: string): string | undefined {
   const line = stdout.split('\n')[0]?.trim() ?? ''
   return line.startsWith('/') ? line : undefined
+}
+
+/** One strict probe's answer (see `repoProbeDetailCommand`). */
+export type RepoProbeAnswer =
+  | { kind: 'repo'; root: string }
+  | { kind: 'none' }
+  | { kind: 'failed'; error: string }
+
+/**
+ * Parse `repoProbeDetailCommand`'s output into the three states the panel needs.
+ *
+ * "not a git repository" is matched on git's own message rather than on the exit
+ * code: `rev-parse` exits 128 for that AND for a directory it cannot enter, so
+ * the code alone cannot separate the two. The message is guaranteed English by
+ * the command's `LC_ALL=C`.
+ */
+export function parseRepoProbe(stdout: string): RepoProbeAnswer {
+  const marker = /^RVS_RC=(\d+)\n?/.exec(stdout)
+  if (marker === null) return { kind: 'failed', error: 'the repository probe returned no status line' }
+  const code = Number(marker[1])
+  const detail = stdout.slice(marker[0].length).trim()
+  if (code === 0) {
+    // Scan for the root line instead of trusting the first one: a warning
+    // ("ignoring broken ref") may precede it.
+    const root = detail.split('\n').map(line => line.trim()).find(line => line.startsWith('/'))
+    return root === undefined
+      ? { kind: 'failed', error: `git rev-parse printed no repository root: ${detail}` }
+      : { kind: 'repo', root }
+  }
+  if (/not a git repository/i.test(detail)) return { kind: 'none' }
+  return {
+    kind: 'failed',
+    error: detail !== '' ? detail : `git rev-parse --show-toplevel failed [exit code: ${code}]`,
+  }
 }
 
 /** Repository dirs found under a workspace root. */

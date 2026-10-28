@@ -42,6 +42,8 @@ import {
   renameBranchCommand,
   repoDiscoveryCommand,
   repoProbeCommand,
+  repoProbeDetailCommand,
+  parseRepoProbe,
   restoreWorktreeCommand,
   setRemoteUrlCommand,
   stageCommand,
@@ -81,16 +83,21 @@ export function joinRemote(dir: string, rel: string): string {
 const normalTimeoutMs = (): number => gitTimeoutMs()
 const longTimeoutMs = (): number => Math.min(MAX_TIMEOUT_MS, Math.max(DEFAULT_GIT_TIMEOUT_MS, gitTimeoutMs() * 2))
 
+/** The readable error for a failed exec result (`run` and the strict probe share it). */
+function failureOf(result: RemoteExecResult, timeoutMs: number): GitOpError {
+  if (result.timedOut) {
+    return new GitOpError(`git timed out after ${timeoutSeconds(timeoutMs)} — the repository may be large or the host busy; raise gitTimeoutMs in the plugin settings`)
+  }
+  const hint = gitErrorHint(result.stderr) ?? gitErrorHint(result.stdout)
+  const detail = result.stderr.trim() !== '' ? result.stderr.trim() : (result.stdout.trim() !== '' ? result.stdout.trim() : '')
+  return new GitOpError(hint ?? detail ?? result.error ?? `git failed [exit code: ${result.exitCode ?? '?'}]`)
+}
+
 /** Run one command, raising a readable error on a non-zero exit. */
 async function run(alias: string, command: string, timeoutMs = normalTimeoutMs()): Promise<RemoteExecResult> {
   const result = await api.exec(alias, command, timeoutMs)
   if (result.success) return result
-  if (result.timedOut) {
-    throw new GitOpError(`git timed out after ${timeoutSeconds(timeoutMs)} — the repository may be large or the host busy; raise gitTimeoutMs in the plugin settings`)
-  }
-  const hint = gitErrorHint(result.stderr) ?? gitErrorHint(result.stdout)
-  const detail = result.stderr.trim() !== '' ? result.stderr.trim() : (result.stdout.trim() !== '' ? result.stdout.trim() : '')
-  throw new GitOpError(hint ?? detail ?? result.error ?? `git failed [exit code: ${result.exitCode ?? '?'}]`)
+  throw failureOf(result, timeoutMs)
 }
 
 /** Run one command tolerating failure (returns '' instead). */
@@ -109,6 +116,42 @@ async function tryRun(alias: string, command: string, timeoutMs = normalTimeoutM
 export async function resolveRepoRoot(alias: string, workspaceRoot: string): Promise<string | undefined> {
   const out = await tryRun(alias, repoProbeCommand(workspaceRoot), 60_000)
   return parseRepoRoot(out)
+}
+
+/**
+ * The same probe, telling "not a repository" apart from "the probe failed".
+ *
+ * `git rev-parse --show-toplevel` exits non-zero BOTH when the directory is not
+ * inside a work tree and for every way a remote command can fail (host gone,
+ * budget blown, sshd refusing, no answer at all). `resolveRepoRoot` folds the two
+ * into `undefined`, which is right for the workspace wizard — there "unknown" and
+ * "none" both mean "nothing to offer". The SCM panel cannot take that shortcut:
+ * treating a failed probe as "no repository" writes an EMPTY snapshot over the
+ * cached change list and tells the user their workspace has no git repository.
+ * That is exactly the blank state the snapshot cache exists to prevent, so this
+ * variant asks a command that KEEPS the answer (`repoProbeDetailCommand`: exit
+ * code + merged streams, `LC_ALL=C`) and reports the failure to the caller.
+ */
+export type RepoRootProbe =
+  | { kind: 'repo'; root: string }
+  | { kind: 'none' }
+  | { kind: 'failed'; error: string }
+
+/** The repository root, or WHY the probe could not answer. */
+export async function probeRepoRoot(alias: string, workspaceRoot: string): Promise<RepoRootProbe> {
+  let result: RemoteExecResult
+  try {
+    result = await api.exec(alias, repoProbeDetailCommand(workspaceRoot), normalTimeoutMs())
+  } catch (error) {
+    // The transport/route failed before any git exit code existed.
+    return { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
+  }
+  if (!result.success) {
+    // The exec route itself failed (timeout, transport, no answer): the command
+    // never produced its status line, so nothing about the repository is known.
+    return { kind: 'failed', error: failureOf(result, normalTimeoutMs()).message }
+  }
+  return parseRepoProbe(result.stdout)
 }
 
 /** Repositories under a workspace root (the workspace itself sorts first). */

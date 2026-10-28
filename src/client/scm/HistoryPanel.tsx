@@ -137,10 +137,22 @@ function laneColor(lane: number): string {
   return LANE_COLORS[lane % LANE_COLORS.length] as string
 }
 
+/** A stable empty list: the "this repository was never read" fallback. */
+const EMPTY_COMMITS: GitCommit[] = []
+
 export function HistoryPanel(): ReactNode {
   const store = useExplorer()
   const { t, lang, alias, repoRoot } = store
   const [commits, setCommits] = useState<GitCommit[]>([])
+  /**
+   * The repository `commits` belongs to.
+   *
+   * A state update lands one paint AFTER the repository changes, so without this
+   * key the first frame after a switch would still show the PREVIOUS repository's
+   * rows — whose checkout buttons would then point those hashes at the new
+   * repository. The render-time arbitration below (`rows`) closes that frame.
+   */
+  const [commitsKey, setCommitsKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
   const [expanded, setExpanded] = useState<string | undefined>(undefined)
@@ -155,28 +167,38 @@ export function HistoryPanel(): ReactNode {
    */
   const loadSeq = useRef(0)
 
+  const repoKey = alias === '' || repoRoot === undefined ? '' : repoCacheKey(alias, repoRoot)
+  /** The cached log of the repository being shown, when it was read before. */
+  const cachedCommits = useMemo(
+    () => (repoKey === '' ? undefined : readHistorySnapshot(repoKey)?.commits),
+    [repoKey],
+  )
+  /** What THIS frame may show: rows of this repository, or none. */
+  const rows = commitsKey === repoKey ? commits : (cachedCommits ?? EMPTY_COMMITS)
+
   const load = useCallback(async (mode: 'join' | 'fresh' = 'join'): Promise<void> => {
     if (alias === '' || repoRoot === undefined) {
       loadSeq.current += 1
-      setCommits([])
+      setCommitsKey('')
+      setCommits(EMPTY_COMMITS)
       setLoading(false)
       return
     }
-    const repoKey = repoCacheKey(alias, repoRoot)
+    const key = repoCacheKey(alias, repoRoot)
     const ticket = ++loadSeq.current
-    // NEVER leave the previous repository's commits on screen while this
-    // repository's log is being read: the rows carry checkout buttons, which
-    // would then act on the new repository with the old one's hashes. The cache
-    // of THIS repository, when it was read before, is what replaces them at once
-    // (see `panel-cache.ts`) — a switch back is instant instead of a blank tab.
-    const cached = readHistorySnapshot(repoKey)
-    setCommits(cached?.commits ?? [])
+    // The cached log of THIS repository (when it was read before) replaces the
+    // rows at once, so a switch back is instant instead of a blank tab; a
+    // repository never read gets an empty list, never the previous one's.
+    const cached = readHistorySnapshot(key)
+    setCommitsKey(key)
+    setCommits(cached?.commits ?? EMPTY_COMMITS)
     setLoading(true)
     setError(undefined)
     try {
-      const list = await logReads.run(repoKey, () => api.git.log(alias, repoRoot, GIT_LOG_MAX), mode)
-      writeHistorySnapshot(repoKey, { commits: list, at: Date.now() })
+      const list = await logReads.run(key, () => api.git.log(alias, repoRoot, GIT_LOG_MAX), mode)
+      writeHistorySnapshot(key, { commits: list, at: Date.now() })
       if (loadSeq.current !== ticket) return
+      setCommitsKey(key)
       setCommits(list)
     } catch (caught) {
       if (loadSeq.current !== ticket) return
@@ -193,13 +215,13 @@ export function HistoryPanel(): ReactNode {
   }, [load])
 
   const visible = useMemo(() => {
-    if (filter.trim() === '') return commits
+    if (filter.trim() === '') return rows
     const needle = filter.trim().toLowerCase()
-    return commits.filter(commit =>
+    return rows.filter(commit =>
       commit.subject.toLowerCase().includes(needle)
       || commit.author.toLowerCase().includes(needle)
       || commit.hash.startsWith(needle))
-  }, [commits, filter])
+  }, [rows, filter])
 
   const graph = useMemo(() => layoutLanes(visible), [visible])
 
@@ -242,8 +264,8 @@ export function HistoryPanel(): ReactNode {
       </div>
       {error !== undefined && <div className="rvs-banner error">{error}</div>}
       <div className="rvs-scroll">
-        {loading && commits.length === 0 && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
-        {!loading && commits.length === 0 && error === undefined && <div className="rvs-empty">{t('scm.logEmpty')}</div>}
+        {loading && rows.length === 0 && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
+        {!loading && rows.length === 0 && error === undefined && <div className="rvs-empty">{t('scm.logEmpty')}</div>}
         {graph.rows.map((row, index) => {
           const commit = row.commit
           const isOpen = expanded === commit.hash

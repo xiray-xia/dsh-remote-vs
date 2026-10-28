@@ -15,6 +15,25 @@ export declare function assertRemoteName(name: string): string;
 export declare function assertRemoteUrl(url: string): string;
 /** Resolve the enclosing repository root (fails outside a work tree). */
 export declare function repoProbeCommand(workdir: string): string;
+/**
+ * Repository probe that keeps the ANSWER (exit code + both streams) on stdout.
+ *
+ * `repoProbeCommand` throws the exit code and stderr away — everything that is
+ * not a root line reads as "nothing". That is fine for the workspace wizard
+ * ("nothing to offer") but not for the SCM panel, where "this is not a
+ * repository" and "git could not answer" are DIFFERENT states: the first is a
+ * fact that may be cached, the second must keep the last known change list and
+ * report the reason. So this command always exits 0 and prints
+ *
+ *     RVS_RC=<git exit code>
+ *     <everything git wrote, stderr merged>
+ *
+ * `LC_ALL=C` pins git's wording (the client matches `not a git repository`; a
+ * localized host would otherwise read as a failure), and merging the streams is
+ * what makes that message survive — git writes it to stderr, which the plain
+ * probe discards.
+ */
+export declare function repoProbeDetailCommand(workdir: string): string;
 /** Discover repositories under a workspace root (depth-capped). */
 export declare function repoDiscoveryCommand(root: string): string;
 /**
@@ -143,6 +162,25 @@ export declare function initCommand(workdir: string): string;
 export declare function applyPatchCommand(workdir: string, patchPath: string, mode: 'stage' | 'unstage' | 'revert'): string;
 /** Enclosing repository root from `rev-parse --show-toplevel`. */
 export declare function parseRepoRoot(stdout: string): string | undefined;
+/** One strict probe's answer (see `repoProbeDetailCommand`). */
+export type RepoProbeAnswer = {
+    kind: 'repo';
+    root: string;
+} | {
+    kind: 'none';
+} | {
+    kind: 'failed';
+    error: string;
+};
+/**
+ * Parse `repoProbeDetailCommand`'s output into the three states the panel needs.
+ *
+ * "not a git repository" is matched on git's own message rather than on the exit
+ * code: `rev-parse` exits 128 for that AND for a directory it cannot enter, so
+ * the code alone cannot separate the two. The message is guaranteed English by
+ * the command's `LC_ALL=C`.
+ */
+export declare function parseRepoProbe(stdout: string): RepoProbeAnswer;
 /** Repository dirs found under a workspace root. */
 export declare function parseRepoDiscovery(stdout: string): string[];
 /**

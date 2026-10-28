@@ -39,6 +39,38 @@ interface Flight {
   promise: Promise<unknown>
 }
 
+/**
+ * Bound a read by a hard settle deadline.
+ *
+ * A remote call can hang without ever settling — a stuck SSH round trip, and the
+ * change ledger has measured exactly that on a monorepo. Without a bound, the
+ * flight would stay registered forever: every later `join` would reuse the dead
+ * promise, every `fresh` would wait for it, and the owner's busy flag would stay
+ * up, so ONE hung host call would freeze that key for the rest of the page (the
+ * pre-cache code never locked up: each refresh was independent and could fail on
+ * its own). The deadline rejects the FLIGHT — releasing the key — while the
+ * caller's failure handler owns the message; the underlying read may still
+ * complete later, and nothing it paints was waiting on it.
+ */
+function withSettleDeadline<T>(read: () => Promise<T>, ms: number): () => Promise<T> {
+  return () => {
+    const pending = read()
+    // The race below stops observing `pending`; a late rejection would then be
+    // an unhandled one, so it is marked handled here.
+    pending.catch(() => undefined)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`reading did not settle within ${Math.round(ms / 1000)}s — the host call may be stuck`))
+      }, ms)
+      timer.unref?.()
+    })
+    return Promise.race([pending, deadline]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer)
+    })
+  }
+}
+
 export class ReadQueue {
   /** In-flight reads by key (insertion order is irrelevant here). */
   private readonly flights = new Map<string, Flight>()
@@ -68,12 +100,16 @@ export class ReadQueue {
    * `read` must be equivalent for every caller that passes the same key — the
    * queue keeps only the FIRST caller's closure, because a joined read cannot
    * carry a second closure.
+   *
+   * @param settleMs - hard settle deadline for a read THIS call starts (`0` =
+   *   unbounded). A joined read keeps the deadline it was started with: its
+   *   caller already decided how long that read may take.
    */
-  run<T>(key: string, read: () => Promise<T>, mode: ReadMode = 'join'): Promise<T> {
+  run<T>(key: string, read: () => Promise<T>, mode: ReadMode = 'join', settleMs = 0): Promise<T> {
     const current = this.flights.get(key)
-    if (current === undefined) return this.start(key, read)
+    if (current === undefined) return this.start(key, read, settleMs)
     if (mode === 'join') return current.promise as Promise<T>
-    return this.after(current, key, read)
+    return this.after(current, key, read, settleMs)
   }
 
   /**
@@ -85,22 +121,23 @@ export class ReadQueue {
    * caller instead finds a flight whose id is newer than the one it waited on —
    * a read that started after its own call — and shares it.
    */
-  private async after<T>(flight: Flight, key: string, read: () => Promise<T>): Promise<T> {
+  private async after<T>(flight: Flight, key: string, read: () => Promise<T>, settleMs: number): Promise<T> {
     await flight.promise.catch(() => undefined)
     const current = this.flights.get(key)
     if (current !== undefined && current.id > flight.id) return current.promise as Promise<T>
-    return this.start(key, read)
+    return this.start(key, read, settleMs)
   }
 
   /** Register a flight and run `read`; a synchronous throw becomes a rejection. */
-  private start<T>(key: string, read: () => Promise<T>): Promise<T> {
+  private start<T>(key: string, read: () => Promise<T>, settleMs: number): Promise<T> {
     const id = ++this.nextId
     // A deferred callback keeps two guarantees: a synchronous throw from `read`
     // is reported as a rejection (callers all await), and the flight is
     // registered BEFORE the read runs, so a second call in the same tick joins
     // it instead of starting a duplicate.
+    const body = settleMs > 0 ? withSettleDeadline(read, settleMs) : read
     const promise: Promise<T> = Promise.resolve()
-      .then(read)
+      .then(body)
       .finally(() => {
         const current = this.flights.get(key)
         if (current !== undefined && current.id === id) this.flights.delete(key)

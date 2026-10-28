@@ -53,8 +53,12 @@ export declare class ReadQueue {
      * `read` must be equivalent for every caller that passes the same key — the
      * queue keeps only the FIRST caller's closure, because a joined read cannot
      * carry a second closure.
+     *
+     * @param settleMs - hard settle deadline for a read THIS call starts (`0` =
+     *   unbounded). A joined read keeps the deadline it was started with: its
+     *   caller already decided how long that read may take.
      */
-    run<T>(key: string, read: () => Promise<T>, mode?: ReadMode): Promise<T>;
+    run<T>(key: string, read: () => Promise<T>, mode?: ReadMode, settleMs?: number): Promise<T>;
     /**
      * `fresh` while a read is in flight: wait for it, then read once more.
      *

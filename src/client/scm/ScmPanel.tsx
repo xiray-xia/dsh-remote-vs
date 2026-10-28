@@ -68,6 +68,11 @@ const MSG_KEY = 'dsh-remote-vs.commitMsg'
  */
 const extrasReads = new ReadQueue()
 
+/** Stable empty lists: "this repository's side lists are not loaded (yet)". */
+const NO_STASHES: GitStash[] = []
+const NO_BRANCHES: GitBranch[] = []
+const NO_REMOTES: GitRemote[] = []
+
 function messageOf(error: unknown): string {
   return error instanceof GitOpError || error instanceof Error ? error.message : String(error)
 }
@@ -87,6 +92,15 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const [stashes, setStashes] = useState<GitStash[]>([])
   const [branches, setBranches] = useState<GitBranch[]>([])
   const [remotes, setRemotes] = useState<GitRemote[]>([])
+  /**
+   * The repository the three lists above belong to (`repoCacheKey`).
+   *
+   * The setState that adopts a repository's lists lands one paint AFTER the
+   * switch, so a render-time merge (see `extras` below) is what keeps the
+   * PREVIOUS repository's stash rows off the screen — their buttons act through
+   * the CURRENT `repoRoot`, i.e. on the wrong repository.
+   */
+  const [listedRepoKey, setListedRepoKey] = useState('')
   const [branchOpen, setBranchOpen] = useState(false)
   const [remoteOpen, setRemoteOpen] = useState(false)
   const [newBranch, setNewBranch] = useState('')
@@ -118,9 +132,10 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const loadExtras = useCallback(async (mode: 'join' | 'fresh' = 'join'): Promise<void> => {
     if (alias === '' || repoRoot === undefined) {
       extrasKeyRef.current = ''
-      setStashes([])
-      setBranches([])
-      setRemotes([])
+      setListedRepoKey('')
+      setStashes(NO_STASHES)
+      setBranches(NO_BRANCHES)
+      setRemotes(NO_REMOTES)
       return
     }
     const repoKey = repoCacheKey(alias, repoRoot)
@@ -139,6 +154,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         return answer
       }, mode)
       if (extrasKeyRef.current !== repoKey) return
+      setListedRepoKey(repoKey)
       setStashes(snapshot.stashes)
       setBranches(snapshot.branches)
       setRemotes(snapshot.remotes)
@@ -171,12 +187,33 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     // git commands run (see `scm/panel-cache.ts`).
     const cached = repoKey === '' ? undefined : readScmExtras(repoKey)
     if (cached !== undefined) {
+      setListedRepoKey(repoKey)
       setStashes(cached.stashes)
       setBranches(cached.branches)
       setRemotes(cached.remotes)
     }
     void loadExtras('join')
   }, [extrasKey, loadExtras, props.visible, alias, repoRoot])
+
+  /** The repository the panel is showing the side lists of. */
+  const extrasRepoKey = repoRoot === undefined ? '' : repoCacheKey(alias, repoRoot)
+  /** Its cached lists, when it was read before (stable across paints). */
+  const cachedExtras = useMemo(
+    () => (extrasRepoKey === '' ? undefined : readScmExtras(extrasRepoKey)),
+    [extrasRepoKey],
+  )
+  /**
+   * What THIS frame may show.
+   *
+   * A setState adopting a repository's lists lands one paint after the switch, so
+   * the merge is what stops the PREVIOUS repository's stash/branch rows (whose
+   * buttons run against the CURRENT `repoRoot`) from ever appearing under the
+   * new repository. This repository's cache, when present, fills that frame;
+   * otherwise the sections are simply empty until its own read adopts them.
+   */
+  const extras = listedRepoKey === extrasRepoKey
+    ? { stashes, branches, remotes }
+    : (cachedExtras ?? { stashes: NO_STASHES, branches: NO_BRANCHES, remotes: NO_REMOTES })
 
   const refreshAll = useCallback(async (): Promise<void> => {
     // The ⟳ / post-verb refresh must describe the state as of NOW: `afterWrite`
@@ -706,7 +743,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
             {section(
               'stash',
               t('scm.stashes'),
-              stashes.length,
+              extras.stashes.length,
               <>
                 <IconButton title={t('scm.stashSave')} disabled={busy !== undefined} onClick={() => { void saveStash() }}>
                   <IconPlus size={13} />
@@ -715,11 +752,11 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                   <IconRefresh size={13} />
                 </IconButton>
               </>,
-              () => (stashes.length === 0
+              () => (extras.stashes.length === 0
                 ? <div className="rvs-empty">{t('scm.noStash')}</div>
                 : (
                   <div>
-                    {stashes.map(item => (
+                    {extras.stashes.map(item => (
                       <div key={item.ref} className="rvs-scm-item" style={{ cursor: 'default' }} title={`${item.ref}  ${fullTime(item.date)}`}>
                         <span className="rvs-node-icon"><IconCheck size={13} /></span>
                         <span className="rvs-scm-path">{item.message === '' ? item.ref : item.message}</span>
@@ -809,7 +846,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                       </button>
                     </div>
                     <div style={{ marginTop: 6, maxHeight: 200, overflow: 'auto' }}>
-                      {branches.map(branch => (
+                      {extras.branches.map(branch => (
                         <div key={branch.name} className="rvs-scm-item" style={{ cursor: 'default', paddingLeft: 4 }} title={branch.short}>
                           <span className="rvs-node-icon">{branch.head ? '➤' : ''}</span>
                           <span className="rvs-scm-path">
@@ -894,7 +931,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                       <span className="rvs-einfo-spacer" />
                       <IconButton title={t('common.close')} onClick={() => setRemoteOpen(false)}><IconClose size={11} /></IconButton>
                     </div>
-                    {remotes.map(remote => (
+                    {extras.remotes.map(remote => (
                       <div key={`${remote.name}:${remote.kind}`} className="rvs-scm-item" style={{ cursor: 'default', paddingLeft: 4 }}>
                         <span className="rvs-scm-path" title={remote.url}>{remote.name} <span className="rvs-scm-dir">{remote.kind}</span></span>
                         {remote.kind === 'fetch' && (

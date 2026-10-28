@@ -29,7 +29,7 @@ import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
 import { changeSetFromHunks } from './changes/model.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, optimisticStageDetail, type ChangeEntry, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
-import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeStatusDir, probeStatusPaths, resolveRepoRoot, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
+import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeRepoRoot, probeStatusDir, probeStatusPaths, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
 import { StageCoordinator } from './scm/stage-queue.ts'
 import { collapseDir, dropExpandedRows, expandDir, pruneDirExpansions, type DirExpansions } from './scm/untracked-dirs.ts'
 import { ReadQueue } from './scm/read-queue.ts'
@@ -813,7 +813,11 @@ export function refreshAll(): void {
       })
       // A snapshot of a workspace the table no longer holds must never be
       // handed to another one: its change list names paths of a foreign tree.
-      retainGitSnapshots(new Set(payload.workspaces.map(item => item.id)))
+      const bindingIds = new Set(payload.workspaces.map(item => item.id))
+      retainGitSnapshots(bindingIds)
+      for (const id of [...latestGitRead.keys()]) {
+        if (!bindingIds.has(id)) latestGitRead.delete(id)
+      }
       // The selection can resolve ELSEWHERE after the table changed (a deleted
       // workspace falls back to the first entry). That is a switch like any
       // other, and its cached slice is what keeps the panel from "Loading…".
@@ -1242,7 +1246,24 @@ export async function refreshGit(mode: 'join' | 'fresh' = 'fresh'): Promise<void
   if (workspace === undefined) return
   const subdir = state.repoSubdir
   const cacheKey = gitCacheKey(key, subdir)
-  await gitReads.run(cacheKey, () => readGit(key, subdir, cacheKey), mode)
+  // Outer bound for ONE read: the probe and the two loaders each have the
+  // configured git budget (`withDeadline`), so a read needing more than twice
+  // that plus slack is not slow, it is stuck. Releasing the key here is what
+  // stops one hung host call from freezing every later refresh of this
+  // workspace — the queue would otherwise keep handing out its pending flight
+  // (see `scm/read-queue.ts`).
+  const settleMs = gitDeadlineMs() * 2 + 30_000
+  try {
+    await gitReads.run(cacheKey, () => readGit(key, subdir, cacheKey), mode, settleMs)
+  } catch (error) {
+    // Only the settle deadline (or a throw before the read's own try) lands
+    // here: `readGit` handles read failures itself.
+    if (activeBinding().key !== key) return
+    patch({
+      gitError: error instanceof Error ? error.message : String(error),
+      gitCached: state.repoRoot !== undefined,
+    })
+  }
 }
 
 /**
@@ -1260,8 +1281,15 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
   const stageAt = stageSeq
   try {
     const workdir = repoWorkdir(workspace.remotePath, subdir)
-    const root = await resolveRepoRoot(workspace.alias, workdir)
-    if (root === undefined) {
+    // The strict probe (see `probeRepoRoot`): "not a repository" is a fact,
+    // while a failed probe must NOT be mistaken for one — writing an empty
+    // snapshot there would destroy the cached list and show the "no repository"
+    // hint, which is the very blank state the cache exists to prevent.
+    // `withDeadline` covers the host that never answers at all; the probe itself
+    // reports transport failures.
+    const probe = await withDeadline(probeRepoRoot(workspace.alias, workdir), gitDeadlineMs(), t('editor.readTimeout'))
+    if (probe.kind === 'failed') throw new Error(probe.error)
+    if (probe.kind === 'none') {
       const snapshot: GitSnapshot = {
         repoRoot: undefined,
         repoSubdir: subdir,
@@ -1275,6 +1303,7 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
       paintGit(bindingId, ticket, snapshot)
       return
     }
+    const root = probe.root
     const [detail, head] = await Promise.all([
       withDeadline(loadStatusDetail(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
       withDeadline(loadHead(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
@@ -1360,6 +1389,37 @@ export function scmTarget(): { alias: string; root: string } | undefined {
   const workspace = currentWorkspace()
   if (workspace === undefined || state.repoRoot === undefined) return undefined
   return { alias: workspace.alias, root: state.repoRoot }
+}
+
+/**
+ * Read-only view of the git slice, for callers that do not render.
+ *
+ * The UI reads the same values through `useExplorer()`; this getter exists for
+ * the local gates, which drive this module in node with nothing mounted (they
+ * need to observe the switch, the cached flag and what a failed read left
+ * behind). It hands out primitives only, so no caller can mutate the store
+ * through it.
+ */
+export function gitState(): {
+  workspaceId: string
+  repoRoot: string | undefined
+  repoSubdir: string
+  changes: number
+  gitBusy: boolean
+  gitCached: boolean
+  gitError: string | undefined
+  repoMissing: boolean
+} {
+  return {
+    workspaceId: activeBinding().key,
+    repoRoot: state.repoRoot,
+    repoSubdir: state.repoSubdir,
+    changes: state.status?.entries.length ?? 0,
+    gitBusy: state.gitBusy,
+    gitCached: state.gitCached,
+    gitError: state.gitError,
+    repoMissing: state.repoMissing,
+  }
 }
 
 /**

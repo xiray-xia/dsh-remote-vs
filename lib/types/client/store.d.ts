@@ -432,6 +432,25 @@ export declare function scmTarget(): {
     root: string;
 } | undefined;
 /**
+ * Read-only view of the git slice, for callers that do not render.
+ *
+ * The UI reads the same values through `useExplorer()`; this getter exists for
+ * the local gates, which drive this module in node with nothing mounted (they
+ * need to observe the switch, the cached flag and what a failed read left
+ * behind). It hands out primitives only, so no caller can mutate the store
+ * through it.
+ */
+export declare function gitState(): {
+    workspaceId: string;
+    repoRoot: string | undefined;
+    repoSubdir: string;
+    changes: number;
+    gitBusy: boolean;
+    gitCached: boolean;
+    gitError: string | undefined;
+    repoMissing: boolean;
+};
+/**
  * Move paths between the index and the worktree halves of the LOCAL status
  * model — the optimistic update, its rollback, and the correction the probe
  * asks for all land here.
