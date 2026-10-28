@@ -350,7 +350,8 @@ const state: State = {
   error: undefined,
   hosts: [],
   workspaces: [],
-  routing: { mode: 'off', aliasPaths: {}, tombstones: [] },
+  // Pre-bootstrap placeholder: same default as the plugin config (nforce).
+  routing: { mode: 'enforce', aliasPaths: {}, tombstones: [] },
   workspaceId: readWorkspaceId(),
   status: undefined,
   head: undefined,

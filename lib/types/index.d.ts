@@ -39,6 +39,11 @@ export interface Config {
     /**
      * P2 transparent-routing kill-switch: off = pure local passthrough;
      * shadow = log remote decisions but execute locally; enforce = route.
+     *
+     * The DEFAULT is `enforce`: the plugin exists to execute remote workspaces
+     * remotely, and a fresh profile that silently kept executing locally was the
+     * most common "why is nothing remote" report. `off`/`shadow` stay available as
+     * explicit opt-outs for debugging and for hosts that must stay local.
      */
     routingMode?: RoutingMode;
     /** Per-command timeout for git work on a remote host (ms). */

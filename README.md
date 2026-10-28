@@ -267,7 +267,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 
 - 别名目录：`$DSH_HOME/remote-ssh/aliases/<id>`（空壳，只做路由键），自动注册进原生工作区列表，标题 `<server> > <base>`
 - 路由开关（设置 → 远程主机页顶部下拉；底层是 profile patch `- id: remote-vs` 下 `config.routingMode`，volatile，免重启）：
-  `off`（默认，直通本地）/ `shadow`（记日志仍走本地）/ `enforce`（真路由）
+  默认 `enforce`（真路由）；可切 `off`（纯直通本地）/ `shadow`（记日志仍走本地）作为排障开关
 - 新建工作区：原生"添加工作区…"入口已接管（本地/远端双 tab；远端腿=主机→推送→绑定向导）
 - 预设：`Remote` 预设（bash 工具集）；enforce 下远端新会话自动切过去（默认预设才切，不践踏显式选择）
 - 顶层真相（实测结论，非假设）：

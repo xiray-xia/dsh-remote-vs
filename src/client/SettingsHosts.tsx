@@ -22,7 +22,8 @@ import { Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
 export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNode {
   const [t] = useState(() => makeT(detectLang()))
   const [hosts, setHosts] = useState<RemoteHostSummary[]>([])
-  const [mode, setMode] = useState<'off' | 'shadow' | 'enforce'>('off')
+  /** Pre-load placeholder; matches the plugin's default (nforce) until the host answers. */
+  const [mode, setMode] = useState<'off' | 'shadow' | 'enforce'>('enforce')
   const [version, setVersion] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)

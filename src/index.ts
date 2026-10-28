@@ -69,6 +69,11 @@ export interface Config {
   /**
    * P2 transparent-routing kill-switch: off = pure local passthrough;
    * shadow = log remote decisions but execute locally; enforce = route.
+   *
+   * The DEFAULT is `enforce`: the plugin exists to execute remote workspaces
+   * remotely, and a fresh profile that silently kept executing locally was the
+   * most common "why is nothing remote" report. `off`/`shadow` stay available as
+   * explicit opt-outs for debugging and for hosts that must stay local.
    */
   routingMode?: RoutingMode
   /** Per-command timeout for git work on a remote host (ms). */
@@ -107,7 +112,7 @@ export interface ResolvedConfig {
 export const Config = z.object({
   announceToAgent: z.boolean().default(false).volatile(),
   enabled: z.boolean().default(true).volatile(),
-  routingMode: z.union(['off', 'shadow', 'enforce'] as const).default('off').volatile(),
+  routingMode: z.union(['off', 'shadow', 'enforce'] as const).default('enforce').volatile(),
   gitTimeoutMs: z.number().step(1).min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS)
     .default(DEFAULT_GIT_TIMEOUT_MS).volatile(),
   readTimeoutMs: z.number().step(1).min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS)
@@ -171,7 +176,10 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   const worlds = new RemoteWorlds(ctx, {
     store,
     pool,
-    mode: () => readField(config?.routingMode, 'off' as RoutingMode),
+    // Keep the runtime fallback equal to the schema default: a Host that hands
+    // the plugin a config object without this field must behave like a fresh
+    // profile, not like the old opt-in (`off`) behaviour.
+    mode: () => readField(config?.routingMode, 'enforce' as RoutingMode),
   })
   ctx.provide('remoteWorlds', worlds)
   ctx.effect(() => () => { pool.dispose() }, 'dsh-remote-vs: pool')
