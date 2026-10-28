@@ -45,6 +45,29 @@ export function stepHistoryTab(current: HistoryTab, key: string): HistoryTab | u
   return undefined
 }
 
+/** The state the 差异 tab's lazy read keeps for one commit. */
+export interface PatchLoadState {
+  key: string
+  text?: string
+  truncated?: boolean
+  error?: string
+}
+
+/**
+ * Whether the 差异 tab still has to read the patch for `key`.
+ *
+ * The subtle case is a SUPERSEDED read: switching the tab or the commit while
+ * a read is in flight used to leave the key marker behind with no data, and an
+ * equality-only guard (`state.key === key`) then treated that marker as
+ * "already loaded" forever — the reported "点击文件后差异一直说没有改动" bug.
+ * A marker without text/error therefore means RETRY, never "done".
+ */
+export function needsPatchLoad(state: PatchLoadState, key: string, tab: HistoryTab): boolean {
+  if (tab !== 'diff' || key === '') return false
+  if (state.key !== key) return true
+  return state.text === undefined && state.error === undefined
+}
+
 /** One rendered patch line. */
 export interface PatchRow {
   kind: 'context' | 'add' | 'del' | 'skip'

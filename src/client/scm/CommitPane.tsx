@@ -519,10 +519,16 @@ function diffBody(
     )
   }
   if (props.patch === undefined) {
-    // Not requested yet (the tab is not on screen) vs. requested but in flight:
-    // only the second one has anything to wait for.
-    if (!props.patchLoading) return null
-    return <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>
+    // A read in flight says so; a marker left by a superseded read is NOT a
+    // finished patch (the reported empty-diff bug), so it offers a retry
+    // instead of the silent blank the old branch rendered.
+    if (props.patchLoading) return <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>
+    return (
+      <>
+        <div className="rvs-empty">{t('history.patchNotLoaded')}</div>
+        <button type="button" className="rvs-chip" onClick={props.onReload}>{t('history.reload')}</button>
+      </>
+    )
   }
   if (model.files.length === 0) return <div className="rvs-empty">{t('history.noTextDiff')}</div>
   return (

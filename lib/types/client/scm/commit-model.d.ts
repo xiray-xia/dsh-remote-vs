@@ -10,6 +10,23 @@ export declare function isHistoryTab(value: unknown): value is HistoryTab;
  * means "not a navigation key" and the caller leaves the event alone.
  */
 export declare function stepHistoryTab(current: HistoryTab, key: string): HistoryTab | undefined;
+/** The state the 差异 tab's lazy read keeps for one commit. */
+export interface PatchLoadState {
+    key: string;
+    text?: string;
+    truncated?: boolean;
+    error?: string;
+}
+/**
+ * Whether the 差异 tab still has to read the patch for `key`.
+ *
+ * The subtle case is a SUPERSEDED read: switching the tab or the commit while
+ * a read is in flight used to leave the key marker behind with no data, and an
+ * equality-only guard (`state.key === key`) then treated that marker as
+ * "already loaded" forever — the reported "点击文件后差异一直说没有改动" bug.
+ * A marker without text/error therefore means RETRY, never "done".
+ */
+export declare function needsPatchLoad(state: PatchLoadState, key: string, tab: HistoryTab): boolean;
 /** One rendered patch line. */
 export interface PatchRow {
     kind: 'context' | 'add' | 'del' | 'skip';

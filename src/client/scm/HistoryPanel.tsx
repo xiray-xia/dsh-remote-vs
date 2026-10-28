@@ -28,7 +28,7 @@ import { api } from '../api.ts'
 import { gitReadSettleMs, useExplorer } from '../store.tsx'
 import { checkoutCommit, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
 import { CommitPane } from './CommitPane.tsx'
-import { isHistoryTab, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
+import { isHistoryTab, needsPatchLoad, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
 import { ReadQueue } from './read-queue.ts'
 import { readHistorySnapshot, repoCacheKey, writeHistorySnapshot } from './panel-cache.ts'
 import {
@@ -225,6 +225,12 @@ export function HistoryPanel(): ReactNode {
   const [detail, setDetail] = useState<CommitDetail>({ key: '', body: '' })
   const [patchState, setPatchState] = useState<CommitPatchState>({ key: '' })
   const [reloadSeq, setReloadSeq] = useState(0)
+  /** The patch read for `detailKey` (a ref: it must not re-render on its own). */
+  const patchFlight = useRef<string | undefined>(undefined)
+  /** Monotonic ticket: only the LATEST read may paint (older ones only cache). */
+  const patchTicket = useRef(0)
+  /** Bumped after every patch settle so the lazy effect re-evaluates once. */
+  const [patchTick, setPatchTick] = useState(0)
   const head = store.head?.branch ?? ''
   /**
    * Ticket for the log request. The panel stays mounted across binding
@@ -332,29 +338,43 @@ export function HistoryPanel(): ReactNode {
 
   // The patch is read only while 差异 is on screen, and cached per commit: a
   // reader of 提交详情 never pays a `git show --patch` round trip.
+  //
+  // `needsPatchLoad` (not `patchState.key === detailKey`) is the guard: a
+  // superseded read used to leave the key marker WITHOUT data, and the old
+  // equality check then treated that marker as "loaded" forever — the diff
+  // stayed empty with "这个提交没有改动文件" after any quick tab/commit flip.
+  // A request ticket (not a cleanup-cancelled promise) is what lets a read that
+  // finishes after the tab moved on still fill the cache, while a superseded
+  // selection can never paint its answer.
   useEffect(() => {
-    if (tabChoice.id !== 'diff' || detailKey === '' || selectedCommit === undefined || alias === '' || repoRoot === undefined) return
-    if (patchState.key === detailKey) return
+    if (selectedCommit === undefined || alias === '' || repoRoot === undefined) return
+    if (!needsPatchLoad(patchState, detailKey, tabChoice.id)) return
     const cached = patchCache.current.get(detailKey)
     if (cached !== undefined) {
       setPatchState({ key: detailKey, text: cached })
       return
     }
-    let cancelled = false
+    if (patchFlight.current === detailKey) return
+    const ticket = ++patchTicket.current
+    patchFlight.current = detailKey
     setPatchState({ key: detailKey })
     void (async () => {
       try {
         const result = await loadCommitPatch(alias, repoRoot, selectedCommit.hash)
-        if (cancelled) return
         cacheSet(patchCache.current, detailKey, result.text, 4)
+        if (patchTicket.current !== ticket) return
         setPatchState({ key: detailKey, text: result.text, truncated: result.truncated })
       } catch (caught) {
-        if (cancelled) return
+        if (patchTicket.current !== ticket) return
         setPatchState({ key: detailKey, error: errorText(caught) })
+      } finally {
+        if (patchFlight.current === detailKey) patchFlight.current = undefined
+        // Re-arm the effect after every settle: a superseded run must not leave
+        // the CURRENT view on an empty marker with nothing scheduled.
+        setPatchTick(value => value + 1)
       }
     })()
-    return () => { cancelled = true }
-  }, [tabChoice.id, detailKey, alias, repoRoot, selectedCommit, patchState.key, reloadSeq])
+  }, [tabChoice.id, detailKey, alias, repoRoot, selectedCommit, patchState, reloadSeq, patchTick])
 
   const visible = useMemo(() => {
     if (filter.trim() === '') return rows
@@ -647,7 +667,8 @@ export function HistoryPanel(): ReactNode {
                 filesError={detail.key === detailKey ? detail.filesError : undefined}
                 patch={patchState.key === detailKey ? patchState.text : undefined}
                 patchTruncated={patchState.key === detailKey && patchState.truncated === true}
-                patchLoading={tabChoice.id === 'diff' && patchState.key !== detailKey}
+                patchLoading={tabChoice.id === 'diff'
+                  && (patchState.key !== detailKey || (patchState.text === undefined && patchState.error === undefined))}
                 patchError={patchState.key === detailKey ? patchState.error : undefined}
                 focusPath={focusPath}
                 onFocusPath={focusCommitFile}
