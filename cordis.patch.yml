@@ -54,7 +54,7 @@
       inject: [localFileReferences, remoteWorlds]
 
     # Remote agent preset, bound to this bundle's lifecycle.
-    # Mirrored from preset-standard @ dsh 0.2.1-alpha.3 with these diffs:
+    # Mirrored from preset-standard @ dsh 0.2.2-alpha.2 with these diffs:
     #   1. persona prefix reframed for remote SSH work (transparent routing);
     #   2. tool-bash moved into an isolated shell group with our routed bash
     #      executor (stock root shell stays pwsh on Windows);
@@ -67,6 +67,12 @@
     # preset) right after `tool-plugin-manager` — mirrored here for the same
     # reason as above: a row missing from the mirror is a preset that silently
     # loads a different toolset than stock.
+    # 0.2.2-alpha.2 note: stock dropped `tool-subagent-list-agents` (the
+    # `dsh-tool-subagent-control/list-agents` subpath is gone from the package),
+    # renamed `modelSelectionSettings` to `modelSelection` + `modelDiscovery`,
+    # and made the plugin-manager row conditional on `profileContext`. All
+    # three are mirrored here: the first one is a hard module-resolution error,
+    # the other two are schema drift.
     - id: preset-remote
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -207,14 +213,13 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
-              - id: tool-subagent-list-agents
-                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
                   provider: spawn
                   toolName: subagent
-                  modelSelectionSettings: true
+                  modelSelection: true
+                  modelDiscovery: true
               - id: tool-subagent-fork
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
@@ -241,7 +246,7 @@
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
             name: '@deepseek-ai/dsh-plugin-manager/tools'
-            disabled: true
+            disabled: !!js "!ctx.get('profileContext')"
           - id: tool-plugin-market
             name: '@deepseek-ai/dsh-plugin-market/tools'
             disabled: true

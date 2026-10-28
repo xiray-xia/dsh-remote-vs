@@ -37,8 +37,9 @@ dsh plugin --profile web add dsh-remote-vs
 (From npm, recommended; installing straight from the repository also works:
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
-Requires DSH `0.2.1-alpha.3` or newer (`engines.dsh` enforces the range; **the tested
-baseline is `0.2.1-rc.2`**). `--profile web` selects which profile to install into —
+Requires DSH `0.2.2-alpha.2` or newer (`engines.dsh` enforces the range; **the tested
+baseline is `0.2.2-alpha.2`**). Older Hosts (`0.2.1-rc.2` generation) need plugin `0.9.3`: the
+Remote preset of this version uses the `0.2.2-alpha.2` tool schema. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name).
 
@@ -319,7 +320,7 @@ over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one H
 Upstream never published helper binaries (all Release assets are empty), so this plugin builds its own:
 
 - Build machine: WSL2 Ubuntu-22.04 (glibc 2.35, matching the remote targets), Node v24.21.0 + pnpm 11.28.5
-- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — it is still 2, so a Host upgrade to alpha.4 or alpha.5 does not require a rebuild)
+- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — our protocol is still **2**, so a Host upgrade to `0.2.2-alpha.2` needs no rebuild either: the plugin intentionally stays on `dsh-ssh@0.2.1-rc.2`, and the new generation's protocol 3 is deliberately not followed — see §2.26 of the maintenance notes)
 - Command: stock script `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
 - Only deviation: no docker for the manylinux 2.28 rebuild, so a `DSH_GLIBC_CEILING`
   env override was added (default stays 2.28); this build targets 2.35 (see `glibc-ceiling.patch` in the cache dir)

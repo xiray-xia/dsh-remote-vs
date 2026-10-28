@@ -95,7 +95,11 @@ interface InputSnapshot {
     draft: string;
     draftRev?: number;
     occurrences?: readonly OccurrenceLike[];
-    phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting';
+    /**
+     * Host submission plane. `sending` exists since DSH 0.2.2-alpha.2: an ordinary
+     * message the host has not accepted yet — the editor is read-only there too.
+     */
+    phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting' | 'sending';
     claim?: {
         readonly token: string;
     };

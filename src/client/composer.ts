@@ -100,7 +100,11 @@ interface InputSnapshot {
   draft: string
   draftRev?: number
   occurrences?: readonly OccurrenceLike[]
-  phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
+  /**
+   * Host submission plane. `sending` exists since DSH 0.2.2-alpha.2: an ordinary
+   * message the host has not accepted yet — the editor is read-only there too.
+   */
+  phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting' | 'sending'
   claim?: { readonly token: string }
 }
 
@@ -295,7 +299,7 @@ export function insertDraftReference(
     const { actx, input } = resolved
     const snapshot = input.state.getSnapshot()
     if (input.insertReference === undefined || snapshot.draftRev === undefined) return false
-    if (snapshot.phase === 'adjudicating' || snapshot.phase === 'submitting') return false
+    if (snapshot.phase === 'adjudicating' || snapshot.phase === 'submitting' || snapshot.phase === 'sending') return false
     before = snapshot.draftRev
     const at = appendOffset(snapshot)
     if (at === undefined) return false
@@ -346,6 +350,11 @@ export function appendToDraft(ctx: Context, sessionId: string, text: string): bo
     const { actx, input } = resolved
     const snapshot = input.state.getSnapshot()
     const draft = snapshot.draft
+    // The host makes the editor read-only on every submission plane: a slash
+    // command being checked, a claimed command running, and (since DSH
+    // 0.2.2-alpha.2) an ordinary message waiting for the host to accept it.
+    // Writing there would either be refused or land after the send snapshot.
+    if (snapshot.phase === 'adjudicating' || snapshot.phase === 'submitting' || snapshot.phase === 'sending') return false
     if ((snapshot.occurrences ?? []).length > 0 || snapshot.phase === 'claimed') {
       const at = appendOffset(snapshot)
       if (snapshot.draftRev === undefined || at === undefined) {

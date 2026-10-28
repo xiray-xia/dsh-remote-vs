@@ -34,7 +34,8 @@ dsh plugin --profile web add dsh-remote-vs
 
 （从 npm 装，推荐；也可以直接跟仓库装：`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`。）
 
-要求 DSH `0.2.1-alpha.3` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.1-rc.2`**）。
+要求 DSH `0.2.2-alpha.2` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.2-alpha.2`**）。
+旧 Host（`0.2.1-rc.2` 一代）请用插件 `0.9.3`：新版的 Remote 预设用了 `0.2.2-alpha.2` 的工具 schema。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
 必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。
 
@@ -284,7 +285,9 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 官方从未发布 helper 二进制（Release assets 全空），本插件走自编译：
 
 - 构建机：WSL2 Ubuntu-22.04（glibc 2.35，与目标远端一致），Node v24.21.0 + pnpm 11.28.5
-- 源码：`dsh-v0.2.1-alpha.2` tag（**构建基线**：对齐的是 wire 协议号，不是 Host 版本号 —— 协议号至今仍是 2，故 Host 升到 alpha.4 / alpha.5 都无需重编）
+- 源码：`dsh-v0.2.1-alpha.2` tag（**构建基线**：对齐的是 wire 协议号，不是 Host 版本号 —— 我们用到的
+  协议号仍是 **2**，Host 升到 `0.2.2-alpha.2` 也不需要重编：插件自行停在 `dsh-ssh@0.2.1-rc.2`，
+  新 Host 那一代 `dsh-ssh` 的协议 3 我们故意不跟，差异见维护文档 §2.26）
 - 命令：官方原脚本 `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
 - 唯一偏离：无 docker 跑不了 manylinux 2.28 重编，加了 `DSH_GLIBC_CEILING`
   环境覆盖（默认仍 2.28），本次以 2.35 构建（见缓存目录 `glibc-ceiling.patch`）
