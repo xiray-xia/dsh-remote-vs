@@ -240,7 +240,7 @@ export interface ExplorerValue {
     /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
     dockFloatingEditor: () => void;
     openDiff: (rel: string, staged: boolean, untracked?: boolean) => void;
-    openCommitFile: (hash: string, rel: string) => void;
+    openCommitFile: (hash: string, rel: string, origPath?: string) => void;
     activateTab: (id: string) => void;
     closeTab: (id: string) => void;
     updateTab: (id: string, patch: Partial<EditorTab>) => void;
@@ -547,8 +547,14 @@ export declare function openRemoteFileInBinding(bindingId: string, remotePath: s
 export declare function isEditorTakeoverActive(): boolean;
 /** Open (or focus) a working-tree diff of one repository path. */
 export declare function openDiff(rel: string, staged: boolean, untracked?: boolean): void;
-/** Open (or focus) one file of one commit (`ref^` against `ref`). */
-export declare function openCommitFile(hash: string, rel: string): void;
+/**
+ * Open (or focus) one file of one commit (`ref^` against `ref`).
+ *
+ * `origPath` is the rename source from the commit's file row / patch header:
+ * the two-sided view must diff the OLD path against the NEW one, or git sees
+ * two unrelated paths and paints the rename as a whole-file addition.
+ */
+export declare function openCommitFile(hash: string, rel: string, origPath?: string): void;
 export declare function activateTab(id: string): void;
 export declare function closeTab(id: string): void;
 export declare function updateTab(id: string, next: Partial<EditorTab>): void;

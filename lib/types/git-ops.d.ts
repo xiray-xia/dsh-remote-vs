@@ -97,15 +97,35 @@ export interface DiffRequest {
 }
 /** Unified diff (or a diffstat) for one side of the working tree. */
 export declare function diffCommand(workdir: string, request?: DiffRequest): string;
-/** Files touched by one commit (`--name-status`, no patch body). */
+/**
+ * Files touched by one commit (`--name-status`, no patch body).
+ *
+ * `--first-parent` is what makes a MERGE commit show anything: plain
+ * `git show --name-status <merge>` prints no file rows at all (measured), so
+ * the pane said "这个提交没有改动文件" for every merge. With it, the diff is
+ * against the first parent — the merge's own contribution — and non-merge
+ * commits are byte-for-byte unchanged.
+ */
 export declare function commitFilesCommand(workdir: string, ref: string): string;
 /**
  * Whole patch of one commit, with the commit header stripped (`--format=`), so
  * the output starts at the first `diff --git` line and parses as a plain
  * unified diff. Capped like every read-only builder: a commit that rewrites a
  * generated file would otherwise ship megabytes for one sidebar pane.
+ * `--first-parent` makes merge commits readable (see `commitFilesCommand`).
  */
 export declare function commitPatchCommand(workdir: string, ref: string): string;
+/**
+ * One changed file's patch inside a commit, with rename detection
+ * (`-M`) across BOTH sides of the path.
+ *
+ * The plain `git diff <hash>^ -- <newPath>` the editor drill-down used to run
+ * is wrong for a rename: the old path never matches, so a 100% rename renders
+ * as an all-added file. Passing both paths to `git show -M` lets git report
+ * the rename the commit actually recorded. Restricted to `paths` so a giant
+ * commit still ships one file.
+ */
+export declare function commitFileDiffCommand(workdir: string, ref: string, paths: readonly string[]): string;
 /** One file's content at a revision (`rev` may also be `:0` for the index). */
 export declare function fileAtRevCommand(workdir: string, rev: string, path: string): string;
 /** Local + remote-tracking branches with their upstream and tip. */

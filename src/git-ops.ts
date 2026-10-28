@@ -241,9 +241,17 @@ export function diffCommand(workdir: string, request: DiffRequest = {}): string 
   return capped(parts.join(' '))
 }
 
-/** Files touched by one commit (`--name-status`, no patch body). */
+/**
+ * Files touched by one commit (`--name-status`, no patch body).
+ *
+ * `--first-parent` is what makes a MERGE commit show anything: plain
+ * `git show --name-status <merge>` prints no file rows at all (measured), so
+ * the pane said "这个提交没有改动文件" for every merge. With it, the diff is
+ * against the first parent — the merge's own contribution — and non-merge
+ * commits are byte-for-byte unchanged.
+ */
 export function commitFilesCommand(workdir: string, ref: string): string {
-  return capped(`${git(workdir)} show --no-color --format= --name-status ${assertRef(ref)} --`)
+  return capped(`${git(workdir)} show --no-color --format= --name-status --first-parent ${assertRef(ref)} --`)
 }
 
 /**
@@ -251,9 +259,25 @@ export function commitFilesCommand(workdir: string, ref: string): string {
  * the output starts at the first `diff --git` line and parses as a plain
  * unified diff. Capped like every read-only builder: a commit that rewrites a
  * generated file would otherwise ship megabytes for one sidebar pane.
+ * `--first-parent` makes merge commits readable (see `commitFilesCommand`).
  */
 export function commitPatchCommand(workdir: string, ref: string): string {
-  return capped(`${git(workdir)} show --no-color --no-ext-diff --format= --patch ${assertRef(ref)} --`)
+  return capped(`${git(workdir)} show --no-color --no-ext-diff --format= --patch --first-parent ${assertRef(ref)} --`)
+}
+
+/**
+ * One changed file's patch inside a commit, with rename detection
+ * (`-M`) across BOTH sides of the path.
+ *
+ * The plain `git diff <hash>^ -- <newPath>` the editor drill-down used to run
+ * is wrong for a rename: the old path never matches, so a 100% rename renders
+ * as an all-added file. Passing both paths to `git show -M` lets git report
+ * the rename the commit actually recorded. Restricted to `paths` so a giant
+ * commit still ships one file.
+ */
+export function commitFileDiffCommand(workdir: string, ref: string, paths: readonly string[]): string {
+  const specs = paths.map(path => shQuote(assertRepoPath(path))).join(' ')
+  return capped(`${git(workdir)} show --no-color --no-ext-diff --format= --patch -M ${assertRef(ref)} -- ${specs}`)
 }
 
 /** One file's content at a revision (`rev` may also be `:0` for the index). */
@@ -669,7 +693,10 @@ export function parseCommitFiles(stdout: string): GitCommitFile[] {
     if (tab < 0) continue
     const status = line.slice(0, tab).trim()
     const rest = line.slice(tab + 1)
-    if (!/^[A-Z]\d*$/.test(status)) continue
+    // `R100`/`C75` carry a score, and a combined diff spells statuses like `MM`.
+    // Both must survive: rejecting `MM` made a conflict-resolved merge look like
+    // it changed nothing.
+    if (!/^[A-Z][A-Z0-9]*$/.test(status)) continue
     const renamed = status.startsWith('R') || status.startsWith('C')
     if (renamed) {
       const parts = rest.split('\t')

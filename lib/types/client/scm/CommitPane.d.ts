@@ -56,7 +56,8 @@ export interface CommitPaneProps {
     /** A file selected in 内容 (or a patch header), highlighted in 差异. */
     focusPath: string | undefined;
     onFocusPath: (path: string) => void;
-    onOpenFile: (path: string) => void;
+    /** `origPath` is a rename source: the editor drill-down must diff BOTH paths. */
+    onOpenFile: (path: string, origPath?: string) => void;
     onCheckout: () => void;
     onReload: () => void;
     t: Translate;

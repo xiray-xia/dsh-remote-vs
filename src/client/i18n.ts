@@ -21,7 +21,8 @@ export const DYNAMIC_KEYS = [
   'scm.hunkUnstaged',
   'scm.hunkReverted',
   // Labels reached through a lookup table in `scm/CommitPane.tsx`
-  // (`TAB_LABELS`, generated from `HISTORY_TABS`), not through literal
+  // (`TAB_LABELS`, a hand-maintained literal map — NOT generated from
+  // HISTORY_TABS; a fourth tab needs an entry here too), not through literal
   // translator calls. The scanner below must not mistake them for orphans.
   'history.details',
   'history.content',
@@ -347,10 +348,11 @@ const zh: Record<string, string> = {
   'history.close': '关闭提交详情',
   'history.copyHash': '复制完整哈希',
   'history.parents': '父提交',
-  'history.contentHint': '单击在差异中查看，双击或右键在编辑器中打开',
+  'history.contentHint': '单击在差异中查看，右键或行尾按钮在编辑器中打开',
   'history.noFiles': '这个提交没有改动文件。',
   'history.noTextDiff': '没有文本改动（二进制文件，或仅文件模式变化）。',
   'history.binaryFile': '二进制文件，无法显示差异。',
+  'history.fileNotRendered': '已达渲染上限，该文件未展开显示（点文件头可展开）。',
   'history.openInEditor': '在编辑器中打开（双栏对比）',
   'history.patchTruncated': '补丁较大，已截断显示。',
   'history.foldFile': '折叠该文件',
@@ -359,6 +361,7 @@ const zh: Record<string, string> = {
   'history.patchNotLoaded': '补丁还没有读取。',
   'history.resizeHint': '拖拽调整提交详情面板高度',
   'history.filesCount': '{n} 个文件',
+  'history.filesCountFiltered': '{matched}/{total} 个文件',
   'history.copyMessage': '复制提交信息',
   'history.copyPath': '复制路径',
   'history.copyFilePatch': '复制该文件补丁',
@@ -742,10 +745,11 @@ const en: Record<string, string> = {
   'history.close': 'Close commit details',
   'history.copyHash': 'Copy full hash',
   'history.parents': 'Parents',
-  'history.contentHint': 'Click to view the diff, double-click or right-click to open in the editor',
+  'history.contentHint': 'Click to view the diff, right-click or use the row button to open in the editor',
   'history.noFiles': 'This commit changes no file.',
   'history.noTextDiff': 'No text change (binary file, or file mode only).',
   'history.binaryFile': 'Binary file: no diff to show.',
+  'history.fileNotRendered': 'Display row cap reached: this file is folded (click its header to unfold).',
   'history.openInEditor': 'Open in editor (side-by-side)',
   'history.patchTruncated': 'Large patch: the display is truncated.',
   'history.foldFile': 'Fold this file',
@@ -754,6 +758,7 @@ const en: Record<string, string> = {
   'history.patchNotLoaded': 'The patch has not been loaded yet.',
   'history.resizeHint': 'Drag to resize the commit details pane',
   'history.filesCount': '{n} files',
+  'history.filesCountFiltered': '{matched}/{total} files',
   'history.copyMessage': 'Copy commit message',
   'history.copyPath': 'Copy path',
   'history.copyFilePatch': 'Copy file patch',

@@ -9,9 +9,10 @@
  * BOTH line numbers (a patch already narrates the pairing), and `skip` rows
  * where a hunk jumps ahead.
  *
- * Everything here is pure so `scripts/check-commit-pane.mjs` can pin it,
- * including a replay against a real repository's `git show --numstat`: a
- * hand-written expectation would only encode my idea of git's output.
+ * Everything here is pure so the local self-check (the `scripts/` and `.spike/`
+ * harnesses are gitignored and not shipped) can pin it, including a replay
+ * against a real repository's `git show --stat`: a hand-written expectation
+ * would only encode my idea of git's output.
  *
  * No full-file context is available: a commit patch is read-only and git only
  * ships the hunks. That is deliberate — building the two full revisions per
@@ -276,6 +277,26 @@ export function stepPath(paths: readonly string[], current: string | undefined, 
   const index = current === undefined ? -1 : paths.indexOf(current)
   if (index < 0) return direction === 1 ? paths[0] : paths[paths.length - 1]
   return paths[(index + direction + paths.length) % paths.length]
+}
+
+/**
+ * Default folding for the 差异 tab: keep the first `rowBudget` rendered rows
+ * open, fold every file after that.
+ *
+ * A 40-file commit painting up to `PATCH_ROW_CAP` rows in a pane that may be
+ * 80px tall is a scroll wall where the reader sees none of the topology; the
+ * reference opens a curated subset for the same reason. Folding the TAIL (not
+ * per-file size) keeps the reading order intact: the files you scrolled to are
+ * still in the same place, just collapsed, and one click opens any of them.
+ */
+export function autoFoldCommitPatch(model: CommitPatchModel, rowBudget = 1500): string[] {
+  const folded: string[] = []
+  let painted = 0
+  for (const file of model.files) {
+    if (painted >= rowBudget) folded.push(file.path)
+    else painted += file.rows.length
+  }
+  return folded
 }
 
 /**

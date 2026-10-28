@@ -56,6 +56,7 @@ import {
 } from '../vsc/kit.tsx'
 import {
   HISTORY_TABS,
+  autoFoldCommitPatch,
   blockForPath,
   buildCommitPatch,
   groupCommitFiles,
@@ -77,9 +78,13 @@ const WRAP_KEY = 'dsh-remote-vs.historyWrap'
 
 function readWrap(): boolean {
   try {
-    return localStorage.getItem(WRAP_KEY) === '1'
+    // Wrap is ON by default: in a ~400px column the two 42px line-number
+    // gutters leave ~250px of text, and horizontal scrolling to read any
+    // ordinary line is the first thing that reads as "broken". Only an explicit
+    // user choice to turn it off is persisted.
+    return localStorage.getItem(WRAP_KEY) !== '0'
   } catch {
-    return false
+    return true
   }
 }
 
@@ -114,7 +119,8 @@ export interface CommitPaneProps {
   /** A file selected in 内容 (or a patch header), highlighted in 差异. */
   focusPath: string | undefined
   onFocusPath: (path: string) => void
-  onOpenFile: (path: string) => void
+  /** `origPath` is a rename source: the editor drill-down must diff BOTH paths. */
+  onOpenFile: (path: string, origPath?: string) => void
   onCheckout: () => void
   onReload: () => void
   t: Translate
@@ -156,33 +162,38 @@ export function CommitPane(props: CommitPaneProps): ReactNode {
   }
   /**
    * Escape closes the pane from anywhere inside it — except from the filter
-   * input, where Escape means "leave my typing alone" and a page-flipping
-   * surprise would be worse than one more click.
+   * input (where Escape means "leave my typing alone") and while a context
+   * menu is open (the menu owns that Escape; closing both layers at once is a
+   * surprise nobody asked for).
    */
   const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Escape') return
     if ((event.target as HTMLElement).tagName === 'INPUT') return
+    if (typeof document !== 'undefined' && document.querySelector('.rvs-menu') !== null) return
     event.stopPropagation()
     props.onClose()
   }
   return (
     <div className="rvs-hpane-body" onKeyDown={onRootKeyDown}>
-      <div className="rvs-htabs" role="tablist" aria-label={t('history.paneLabel')} onKeyDown={onStripKeyDown}>
-        {HISTORY_TABS.map(id => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            data-tab={id}
-            id={`rvs-htab-${id}`}
-            aria-selected={tab === id}
-            tabIndex={tab === id ? 0 : -1}
-            className={`rvs-htab${tab === id ? ' active' : ''}`}
-            onClick={() => { props.onTab(id) }}
-          >
-            {t(TAB_LABELS[id])}
-          </button>
-        ))}
+      <div className="rvs-htabs">
+        <div className="rvs-hpane-tablist" role="tablist" aria-label={t('history.paneLabel')} onKeyDown={onStripKeyDown}>
+          {HISTORY_TABS.map(id => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              data-tab={id}
+              id={`rvs-htab-${id}`}
+              aria-selected={tab === id}
+              aria-controls={`rvs-htab-${id}-panel`}
+              tabIndex={tab === id ? 0 : -1}
+              className={`rvs-htab${tab === id ? ' active' : ''}`}
+              onClick={() => { props.onTab(id) }}
+            >
+              {t(TAB_LABELS[id])}
+            </button>
+          ))}
+        </div>
         <span className="rvs-htabs-spacer" />
         <code className="rvs-hhash-mini" title={commit.hash}>{commit.hash.slice(0, 7)}</code>
         <IconButton
@@ -218,7 +229,13 @@ function DetailsTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
     void copyText(text).then(() => toast(t('history.copiedMessage')))
   }
   return (
-    <div className="rvs-hbody rvs-scroll" hidden={props.hidden}>
+    <div
+      className="rvs-hbody rvs-scroll"
+      hidden={props.hidden}
+      role="tabpanel"
+      id="rvs-htab-details-panel"
+      aria-labelledby="rvs-htab-details"
+    >
       <div className="rvs-hsubject">{commit.subject === '' ? commit.hash.slice(0, 7) : commit.subject}</div>
       <div className="rvs-hmeta">
         <span className="rvs-hmeta-icon"><IconUser size={12} /></span>
@@ -273,6 +290,12 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
   const [filter, setFilter] = useState('')
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set<string>())
   const menu = useContextMenu()
+  // A filter typed for one commit must not follow the selection to the next:
+  // "没有匹配的文件" on a 2-file commit looked like the commit was empty.
+  useEffect(() => {
+    setFilter('')
+    setCollapsed(new Set<string>())
+  }, [props.commit.hash])
   const filtered = useMemo(() => {
     if (files === undefined) return undefined
     const needle = filter.trim().toLowerCase()
@@ -294,7 +317,7 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
     event.preventDefault()
     event.stopPropagation()
     menu.open(event.clientX, event.clientY, [
-      { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path) } },
+      { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path, file.origPath) } },
       { label: t('history.viewInDiff'), onSelect: () => { props.onFocusPath(file.path) } },
       {
         label: t('history.copyPath'),
@@ -304,8 +327,14 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
     ])
   }
   return (
-    <div className="rvs-hbody rvs-scroll" hidden={props.hidden}>
-      {contentBody(props, groups, filter, setFilter, collapsed, toggleDir, openFileMenu)}
+    <div
+      className="rvs-hbody rvs-scroll"
+      hidden={props.hidden}
+      role="tabpanel"
+      id="rvs-htab-content-panel"
+      aria-labelledby="rvs-htab-content"
+    >
+      {contentBody(props, groups, filtered, filter, setFilter, collapsed, toggleDir, openFileMenu)}
       {menu.menu !== undefined && (
         <ContextMenu x={menu.menu.x} y={menu.menu.y} entries={menu.menu.entries} onClose={menu.close} />
       )}
@@ -316,6 +345,7 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
 function contentBody(
   props: CommitPaneProps,
   groups: ReturnType<typeof groupCommitFiles>,
+  filtered: readonly GitCommitFile[] | undefined,
   filter: string,
   setFilter: (value: string) => void,
   collapsed: ReadonlySet<string>,
@@ -333,13 +363,18 @@ function contentBody(
   }
   if (files === undefined) return <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>
   if (files.length === 0) return <div className="rvs-empty">{t('history.noFiles')}</div>
+  const filtering = filter.trim() !== ''
+  const countLabel = filtering
+    ? t('history.filesCountFiltered').replace('{matched}', String(filtered?.length ?? 0)).replace('{total}', String(files.length))
+    : t('history.filesCount').replace('{n}', String(files.length))
   return (
     <>
       <div className="rvs-hcontent-head">
-        <span className="rvs-hcount">{t('history.filesCount').replace('{n}', String(files.length))}</span>
+        <span className="rvs-hcount">{countLabel}</span>
         <input
           className="rvs-input rvs-hfilter"
           placeholder={t('history.filterFiles')}
+          aria-label={t('history.filterFiles')}
           value={filter}
           spellCheck={false}
           onChange={(event) => { setFilter(event.target.value) }}
@@ -379,7 +414,6 @@ function contentBody(
                 className={`rvs-file-row${group.dir === '' ? '' : ' indent'}${props.focusPath === file.path ? ' active' : ''}`}
                 title={`${fileLabel(file)} — ${t('history.contentHint')}`}
                 onClick={() => { props.onFocusPath(file.path) }}
-                onDoubleClick={() => { props.onOpenFile(file.path) }}
                 onContextMenu={(event) => { openFileMenu(event, file) }}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter') return
@@ -389,7 +423,11 @@ function contentBody(
                 <span className="rvs-node-icon"><FileIcon path={file.path} size={13} /></span>
                 <span className="rvs-file-path">{fileLabel(file)}</span>
                 <span className={`rvs-file-status rvs-letter-${gitStatusClass(file.status)}`}>{file.status[0]}</span>
-                <IconButton title={t('history.openInEditor')} onClick={() => { props.onOpenFile(file.path) }} className="rvs-file-open">
+                <IconButton
+                  title={t('history.openInEditor')}
+                  onClick={() => { props.onOpenFile(file.path, file.origPath) }}
+                  className="rvs-file-open"
+                >
                   <IconDiff size={12} />
                 </IconButton>
               </div>
@@ -408,8 +446,12 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
   const blocks = useMemo(() => splitCommitPatch(props.patch ?? ''), [props.patch])
   const paths = useMemo(() => model.files.map(file => file.path), [model])
   /** Folded file blocks: a commit touching one huge file should not wall off
-   *  every other file behind it. */
-  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set<string>())
+   *  every other file behind it. Starts from the pure default-budget policy so
+   *  a 40-file commit opens as a readable outline instead of a 6000-row wall. */
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set<string>(autoFoldCommitPatch(model)))
+  useEffect(() => {
+    setFolded(new Set<string>(autoFoldCommitPatch(model)))
+  }, [model])
   const toggleFold = (path: string): void => {
     setFolded(prev => {
       const next = new Set(prev)
@@ -451,7 +493,7 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
     event.preventDefault()
     event.stopPropagation()
     menu.open(event.clientX, event.clientY, [
-      { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path) } },
+      { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path, file.oldPath === file.path ? undefined : file.oldPath) } },
       {
         label: t('history.copyPath'),
         onSelect: () => { void copyText(file.path).then(() => toast(t('history.copiedPath'))) },
@@ -464,7 +506,13 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
     ])
   }
   return (
-    <div className="rvs-hbody rvs-hdiff" hidden={props.hidden}>
+    <div
+      className="rvs-hbody rvs-hdiff"
+      hidden={props.hidden}
+      role="tabpanel"
+      id="rvs-htab-diff-panel"
+      aria-labelledby="rvs-htab-diff"
+    >
       <div className="rvs-ptoolbar" role="toolbar" aria-label={t('history.diffToolbar')}>
         <IconButton title={t('history.prevFile')} onClick={() => { step(-1) }} disabled={paths.length === 0}>
           <IconChevronLeft size={13} />
@@ -473,7 +521,7 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
           <IconChevronRight size={13} />
         </IconButton>
         <span className="rvs-pfile-index">{currentIndex < 0 ? '–' : `${currentIndex + 1}/${paths.length}`}</span>
-        <span className="rvs-pfile-name" title={currentPath ?? ''}>{currentPath ?? t('history.noFiles')}</span>
+        <span className="rvs-pfile-name" title={currentPath ?? ''}>{currentPath ?? '–'}</span>
         <IconButton
           title={t('history.wrap')}
           className={props.wrap ? 'active' : ''}
@@ -481,6 +529,9 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
         >
           <IconWrap size={13} />
         </IconButton>
+        {(model.truncated || props.patchTruncated) && (
+          <span className="rvs-ptruncated" title={t('history.patchTruncated')}>✂</span>
+        )}
         <IconButton
           title={t('history.copyCommitPatch')}
           onClick={copyAll}
@@ -544,7 +595,7 @@ function diffBody(
             folded={folded.has(file.path)}
             hasPatch={blocks[index] !== undefined}
             onFocus={() => { props.onFocusPath(file.path) }}
-            onOpen={() => { props.onOpenFile(file.path) }}
+            onOpen={() => { props.onOpenFile(file.path, file.oldPath === file.path ? undefined : file.oldPath) }}
             onToggleFold={() => { toggleFold(file.path) }}
             onMenu={(event) => { openBlockMenu(event, file) }}
             t={t}
@@ -580,9 +631,17 @@ function PatchBlock(props: {
         <span
           className={`rvs-patch-chevron${props.folded ? '' : ' open'}`}
           role="button"
-          tabIndex={-1}
+          tabIndex={0}
+          aria-expanded={!props.folded}
+          aria-label={props.folded ? t('history.unfoldFile') : t('history.foldFile')}
           title={props.folded ? t('history.unfoldFile') : t('history.foldFile')}
           onClick={(event) => {
+            event.stopPropagation()
+            props.onToggleFold()
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
             event.stopPropagation()
             props.onToggleFold()
           }}
@@ -607,12 +666,21 @@ function PatchBlock(props: {
   )
 }
 
-/** One block's body: binary note, "no text change" note, or the hunk rows. */
+/**
+ * One block's body: binary note, a cap-specific note, "no text change", or the
+ * hunk rows.
+ *
+ * The cap case is distinct on purpose: a file whose rows all fell past
+ * `PATCH_ROW_CAP` has `rows.length === 0` but a non-zero `+/−` header, and the
+ * plain "没有文本改动" copy there was a lie the header itself contradicted.
+ */
 function patchBlockBody(file: CommitPatchFile, wrap: boolean, hasPatch: boolean, t: Translate): ReactNode {
   if (file.binary) return <div className="rvs-patch-note">{t('history.binaryFile')}</div>
-  if (file.rows.length === 0) return <div className="rvs-patch-note">{t('history.noTextDiff')}</div>
+  if (file.rows.length === 0) {
+    return <div className="rvs-patch-note">{file.truncated ? t('history.fileNotRendered') : t('history.noTextDiff')}</div>
+  }
   return (
-    <div className={`rvs-patch-rows${wrap ? ' wrap' : ''}${hasPatch ? '' : ' incomplete'}`}>
+    <div className={`rvs-patch-rows${wrap ? ' wrap' : ''}${hasPatch ? '' : ' partial'}`}>
       {file.rows.map((row, index) => <PatchLine key={index} row={row} />)}
       {file.truncated && <div className="rvs-patch-note">{t('history.patchTruncated')}</div>}
     </div>

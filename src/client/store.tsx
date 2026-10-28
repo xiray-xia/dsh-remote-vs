@@ -488,7 +488,7 @@ export interface ExplorerValue {
   /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
   dockFloatingEditor: () => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
-  openCommitFile: (hash: string, rel: string) => void
+  openCommitFile: (hash: string, rel: string, origPath?: string) => void
   activateTab: (id: string) => void
   closeTab: (id: string) => void
   updateTab: (id: string, patch: Partial<EditorTab>) => void
@@ -1873,13 +1873,19 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
   })()
 }
 
-/** Open (or focus) one file of one commit (`ref^` against `ref`). */
-export function openCommitFile(hash: string, rel: string): void {
+/**
+ * Open (or focus) one file of one commit (`ref^` against `ref`).
+ *
+ * `origPath` is the rename source from the commit's file row / patch header:
+ * the two-sided view must diff the OLD path against the NEW one, or git sees
+ * two unrelated paths and paints the rename as a whole-file addition.
+ */
+export function openCommitFile(hash: string, rel: string, origPath?: string): void {
   captureLiveBuffer()
   const workspace = currentWorkspace()
   const root = state.repoRoot
   if (workspace === undefined || root === undefined || rel === '') return
-  const id = `commit:${workspace.alias}:${hash}:${rel}`
+  const id = `commit:${workspace.alias}:${hash}:${rel}${origPath === undefined ? '' : `:<-${origPath}`}`
   upsertTab({
     id,
     kind: 'diff',
@@ -1905,7 +1911,7 @@ export function openCommitFile(hash: string, rel: string): void {
   })
   void (async () => {
     try {
-      const payload = await withDeadline(loadCommitFileDiff(workspace.alias, root, hash, rel), gitDeadlineMs(), t('editor.readTimeout'))
+      const payload = await withDeadline(loadCommitFileDiff(workspace.alias, root, hash, rel, origPath), gitDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {
         loading: false,
         diff: payload,

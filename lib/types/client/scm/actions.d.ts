@@ -90,8 +90,15 @@ export interface DiffPayload {
 export declare function loadDiff(alias: string, root: string, path: string, staged: boolean, untracked?: boolean): Promise<DiffPayload>;
 /** Files touched by one commit. */
 export declare function loadCommitFiles(alias: string, root: string, hash: string): Promise<GitCommitFile[]>;
-/** Diff of one path inside a commit (used by the history file drill-down). */
-export declare function loadCommitFileDiff(alias: string, root: string, hash: string, path: string): Promise<DiffPayload>;
+/**
+ * Diff of one path inside a commit (the editor drill-down).
+ *
+ * `origPath` is the rename source: `git show -M -- <old> <new>` needs BOTH
+ * paths or git cannot pair them and a 100% rename renders as a fully-added
+ * file. A root commit has no `^` revision — `git show <hash>` already diffs
+ * against the empty tree, and the failed old-side read degrades to ''.
+ */
+export declare function loadCommitFileDiff(alias: string, root: string, hash: string, path: string, origPath?: string): Promise<DiffPayload>;
 /** Raw message of one commit, split into its subject line and the body. */
 export declare function loadCommitMessage(alias: string, root: string, hash: string): Promise<{
     subject: string;
@@ -101,9 +108,11 @@ export declare function loadCommitMessage(alias: string, root: string, hash: str
  * Whole patch of one commit (the commit header is stripped: starts at
  * `diff --git`).
  *
- * `truncated` answers whether the read hit `commitPatchCommand`'s byte cap: a
- * capped read returns exactly `GIT_CAP` bytes, and the pane must SAY so rather
- * than silently presenting the first half of a huge commit as the whole diff.
+ * `truncated` answers whether the read hit `commitPatchCommand`'s BYTE cap.
+ * The cap is applied with `head -c` (bytes) while the string length counts
+ * UTF-16 code units, so the comparison must measure BYTES too — a CJK-heavy
+ * patch capped at 2,000,000 bytes is only ~667k characters, and a char-length
+ * check silently reported "complete" for a cut patch.
  */
 export declare function loadCommitPatch(alias: string, root: string, hash: string): Promise<{
     text: string;

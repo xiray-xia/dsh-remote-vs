@@ -2131,6 +2131,16 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   border-bottom: 1px solid var(--rvs-border);
 }
 
+/* The tabs themselves live in their own role=tablist element: the strip also
+   carries the hash, expand and close buttons, and those must NOT inherit the
+   tablist's arrow-key handling (ArrowRight on "close" used to switch tabs). */
+.rvs-hpane-tablist {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .rvs-htab {
   appearance: none;
   border: none;
@@ -2361,6 +2371,17 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   opacity: 1;
 }
 
+/* Keyboard focus must be visible on the pane's role=button rows (a bare
+   browser default is nearly invisible on this dark chrome). */
+.rvs-file-row:focus-visible,
+.rvs-hfolder:focus-visible,
+.rvs-commit-item:focus-visible,
+.rvs-patch-chevron:focus-visible,
+.rvs-vsplit-handle:focus-visible {
+  outline: 2px solid var(--rvs-brand);
+  outline-offset: -2px;
+}
+
 /* -- 差异 -- */
 
 /**
@@ -2520,6 +2541,21 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
 .rvs-patch-rows.wrap .rvs-patch-text {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* A block whose raw patch text could not be paired with the parsed model
+   (defensive: block count and model count disagreed) is dimmed instead of
+   silently looking complete. */
+.rvs-patch-rows.partial {
+  opacity: .62;
+}
+
+/* Truncation marker in the pinned toolbar: the cut point can be thousands of
+   rows away, so the bottom note is not where a reader learns about it. */
+.rvs-ptruncated {
+  flex: none;
+  font-size: 12px;
+  color: var(--rvs-git-m);
 }
 
 .rvs-patch-row.add {

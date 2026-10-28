@@ -51,12 +51,24 @@ const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79
 /** Persisted pane geometry / view: one profile-wide preference, like the split. */
 const PANE_HEIGHT_KEY = 'dsh-remote-vs.historyPane'
 const PANE_TAB_KEY = 'dsh-remote-vs.historyTab'
-const PANE_MIN_HEIGHT = 140
+const PANE_MIN_HEIGHT = 180
 
+/**
+ * Restore a persisted height, clamped to THIS window.
+ *
+ * A height saved on a tall window was previously replayed verbatim on a short
+ * one, and the percentage `max-height` in CSS can be powerless when the flex
+ * column's height is indefinite — the graph then collapsed to nothing. Clamp
+ * against the viewport at read time (the drag path clamps against the column).
+ */
 function readPaneHeight(): number {
   try {
     const saved = Number(localStorage.getItem(PANE_HEIGHT_KEY))
-    if (Number.isFinite(saved) && saved >= PANE_MIN_HEIGHT) return Math.round(saved)
+    const viewportCap = typeof window === 'undefined'
+      ? 900
+      : Math.round(window.innerHeight * 0.7)
+    const cap = Math.max(PANE_MIN_HEIGHT, viewportCap)
+    if (Number.isFinite(saved) && saved >= PANE_MIN_HEIGHT) return Math.round(Math.min(saved, cap))
   } catch {
     // Ignore.
   }
@@ -239,9 +251,11 @@ export function HistoryPanel(): ReactNode {
    * buttons that act on the currently bound repository.
    */
   const loadSeq = useRef(0)
-  /** Per-commit caches: message+files (bounded 20) and patch text (bounded 4). */
+  /** Per-commit caches: message+files (bounded 20) and patch text+cap flag (bounded 4). */
   const detailCache = useRef(new Map<string, { body: string; files: GitCommitFile[] }>())
-  const patchCache = useRef(new Map<string, string>())
+  const patchCache = useRef(new Map<string, { text: string; truncated: boolean }>())
+  /** The commit object behind `selectedHash`, kept while the log no longer lists it. */
+  const [selectedSnapshot, setSelectedSnapshot] = useState<GitCommit | undefined>(undefined)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startY: number; startHeight: number } | undefined>(undefined)
   const paneHeightRef = useRef(paneHeight)
@@ -293,11 +307,18 @@ export function HistoryPanel(): ReactNode {
     void load()
   }, [load])
 
-  /** The selected commit as the graph currently knows it. */
-  const selectedCommit = useMemo(
-    () => (selectedHash === undefined ? undefined : rows.find(commit => commit.hash === selectedHash)),
-    [rows, selectedHash],
-  )
+  /**
+   * The selected commit as the graph currently knows it, falling back to the
+   * snapshot taken at selection time. Without the fallback a `git log` refresh
+   * that drops the hash from the capped window silently unmounted the pane (the
+   * commit was still cached and perfectly readable).
+   */
+  const selectedCommit = useMemo(() => {
+    if (selectedHash === undefined) return undefined
+    const live = rows.find(commit => commit.hash === selectedHash)
+    if (live !== undefined) return live
+    return selectedSnapshot !== undefined && selectedSnapshot.hash === selectedHash ? selectedSnapshot : undefined
+  }, [rows, selectedHash, selectedSnapshot])
   /** Cache key of the selected commit ('' = nothing selected / no binding). */
   const detailKey = selectedCommit === undefined || repoKey === '' ? '' : `${repoKey}|${selectedCommit.hash}`
 
@@ -351,7 +372,9 @@ export function HistoryPanel(): ReactNode {
     if (!needsPatchLoad(patchState, detailKey, tabChoice.id)) return
     const cached = patchCache.current.get(detailKey)
     if (cached !== undefined) {
-      setPatchState({ key: detailKey, text: cached })
+      // The cap flag travels WITH the text: a cache hit used to restore the
+      // cut patch without its "truncated" notice (silent truncation again).
+      setPatchState({ key: detailKey, text: cached.text, truncated: cached.truncated })
       return
     }
     if (patchFlight.current === detailKey) return
@@ -361,7 +384,7 @@ export function HistoryPanel(): ReactNode {
     void (async () => {
       try {
         const result = await loadCommitPatch(alias, repoRoot, selectedCommit.hash)
-        cacheSet(patchCache.current, detailKey, result.text, 4)
+        cacheSet(patchCache.current, detailKey, { text: result.text, truncated: result.truncated }, 4)
         if (patchTicket.current !== ticket) return
         setPatchState({ key: detailKey, text: result.text, truncated: result.truncated })
       } catch (caught) {
@@ -389,6 +412,7 @@ export function HistoryPanel(): ReactNode {
 
   const selectCommit = (hash: string): void => {
     setSelectedHash(hash)
+    setSelectedSnapshot(rows.find(commit => commit.hash === hash))
     setFocusPath(undefined)
     // The FIRST selection of a panel life lands on 提交详情; once the user has
     // picked a tab by hand (or restored one), selection keeps it.
@@ -409,13 +433,14 @@ export function HistoryPanel(): ReactNode {
     chooseTab('diff')
   }
 
-  const openCommitFile = (path: string): void => {
+  const openCommitFile = (path: string, origPath?: string): void => {
     if (selectedCommit === undefined) return
-    store.openCommitFile(selectedCommit.hash, path)
+    store.openCommitFile(selectedCommit.hash, path, origPath)
   }
 
   const closePane = (): void => {
     setSelectedHash(undefined)
+    setSelectedSnapshot(undefined)
     setFocusPath(undefined)
     setPaneExpanded(false)
   }
@@ -494,6 +519,16 @@ export function HistoryPanel(): ReactNode {
 
   // ── Pane splitter: drag up grows the pane (same gesture as the editor split;
   //    the handle reuses `.rvs-vsplit-handle`'s row-resize styling). ─────────
+  /**
+   * The RENDERED height, not the persisted one: CSS caps the pane at 82% of
+   * the column, so a height saved on a tall window is painted smaller than
+   * `paneHeightRef` claims — seeding the drag from the persisted number made the
+   * first part of every drag do nothing.
+   */
+  const renderedPaneHeight = (): number => {
+    const element = containerRef.current?.querySelector<HTMLElement>('.rvs-hpane')
+    return element?.offsetHeight ?? paneHeightRef.current
+  }
   const onPaneDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return
     event.preventDefault()
@@ -502,7 +537,9 @@ export function HistoryPanel(): ReactNode {
     } catch {
       // Older engine: the button gate covers it.
     }
-    dragRef.current = { startY: event.clientY, startHeight: paneHeightRef.current }
+    const startHeight = renderedPaneHeight()
+    paneHeightRef.current = startHeight
+    dragRef.current = { startY: event.clientY, startHeight }
     setDragging(true)
   }
   const onPaneMove = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -530,6 +567,24 @@ export function HistoryPanel(): ReactNode {
       // Ignore.
     }
   }
+  /** Keyboard resize (the splitter is a focusable separator): ↑ grows, ↓ shrinks. */
+  const onPaneKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    event.preventDefault()
+    const total = containerRef.current?.clientHeight ?? 0
+    const base = renderedPaneHeight()
+    paneHeightRef.current = base
+    const max = total < 220 ? base : Math.max(PANE_MIN_HEIGHT + 60, total * 0.82)
+    const delta = event.key === 'ArrowUp' ? 24 : -24
+    const next = Math.round(Math.max(PANE_MIN_HEIGHT, Math.min(max, base + delta)))
+    paneHeightRef.current = next
+    setPaneHeight(next)
+    try {
+      localStorage.setItem(PANE_HEIGHT_KEY, String(next))
+    } catch {
+      // Ignore.
+    }
+  }
 
   const x = (lane: number): number => PAD_X + lane * LANE_W
   const y = (row: number): number => row * ROW_H + ROW_H / 2
@@ -548,6 +603,7 @@ export function HistoryPanel(): ReactNode {
         <input
           className="rvs-input"
           placeholder={t('history.filter')}
+          aria-label={t('history.filter')}
           value={filter}
           spellCheck={false}
           onChange={(e) => setFilter(e.target.value)}
@@ -643,12 +699,18 @@ export function HistoryPanel(): ReactNode {
             {paneExpanded ? null : (
               <div
                 className="rvs-vsplit-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label={t('history.resizeHint')}
+                aria-valuenow={paneHeight}
+                tabIndex={0}
                 data-dragging={dragging ? 'true' : 'false'}
                 title={t('history.resizeHint')}
                 onPointerDown={onPaneDown}
                 onPointerMove={onPaneMove}
                 onPointerUp={onPaneEnd}
                 onPointerCancel={onPaneEnd}
+                onKeyDown={onPaneKeyDown}
               />
             )}
             <div

@@ -99,6 +99,17 @@ export declare function groupCommitFiles(files: readonly GitCommitFile[]): Commi
  */
 export declare function stepPath(paths: readonly string[], current: string | undefined, direction: 1 | -1): string | undefined;
 /**
+ * Default folding for the 差异 tab: keep the first `rowBudget` rendered rows
+ * open, fold every file after that.
+ *
+ * A 40-file commit painting up to `PATCH_ROW_CAP` rows in a pane that may be
+ * 80px tall is a scroll wall where the reader sees none of the topology; the
+ * reference opens a curated subset for the same reason. Folding the TAIL (not
+ * per-file size) keeps the reading order intact: the files you scrolled to are
+ * still in the same place, just collapsed, and one click opens any of them.
+ */
+export declare function autoFoldCommitPatch(model: CommitPatchModel, rowBudget?: number): string[];
+/**
  * Ref badge decoration for one `%D` entry (shared by the graph rows and the
  * commit card). Split for the same reason the history panel split them: the
  * CSS modifier and the display text are different jobs.
