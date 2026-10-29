@@ -62,6 +62,8 @@ export interface CommitPaneProps {
     onRevealFile: (path: string) => void;
     /** Open a terminal tab already `cd`d into the file's directory. */
     onOpenTerminal: (path: string) => void;
+    /** Remote ABSOLUTE path of a repo-relative commit path (copy-absolute). */
+    absPathOf: (path: string) => string;
     onCheckout: () => void;
     onReload: () => void;
     t: Translate;

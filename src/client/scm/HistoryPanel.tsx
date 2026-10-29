@@ -457,6 +457,9 @@ export function HistoryPanel(): ReactNode {
     store.openTerminalAt(commitFileDir(path))
   }
 
+  /** Copy-absolute: repo-relative commit path → remote absolute path. */
+  const commitFileAbsPath = (path: string): string => joinRemote(repoRoot ?? '', path)
+
   const closePane = (): void => {
     setSelectedHash(undefined)
     setSelectedSnapshot(undefined)
@@ -756,6 +759,7 @@ export function HistoryPanel(): ReactNode {
                 onOpenFile={openCommitFile}
                 onRevealFile={revealCommitFile}
                 onOpenTerminal={openCommitFileTerminal}
+                absPathOf={commitFileAbsPath}
                 onCheckout={checkoutSelected}
                 onReload={reloadSelected}
                 t={t}

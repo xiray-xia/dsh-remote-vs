@@ -125,6 +125,8 @@ export interface CommitPaneProps {
   onRevealFile: (path: string) => void
   /** Open a terminal tab already `cd`d into the file's directory. */
   onOpenTerminal: (path: string) => void
+  /** Remote ABSOLUTE path of a repo-relative commit path (copy-absolute). */
+  absPathOf: (path: string) => string
   onCheckout: () => void
   onReload: () => void
   t: Translate
@@ -326,9 +328,13 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
       { label: t('history.revealInExplorer'), onSelect: () => { props.onRevealFile(file.path) } },
       { label: t('history.openInTerminal'), onSelect: () => { props.onOpenTerminal(file.path) } },
       {
-        label: t('history.copyPath'),
+        label: t('files.copyAbs'),
         separated: true,
-        onSelect: () => { void copyText(file.path).then(() => toast(t('history.copiedPath'))) },
+        onSelect: () => { void copyText(props.absPathOf(file.path)).then(() => toast(t('files.copiedClipboard'))) },
+      },
+      {
+        label: t('files.copyRel'),
+        onSelect: () => { void copyText(file.path).then(() => toast(t('files.copiedClipboard'))) },
       },
     ])
   }
@@ -503,9 +509,13 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
       { label: t('history.revealInExplorer'), onSelect: () => { props.onRevealFile(file.path) } },
       { label: t('history.openInTerminal'), onSelect: () => { props.onOpenTerminal(file.path) } },
       {
-        label: t('history.copyPath'),
+        label: t('files.copyAbs'),
         separated: true,
-        onSelect: () => { void copyText(file.path).then(() => toast(t('history.copiedPath'))) },
+        onSelect: () => { void copyText(props.absPathOf(file.path)).then(() => toast(t('files.copiedClipboard'))) },
+      },
+      {
+        label: t('files.copyRel'),
+        onSelect: () => { void copyText(file.path).then(() => toast(t('files.copiedClipboard'))) },
       },
       {
         label: t('history.copyFilePatch'),
