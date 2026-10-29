@@ -13,6 +13,15 @@ export declare function assertBranchName(name: string): string;
 export declare function assertRemoteName(name: string): string;
 /** Assert a remote URL (anything printable without control characters). */
 export declare function assertRemoteUrl(url: string): string;
+/**
+ * Assert a push refspec (`HEAD:refs/for/master`, `+refs/heads/x:refs/heads/y`).
+ *
+ * The charset is the union git accepts on the two sides of the optional colon,
+ * plus the force marker and the `{}`/`~`/`^`/`*` revision syntax. `assertRef`
+ * cannot be reused: it deliberately rejects `:`, and the whole point of a
+ * custom refspec is the destination side (Gerrit's `refs/for/<branch>`).
+ */
+export declare function assertPushRefspec(refspec: string): string;
 /** Resolve the enclosing repository root (fails outside a work tree). */
 export declare function repoProbeCommand(workdir: string): string;
 /**
@@ -170,6 +179,15 @@ export declare function fetchCommand(workdir: string): string;
 export declare function pullCommand(workdir: string): string;
 /** Push the current branch. */
 export declare function pushCommand(workdir: string): string;
+/**
+ * Push to an explicit remote with an explicit refspec.
+ *
+ * This is the Gerrit shape (`git push origin HEAD:refs/for/master`): the plain
+ * `git push` above only ever talks to the branch's upstream, so a review
+ * workflow had to drop into a terminal. The remote is explicit because a
+ * refspec says nothing about which remote it belongs to.
+ */
+export declare function pushRefspecCommand(workdir: string, remote: string, refspec: string): string;
 /** Stash the working tree (optionally including untracked files). */
 export declare function stashSaveCommand(workdir: string, message: string, includeUntracked: boolean): string;
 /** Apply (and keep) a stash entry. */

@@ -114,6 +114,23 @@ export function assertRemoteUrl(url: string): string {
   return url
 }
 
+/**
+ * Assert a push refspec (`HEAD:refs/for/master`, `+refs/heads/x:refs/heads/y`).
+ *
+ * The charset is the union git accepts on the two sides of the optional colon,
+ * plus the force marker and the `{}`/`~`/`^`/`*` revision syntax. `assertRef`
+ * cannot be reused: it deliberately rejects `:`, and the whole point of a
+ * custom refspec is the destination side (Gerrit's `refs/for/<branch>`).
+ */
+export function assertPushRefspec(refspec: string): string {
+  if (typeof refspec !== 'string' || refspec === '' || refspec.length > 256) throw new Error(`invalid push refspec: ${refspec}`)
+  if (!/^\+?[A-Za-z0-9][A-Za-z0-9._/@~^*{}-]*(?::[A-Za-z0-9][A-Za-z0-9._/@~^*{}-]*)?$/.test(refspec)) {
+    throw new Error(`invalid push refspec: ${refspec}`)
+  }
+  if (refspec.includes('..') || refspec.includes('@{')) throw new Error(`invalid push refspec: ${refspec}`)
+  return refspec
+}
+
 // -------------------------------------------------------- read builders
 
 /** Resolve the enclosing repository root (fails outside a work tree). */
@@ -386,6 +403,18 @@ export function pullCommand(workdir: string): string {
 /** Push the current branch. */
 export function pushCommand(workdir: string): string {
   return statusOk(`${git(workdir)} push`)
+}
+
+/**
+ * Push to an explicit remote with an explicit refspec.
+ *
+ * This is the Gerrit shape (`git push origin HEAD:refs/for/master`): the plain
+ * `git push` above only ever talks to the branch's upstream, so a review
+ * workflow had to drop into a terminal. The remote is explicit because a
+ * refspec says nothing about which remote it belongs to.
+ */
+export function pushRefspecCommand(workdir: string, remote: string, refspec: string): string {
+  return statusOk(`${git(workdir)} push ${shQuote(assertRemoteName(remote))} ${shQuote(assertPushRefspec(refspec))}`)
 }
 
 /** Stash the working tree (optionally including untracked files). */

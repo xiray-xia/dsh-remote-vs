@@ -146,6 +146,11 @@ export declare function commitAll(alias: string, root: string, message: string, 
 export declare function lastCommitMessage(alias: string, root: string): Promise<string>;
 /** fetch / pull / push / sync. */
 export declare function syncRepo(alias: string, root: string, kind: 'fetch' | 'pull' | 'push' | 'sync'): Promise<string>;
+/**
+ * Push to an explicit remote with an explicit refspec (Gerrit review flow:
+ * `HEAD:refs/for/<branch>`). Same timeout budget as the other network verbs.
+ */
+export declare function pushWithRefspec(alias: string, root: string, remote: string, refspec: string): Promise<string>;
 /** Branch verbs. */
 export declare function branchOp(alias: string, root: string, op: {
     kind: 'checkout';

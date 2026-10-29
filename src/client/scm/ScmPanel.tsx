@@ -20,6 +20,7 @@ import {
   loadRemotes,
   loadStashes,
   lastCommitMessage,
+  pushWithRefspec,
   remoteOp,
   stashOp,
   syncRepo,
@@ -56,6 +57,25 @@ import {
 } from '../vsc/kit.tsx'
 
 const MSG_KEY = 'dsh-remote-vs.commitMsg'
+/** Remembered custom push refspec (Gerrit shape); absent = never customized. */
+const PUSH_REFSPEC_KEY = 'dsh-remote-vs.pushRefspec'
+
+function readPushRefspec(): string {
+  try {
+    return localStorage.getItem(PUSH_REFSPEC_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writePushRefspec(value: string): void {
+  try {
+    if (value === '') localStorage.removeItem(PUSH_REFSPEC_KEY)
+    else localStorage.setItem(PUSH_REFSPEC_KEY, value)
+  } catch {
+    // Ignore: a blocked localStorage must not break the push flow.
+  }
+}
 
 /**
  * One extras read per repository at a time.
@@ -391,19 +411,59 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     }, 'status')
   }
 
+  /**
+   * The remote a push goes to: the current branch's upstream remote, else
+   * `origin`. A refspec names no remote, so the panel has to pick one.
+   */
+  const pushRemote = (): string => {
+    const current = branches.find(item => item.head) ?? branches.find(item => item.name === head?.branch)
+    const upstream = current?.upstream ?? ''
+    const slash = upstream.indexOf('/')
+    return slash > 0 ? upstream.slice(0, slash) : 'origin'
+  }
+
   const doSync = async (kind: 'fetch' | 'pull' | 'push' | 'sync'): Promise<void> => {
     if (repoRoot === undefined) return
-    if (kind === 'push' || kind === 'sync') {
+    /** Empty = the plain `git push` (upstream) this action used to run. */
+    let refspec = ''
+    let remote = 'origin'
+    if (kind === 'push') {
+      // Gerrit-style review needs a destination refspec (`refs/for/<branch>`);
+      // a bare `git push` can never produce one. The prompt is the confirmation
+      // AND the destination field, with the last custom value remembered.
+      const current = branches.find(item => item.head) ?? branches.find(item => item.name === head?.branch)
+      const branchName = head?.detached === true || head === undefined
+        ? (current?.name ?? 'master')
+        : head.branch
+      remote = pushRemote()
+      const remembered = readPushRefspec()
+      const answer = await promptDialog({
+        title: t('scm.pushTitle'),
+        text: t('scm.pushText'),
+        initial: remembered !== '' ? remembered : `HEAD:refs/for/${branchName}`,
+        placeholder: t('scm.pushRefspecPlaceholder'),
+        okText: t('scm.push'),
+      })
+      if (answer === undefined) return
+      refspec = answer.trim()
+      writePushRefspec(refspec)
+    } else if (kind === 'sync') {
       const ok = await confirmDialog({
-        title: kind === 'push' ? t('scm.pushTitle') : t('scm.syncTitle'),
-        text: kind === 'push' ? t('scm.pushText') : t('scm.syncText'),
-        okText: kind === 'push' ? t('scm.push') : t('scm.sync'),
+        title: t('scm.syncTitle'),
+        text: t('scm.syncText'),
+        okText: t('scm.sync'),
       })
       if (!ok) return
     }
     await guard(kind, async () => {
-      const output = await syncRepo(alias, repoRoot, kind)
-      toast(`${t('scm.syncDone')} ${output.split('\n').slice(-1)[0] ?? ''}`.trim())
+      const output = refspec === ''
+        ? await syncRepo(alias, repoRoot, kind)
+        : await pushWithRefspec(alias, repoRoot, remote, refspec)
+      const lastLine = output.split('\n').filter(line => line.trim() !== '').slice(-1)[0] ?? ''
+      const done = refspec === ''
+        ? t('scm.syncDone')
+        : t('scm.pushRefspecDone').replace('{refspec}', refspec)
+      toast(`${done} ${lastLine}`.trim())
     })
   }
 

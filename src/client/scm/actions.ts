@@ -40,6 +40,7 @@ import {
   pullCommand,
   publishBranchCommand,
   pushCommand,
+  pushRefspecCommand,
   remotesCommand,
   removeRemoteCommand,
   renameBranchCommand,
@@ -405,6 +406,15 @@ export async function syncRepo(alias: string, root: string, kind: 'fetch' | 'pul
   const pulled = (await run(alias, pullCommand(root), longTimeoutMs())).stdout
   const pushed = (await run(alias, pushCommand(root), longTimeoutMs())).stdout
   return `${pulled}\n${pushed}`.trim()
+}
+
+/**
+ * Push to an explicit remote with an explicit refspec (Gerrit review flow:
+ * `HEAD:refs/for/<branch>`). Same timeout budget as the other network verbs.
+ */
+export async function pushWithRefspec(alias: string, root: string, remote: string, refspec: string): Promise<string> {
+  const out = await run(alias, pushRefspecCommand(root, remote, refspec), longTimeoutMs())
+  return `${out.stdout}\n${out.stderr}`.trim()
 }
 
 /** Branch verbs. */
