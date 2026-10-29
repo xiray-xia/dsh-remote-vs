@@ -390,19 +390,29 @@ export function publishBranchCommand(workdir: string, branch: string, remote: st
   return statusOk(`${git(workdir)} push --set-upstream ${shQuote(assertRemoteName(remote))} ${shQuote(assertBranchName(branch))}`)
 }
 
-/** Fetch every remote, pruning deleted tracking refs. */
+/**
+ * Fetch every remote, pruning deleted tracking refs.
+ *
+ * NOTE: the four NETWORK verbs deliberately do NOT use `statusOk()`. That
+ * wrapper buffers git's output in temp files and cats them back only after the
+ * command exits, which made the live-output panel sit on "waiting…" for the
+ * whole run and then dump everything at once (measured: a 59 s push produced
+ * 0.2 s of output after completion). No pipe is involved here, so the shell
+ * returns git's own exit status directly, and `--progress` forces the progress
+ * lines even though the remote side is not a TTY.
+ */
 export function fetchCommand(workdir: string): string {
-  return statusOk(`${git(workdir)} fetch --all --prune`)
+  return `${git(workdir)} fetch --all --prune --progress`
 }
 
 /** Pull the current branch (merge, no editor prompt). */
 export function pullCommand(workdir: string): string {
-  return statusOk(`${git(workdir)} pull --no-edit`)
+  return `${git(workdir)} pull --no-edit --progress`
 }
 
 /** Push the current branch. */
 export function pushCommand(workdir: string): string {
-  return statusOk(`${git(workdir)} push`)
+  return `${git(workdir)} push --progress`
 }
 
 /**
@@ -414,7 +424,7 @@ export function pushCommand(workdir: string): string {
  * refspec says nothing about which remote it belongs to.
  */
 export function pushRefspecCommand(workdir: string, remote: string, refspec: string): string {
-  return statusOk(`${git(workdir)} push ${shQuote(assertRemoteName(remote))} ${shQuote(assertPushRefspec(refspec))}`)
+  return `${git(workdir)} push --progress ${shQuote(assertRemoteName(remote))} ${shQuote(assertPushRefspec(refspec))}`
 }
 
 /** Stash the working tree (optionally including untracked files). */

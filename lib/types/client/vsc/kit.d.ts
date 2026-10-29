@@ -37,6 +37,8 @@ export declare function IconPlus(props: IconProps): ReactNode;
 export declare function IconNewFolder(props: IconProps): ReactNode;
 export declare function IconTrash(props: IconProps): ReactNode;
 export declare function IconClose(props: IconProps): ReactNode;
+/** Stop: a filled square — the universal "kill this run" mark. */
+export declare function IconStop(props: IconProps): ReactNode;
 /** Copy glyph: two offset sheets, the front one the clipboard's payload. */
 export declare function IconCopy(props: IconProps): ReactNode;
 /** Author glyph for the commit pane's metadata rows. */

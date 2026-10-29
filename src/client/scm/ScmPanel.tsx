@@ -11,6 +11,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash, RemoteExecResult } from '../../protocol.ts'
 import { gitReadSettleMs, useExplorer } from '../store.tsx'
+import { RemoteApiError, gitTimeoutMs } from '../api.ts'
 import {
   branchOp,
   commitAll,
@@ -26,7 +27,7 @@ import {
   streamNetworkVerb,
   syncRepo,
 } from './actions.ts'
-import { appendExecOutput, formatElapsed, type PushTarget } from '../exec-output.ts'
+import { appendExecOutput, formatElapsed, networkBudgetMs, type PushTarget } from '../exec-output.ts'
 import { ExecPanel, type ExecPanelState } from './ExecPanel.tsx'
 import type { ChangeEntry } from './status-map.ts'
 import { rowVerb } from './status-map.ts'
@@ -108,6 +109,12 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const [execPanel, setExecPanel] = useState<ExecPanelState | undefined>(undefined)
   const execAbort = useRef<AbortController | undefined>(undefined)
   const execLog = useRef('')
+  /** The live-log repaint interval (kept out of render state on purpose). */
+  const execTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  // Leaving the panel mid-push must not leave a 250 ms setState loop running.
+  useEffect(() => () => {
+    if (execTimer.current !== undefined) clearInterval(execTimer.current)
+  }, [])
   const [message, setMessage] = useState<string>(() => {
     try {
       return localStorage.getItem(MSG_KEY) ?? ''
@@ -462,14 +469,36 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
       })
       if (!ok) return
     }
-    const title = kind === 'push'
+    const baseTitle = kind === 'push'
       ? t('scm.pushTitle')
       : kind === 'sync'
         ? t('scm.syncTitle')
         : kind === 'fetch'
           ? t('scm.fetch')
           : t('scm.pull')
+    // The destination belongs in the panel title: "push" alone hides whether
+    // Gerrit review or a plain branch push is running.
+    const title = kind === 'push' ? `${baseTitle} · ${refspec === '' ? 'git push' : refspec}` : baseTitle
     await runNetwork(kind, title, { refspec, remote })
+  }
+
+  /**
+   * Stop the running network verb: confirm first.
+   *
+   * The stop button kills the remote process group, so `sync` can end with the
+   * pull applied and the push never attempted, and `pull` can leave a
+   * half-merged tree. One confirmation is the honest price of that.
+   */
+  const cancelNetwork = (): void => {
+    void (async () => {
+      const ok = await confirmDialog({
+        title: t('exec.cancel'),
+        text: t('exec.cancelHint'),
+        danger: true,
+        okText: t('exec.cancel'),
+      })
+      if (ok) execAbort.current?.abort()
+    })()
   }
 
   /**
@@ -506,6 +535,11 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         ? prev
         : { ...prev, elapsedMs: Date.now() - startedAt }))
     }, 250)
+    execTimer.current = timer
+    /** True when the unary fallback answered (no exit code was observed then). */
+    let fallbackUsed = false
+    /** Cancel: no refresh storm while the user is just stopping a run. */
+    let cancelledByUser = false
     try {
       let result: RemoteExecResult
       let output = ''
@@ -521,25 +555,46 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         execLog.current = output
       } catch (error) {
         if (controller.signal.aborted) throw error
-        // No streaming route (older Host): the unary verb still has the answer.
+        // Fall back ONLY when the route itself is absent (older Host: 404/405
+        // before any output). A stream that broke AFTER the push started must
+        // not be retried unary — that would run `git push` a second time.
+        const routeMissing = error instanceof RemoteApiError
+          && (error.status === 404 || error.status === 405)
+          && execLog.current === ''
+        if (!routeMissing) throw error
+        fallbackUsed = true
         output = kind === 'push' && target.refspec !== ''
           ? await pushWithRefspec(alias, repoRoot, target.remote, target.refspec)
           : await syncRepo(alias, repoRoot, kind)
         execLog.current = appendExecOutput('', output)
         result = {
           success: true,
-          exitCode: 0,
+          // No stream → no observed exit code. Claiming 0 in the footer would be
+          // a lie; the footer wording below drops the code for this path.
+          exitCode: null,
           timedOut: false,
           stdout: output,
           stderr: '',
           durationMs: Date.now() - startedAt,
         }
       }
-      const exitText = result.timedOut
-        ? t('exec.timedOut')
-        : `${t('exec.exitCode')} ${result.exitCode ?? '?'} · ${formatElapsed(result.durationMs)}${
-          result.error === undefined ? '' : ` · ${result.error}`
-        }`
+      const budgetMin = Math.round(networkBudgetMs(gitTimeoutMs()) / 60_000)
+      // Keep the verb-specific success wording in the panel footer (the toast
+      // that used to carry it would cover this very footer).
+      const doneLabel = result.success
+        ? kind === 'sync'
+          ? t('scm.syncDone')
+          : kind === 'push' && target.refspec !== ''
+            ? t('scm.pushRefspecDone').replace('{refspec}', target.refspec)
+            : ''
+        : ''
+      const exitText = fallbackUsed
+        ? `${t('exec.unaryResult')} · ${formatElapsed(result.durationMs)}`
+        : result.timedOut
+          ? `${t('exec.timedOut')} · ${budgetMin} min`
+          : `${doneLabel === '' ? '' : `${doneLabel} · `}${t('exec.exitCode')} ${result.exitCode ?? '?'} · ${formatElapsed(result.durationMs)}${
+            result.error === undefined ? '' : ` · ${result.error}`
+          }`
       setExecPanel(prev => (prev === undefined
         ? prev
         : {
@@ -549,19 +604,13 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
           status: result.success ? 'done' : 'error',
           exitText,
         }))
-      if (result.success) {
-        const lastLine = output.split('\n').filter(line => line.trim() !== '').slice(-1)[0] ?? ''
-        const label = kind === 'sync'
-          ? t('scm.syncDone')
-          : kind === 'push' && target.refspec !== ''
-            ? t('scm.pushRefspecDone').replace('{refspec}', target.refspec)
-            : title
-        toast(`${label} ✓ ${lastLine}`.trim())
-      } else {
-        toast(result.timedOut ? t('exec.timedOut') : t('exec.failed'), true)
-      }
+      // The panel IS the feedback now: a toast would land exactly on the panel's
+      // exit-code footer (toast z-index 100001 vs panel 45) — only failures
+      // still raise one.
+      if (!result.success) toast(result.timedOut ? t('exec.timedOut') : t('exec.failed'), true)
     } catch (error) {
       if (controller.signal.aborted) {
+        cancelledByUser = true
         setExecPanel(prev => (prev === undefined
           ? prev
           : { ...prev, output: execLog.current, status: 'cancelled', elapsedMs: Date.now() - startedAt }))
@@ -574,14 +623,17 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
           output: execLog.current,
           status: 'error',
           elapsedMs: Date.now() - startedAt,
-          exitText: messageOf(error),
+          exitText: `${t('exec.unknownResult')} · ${messageOf(error)}`,
         }))
-      toast(messageOf(error), true)
+      toast(t('exec.unknownResult'), true)
     } finally {
       clearInterval(timer)
+      execTimer.current = undefined
       execAbort.current = undefined
       setBusy(undefined)
-      await refreshAll()
+      // A cancel already stopped the command; a full status+extras refresh would
+      // only pile three more remote git runs onto the user's intent.
+      if (!cancelledByUser) await refreshAll()
     }
   }
 
@@ -721,7 +773,7 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
       {execPanel !== undefined && (
         <ExecPanel
           state={execPanel}
-          onCancel={() => { execAbort.current?.abort() }}
+          onCancel={cancelNetwork}
           onClose={() => { setExecPanel(undefined) }}
           t={t}
         />

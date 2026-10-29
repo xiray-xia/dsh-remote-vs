@@ -126,6 +126,11 @@ export function IconClose(props: IconProps): ReactNode {
   return svg(props.size ?? 12, <path d="M4 4l8 8M12 4l-8 8" />, props.className)
 }
 
+/** Stop: a filled square — the universal "kill this run" mark. */
+export function IconStop(props: IconProps): ReactNode {
+  return svg(props.size ?? 12, <rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.2" fill="currentColor" stroke="none" />, props.className)
+}
+
 /** Copy glyph: two offset sheets, the front one the clipboard's payload. */
 export function IconCopy(props: IconProps): ReactNode {
   return svg(props.size ?? 14, (

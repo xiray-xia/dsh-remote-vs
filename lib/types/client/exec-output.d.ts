@@ -12,7 +12,7 @@ export interface PushTarget {
 export declare function networkCommands(root: string, kind: 'fetch' | 'pull' | 'push' | 'sync', push: PushTarget): string[];
 /** Live-log cap: keep the TAIL, because the head of a long push is never the point. */
 export declare const EXEC_OUTPUT_CAP = 200000;
-/** Append one decoded chunk, keeping at most `cap` trailing characters. */
+/** Append one decoded chunk, folding `\r` progress and keeping the TAIL. */
 export declare function appendExecOutput(previous: string, chunk: string, cap?: number): string;
 /**
  * Split an SSE buffer into complete frames and the incomplete tail.

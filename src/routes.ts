@@ -332,32 +332,57 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           // A reverse proxy must not buffer an event stream into uselessness.
           'X-Accel-Buffering': 'no',
         })
-        let closed = false
+        /** No more events to the client (finished, or the socket broke). */
+        let outputClosed = false
+        /** `res.end` already called. */
+        let ended = false
+        /** The client asked to stop: kill the remote even if the read is still opening. */
+        let cancelRequested = false
+        /** The cancel handle was invoked (only once). */
+        let cancelSent = false
         let cancel: (() => void) | undefined
         /** Server-side forward cap: the client shows a scrolling tail anyway. */
         let sent = 0
         const FORWARD_CAP = 4 * 1024 * 1024
+        /**
+         * Stop the remote process group exactly once.
+         *
+         * The disconnect may happen while `pool.exec` is still acquiring the
+         * channel (slot queue, setsid probe, connect) — the handle does not exist
+         * yet then, so the request is latched and fired the moment `onCancel`
+         * arrives; otherwise a push would finish unseen and uncancellable.
+         */
+        const abortRemote = (): void => {
+          cancelRequested = true
+          if (cancel === undefined || cancelSent) return
+          cancelSent = true
+          cancel()
+        }
         const send = (event: ExecStreamEvent): void => {
-          if (closed) return
+          if (outputClosed) return
           try {
             res.write(`data: ${JSON.stringify(event)}\n\n`)
           } catch {
-            closed = true
+            // A broken socket means the client is gone: stop the remote git too.
+            outputClosed = true
+            abortRemote()
           }
         }
         const heartbeat = setInterval(() => {
-          if (closed) return
+          if (outputClosed) return
           try {
             // SSE comment: keeps an idle connection alive without inventing data.
             res.write(': ping\n\n')
           } catch {
-            closed = true
+            outputClosed = true
+            abortRemote()
           }
         }, 15_000)
         heartbeat.unref?.()
         const stop = (): void => {
-          if (closed) return
-          closed = true
+          if (ended) return
+          ended = true
+          outputClosed = true
           clearInterval(heartbeat)
           try {
             res.end()
@@ -366,22 +391,29 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           }
         }
         res.on('close', () => {
-          // The client aborted (tab closed, cancel button): stop the remote git,
-          // not just our socket — a push left running is worse than none.
-          if (!closed) cancel?.()
+          // Client aborted (tab closed / cancel button / broken socket): stop the
+          // remote git, not just our socket. Fires after a normal end too, where
+          // it is a no-op because the run already settled.
+          abortRemote()
           stop()
         })
         try {
           const result = await pool.exec(body.alias, body.command, {
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
             onData: (stream, text) => {
-              if (closed || sent >= FORWARD_CAP) return
-              sent += text.length
+              if (outputClosed || sent >= FORWARD_CAP) return
+              sent += Buffer.byteLength(text, 'utf8')
               send({ t: stream, d: text })
             },
-            onCancel: (handle) => { cancel = handle },
+            onCancel: (handle) => {
+              cancel = handle
+              if (cancelRequested && !cancelSent) {
+                cancelSent = true
+                handle()
+              }
+            },
           })
-          if (closed) return
+          if (outputClosed) return
           send({
             t: 'exit',
             success: result.success,

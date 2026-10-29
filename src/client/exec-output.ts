@@ -25,19 +25,50 @@ export interface PushTarget {
 export function networkCommands(root: string, kind: 'fetch' | 'pull' | 'push' | 'sync', push: PushTarget): string[] {
   if (kind === 'fetch') return [fetchCommand(root)]
   if (kind === 'pull') return [pullCommand(root)]
-  if (kind === 'push') {
-    return [push.refspec === '' ? pushCommand(root) : pushRefspecCommand(root, push.remote, push.refspec)]
-  }
-  return [pullCommand(root), pushCommand(root)]
+  const pushCmd = push.refspec === '' ? pushCommand(root) : pushRefspecCommand(root, push.remote, push.refspec)
+  if (kind === 'push') return [pushCmd]
+  // Sync keeps its historical order, and honours a refspec when one is given
+  // (the UI currently passes '' for sync, but the API must not quietly drop it).
+  return [pullCommand(root), pushCmd]
 }
 
 /** Live-log cap: keep the TAIL, because the head of a long push is never the point. */
 export const EXEC_OUTPUT_CAP = 200_000
 
-/** Append one decoded chunk, keeping at most `cap` trailing characters. */
+/**
+ * Fold carriage-return progress rewrites onto one line.
+ *
+ * git's progress lines are written as `Counting: 1%\rCounting: 2%\r…` and a
+ * `<pre>` would render every rewrite as its own line (hundreds of them for one
+ * push). Only the content after the last `\r` of a line survives.
+ */
+function foldProgress(text: string): string {
+  if (!text.includes('\r')) return text
+  return text
+    .split('\n')
+    .map(line => {
+      if (!line.includes('\r')) return line
+      // A trailing `\r` (progress finished, then newline) does not erase what
+      // was drawn before it: the visible text is the last NON-EMPTY rewrite.
+      const parts = line.split('\r')
+      for (let index = parts.length - 1; index >= 0; index -= 1) {
+        const part = parts[index] as string
+        if (part !== '') return part
+      }
+      return ''
+    })
+    .join('\n')
+}
+
+/** Append one decoded chunk, folding `\r` progress and keeping the TAIL. */
 export function appendExecOutput(previous: string, chunk: string, cap = EXEC_OUTPUT_CAP): string {
   if (chunk === '') return previous
-  const combined = previous + chunk
+  // Fold only the open (last) line against the new chunk: `previous` is already
+  // folded, so re-scanning the whole 200k tail per chunk would be wasted work.
+  const newline = previous.lastIndexOf('\n')
+  const head = previous.slice(0, newline + 1)
+  const tail = foldProgress(previous.slice(newline + 1) + chunk)
+  const combined = head + tail
   if (combined.length <= cap) return combined
   return combined.slice(combined.length - cap)
 }

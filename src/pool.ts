@@ -326,6 +326,9 @@ export class RemotePool {
             // Already gone.
           }
           if (pgid !== undefined) terminateGroup()
+          // No session wrapper means no process group to signal: say so, like the
+          // timeout path does, instead of a silent "cancelled" with git still up.
+          else if (!session) warnOnce()
           finish({ success: false, exitCode: null, timedOut: false, stdout: out, stderr: err, error: 'cancelled by user' })
         }
         opts.onCancel?.(cancel)
@@ -356,6 +359,20 @@ export class RemotePool {
             // we send ourselves is not.
             if ((code !== null && code !== undefined) || (signalName !== null && signalName !== undefined)) exited = true
             if (timedOut && session && pgid === undefined) warnOnce()
+            // A channel can close before the marker is parsed (or in the middle
+            // of a single-line command's output): flush the held-back text so the
+            // live log does not lose its tail. A partial marker line itself is
+            // bookkeeping and stays hidden.
+            if (pendingForward !== '') {
+              const newline = pendingForward.indexOf('\n')
+              const visible = markerPending
+                ? pendingForward.startsWith(PGID_MARKER)
+                  ? (newline < 0 ? '' : pendingForward.slice(newline + 1))
+                  : pendingForward
+                : pendingForward
+              pendingForward = ''
+              forward('out', visible)
+            }
             // Flush a decoder-held partial character before the final result.
             const tailOut = outDecoder.end()
             const tailErr = errDecoder.end()

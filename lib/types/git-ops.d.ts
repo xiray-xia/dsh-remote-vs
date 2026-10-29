@@ -173,7 +173,17 @@ export declare function renameBranchCommand(workdir: string, from: string, to: s
 export declare function mergeCommand(workdir: string, ref: string): string;
 /** Publish a branch to a remote and set its upstream. */
 export declare function publishBranchCommand(workdir: string, branch: string, remote: string): string;
-/** Fetch every remote, pruning deleted tracking refs. */
+/**
+ * Fetch every remote, pruning deleted tracking refs.
+ *
+ * NOTE: the four NETWORK verbs deliberately do NOT use `statusOk()`. That
+ * wrapper buffers git's output in temp files and cats them back only after the
+ * command exits, which made the live-output panel sit on "waiting…" for the
+ * whole run and then dump everything at once (measured: a 59 s push produced
+ * 0.2 s of output after completion). No pipe is involved here, so the shell
+ * returns git's own exit status directly, and `--progress` forces the progress
+ * lines even though the remote side is not a TTY.
+ */
 export declare function fetchCommand(workdir: string): string;
 /** Pull the current branch (merge, no editor prompt). */
 export declare function pullCommand(workdir: string): string;

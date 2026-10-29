@@ -63,7 +63,7 @@ import {
 } from '../../git-ops.ts'
 import { api, gitTimeoutMs } from '../api.ts'
 import { appendExecOutput, networkBudgetMs, networkCommands, type PushTarget } from '../exec-output.ts'
-import { DEFAULT_GIT_TIMEOUT_MS, DEFAULT_NETWORK_TIMEOUT_MS, MAX_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
+import { DEFAULT_GIT_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
 
 /** Error carrying a message already fit for the UI. */
 export class GitOpError extends Error {}
@@ -88,7 +88,8 @@ export function joinRemote(dir: string, rel: string): string {
  * healthy Gerrit pushes.
  */
 const normalTimeoutMs = (): number => gitTimeoutMs()
-const longTimeoutMs = (): number => Math.min(MAX_TIMEOUT_MS, Math.max(DEFAULT_NETWORK_TIMEOUT_MS, gitTimeoutMs() * 2))
+/** One formula for the network verbs, shared with the streamed path. */
+const longTimeoutMs = (): number => networkBudgetMs(gitTimeoutMs())
 
 /** The readable error for a failed exec result (`run` and the strict probe share it). */
 function failureOf(result: RemoteExecResult, timeoutMs: number): GitOpError {
