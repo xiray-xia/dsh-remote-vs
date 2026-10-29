@@ -13,7 +13,7 @@
  * ancestor disappears with it, taking the only cancel affordance of a running
  * push along. The portal keeps the panel (and its stop button) reachable.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   IconButton,
@@ -26,7 +26,7 @@ import {
   copyText,
   toast,
 } from '../vsc/kit.tsx'
-import { formatElapsed } from '../exec-output.ts'
+import { foldExecOutput, formatElapsed } from '../exec-output.ts'
 
 export type ExecPanelStatus = 'running' | 'done' | 'error' | 'cancelled'
 
@@ -56,8 +56,8 @@ function statusText(state: ExecPanelState, t: (key: string) => string): string {
   return `${state.status === 'done' ? t('exec.done') : t('exec.failed')} · ${formatElapsed(state.elapsedMs)}`
 }
 
-function panelBody(state: ExecPanelState, t: (key: string) => string): string {
-  if (state.output !== '') return state.output
+function panelBody(state: ExecPanelState, folded: string, t: (key: string) => string): string {
+  if (folded !== '') return folded
   return state.status === 'running' ? t('exec.waiting') : t('exec.noOutput')
 }
 
@@ -66,13 +66,15 @@ export function ExecPanel(props: ExecPanelProps): ReactNode {
   /** Collapsed keeps the header (clock + stop) but gives the page its space back. */
   const [collapsed, setCollapsed] = useState(false)
   const bodyRef = useRef<HTMLPreElement>(null)
+  /** `\r` progress is folded once over the WHOLE log (see foldExecOutput). */
+  const folded = useMemo(() => foldExecOutput(state.output), [state.output])
   /** Follow the tail while streaming, until the user scrolls up to read. */
   const followRef = useRef(true)
   useEffect(() => {
     const element = bodyRef.current
     if (element === null || collapsed || !followRef.current) return
     element.scrollTop = element.scrollHeight
-  }, [state.output, state.status, collapsed])
+  }, [folded, state.status, collapsed])
   const onScroll = (): void => {
     const element = bodyRef.current
     if (element === null) return
@@ -88,7 +90,7 @@ export function ExecPanel(props: ExecPanelProps): ReactNode {
         {state.status === 'running' && !collapsed && <MiniSpinner />}
         <IconButton
           title={t('exec.copy')}
-          onClick={() => { void copyText(state.output).then(() => toast(t('exec.copied'))) }}
+          onClick={() => { void copyText(folded).then(() => toast(t('exec.copied'))) }}
         >
           <IconCopy size={13} />
         </IconButton>
@@ -112,7 +114,7 @@ export function ExecPanel(props: ExecPanelProps): ReactNode {
       </div>
       {collapsed ? null : (
         <pre ref={bodyRef} className="rvs-execpanel-body" aria-label={t('exec.log')} onScroll={onScroll}>
-          {panelBody(state, t)}
+          {panelBody(state, folded, t)}
         </pre>
       )}
       {state.exitText !== undefined && <div className="rvs-execpanel-foot">{state.exitText}</div>}

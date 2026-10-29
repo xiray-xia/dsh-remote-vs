@@ -12,7 +12,27 @@ export interface PushTarget {
 export declare function networkCommands(root: string, kind: 'fetch' | 'pull' | 'push' | 'sync', push: PushTarget): string[];
 /** Live-log cap: keep the TAIL, because the head of a long push is never the point. */
 export declare const EXEC_OUTPUT_CAP = 200000;
-/** Append one decoded chunk, folding `\r` progress and keeping the TAIL. */
+/**
+ * Fold carriage-return progress rewrites for DISPLAY.
+ *
+ * git's progress lines are written as `Counting: 1%\rCounting: 2%\r…` and a
+ * `<pre>` would render every rewrite as its own line (hundreds of them for one
+ * push). Only the content after the last `\r` of a line survives.
+ *
+ * Fold at RENDER time, over the complete accumulated text — not inside
+ * `appendExecOutput`. A chunk can end mid-rewrite (git writes bare `\r`s at
+ * arbitrary boundaries), and folding a fragment loses the state that the next
+ * fragment continues: measured against real `git push --progress` stderr, the
+ * per-chunk fold glued `Counting: 1%Counting: 2%…` into one long line.
+ */
+export declare function foldExecOutput(text: string): string;
+/**
+ * Append one decoded chunk, keeping the TAIL.
+ *
+ * The raw `\r` bytes are preserved on purpose: the view folds them once, over
+ * the whole accumulated log, so a rewrite split across two chunks still folds
+ * correctly (`foldExecOutput`).
+ */
 export declare function appendExecOutput(previous: string, chunk: string, cap?: number): string;
 /**
  * Split an SSE buffer into complete frames and the incomplete tail.

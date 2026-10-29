@@ -36,13 +36,19 @@ export function networkCommands(root: string, kind: 'fetch' | 'pull' | 'push' | 
 export const EXEC_OUTPUT_CAP = 200_000
 
 /**
- * Fold carriage-return progress rewrites onto one line.
+ * Fold carriage-return progress rewrites for DISPLAY.
  *
  * git's progress lines are written as `Counting: 1%\rCounting: 2%\r…` and a
  * `<pre>` would render every rewrite as its own line (hundreds of them for one
  * push). Only the content after the last `\r` of a line survives.
+ *
+ * Fold at RENDER time, over the complete accumulated text — not inside
+ * `appendExecOutput`. A chunk can end mid-rewrite (git writes bare `\r`s at
+ * arbitrary boundaries), and folding a fragment loses the state that the next
+ * fragment continues: measured against real `git push --progress` stderr, the
+ * per-chunk fold glued `Counting: 1%Counting: 2%…` into one long line.
  */
-function foldProgress(text: string): string {
+export function foldExecOutput(text: string): string {
   if (!text.includes('\r')) return text
   return text
     .split('\n')
@@ -60,15 +66,16 @@ function foldProgress(text: string): string {
     .join('\n')
 }
 
-/** Append one decoded chunk, folding `\r` progress and keeping the TAIL. */
+/**
+ * Append one decoded chunk, keeping the TAIL.
+ *
+ * The raw `\r` bytes are preserved on purpose: the view folds them once, over
+ * the whole accumulated log, so a rewrite split across two chunks still folds
+ * correctly (`foldExecOutput`).
+ */
 export function appendExecOutput(previous: string, chunk: string, cap = EXEC_OUTPUT_CAP): string {
   if (chunk === '') return previous
-  // Fold only the open (last) line against the new chunk: `previous` is already
-  // folded, so re-scanning the whole 200k tail per chunk would be wasted work.
-  const newline = previous.lastIndexOf('\n')
-  const head = previous.slice(0, newline + 1)
-  const tail = foldProgress(previous.slice(newline + 1) + chunk)
-  const combined = head + tail
+  const combined = previous + chunk
   if (combined.length <= cap) return combined
   return combined.slice(combined.length - cap)
 }

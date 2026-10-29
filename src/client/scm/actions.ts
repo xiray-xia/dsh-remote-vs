@@ -63,7 +63,7 @@ import {
 } from '../../git-ops.ts'
 import { api, gitTimeoutMs } from '../api.ts'
 import { appendExecOutput, networkBudgetMs, networkCommands, type PushTarget } from '../exec-output.ts'
-import { DEFAULT_GIT_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
+import { timeoutSeconds } from '../../timeouts.ts'
 
 /** Error carrying a message already fit for the UI. */
 export class GitOpError extends Error {}

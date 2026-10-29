@@ -3505,6 +3505,25 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
  * when it matters.
  */
 .rvs-execpanel {
+  /* PORTALED to <body>, i.e. OUTSIDE `.rvs-root` where these tokens are
+     declared — without this block every var() below resolves to nothing and the
+     panel renders transparent and borderless over the page content. Keep this
+     subset in sync with `.rvs-root`; the dark code surfaces get their own
+     `body[data-ds-dark-theme]` override right after this rule. */
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
+  --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
+  --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-git-m: #e2b714;
+  --rvs-git-a: #4ec9b0;
+  --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  --rvs-code-bg: #1e1e1e;
+  --rvs-code-fg: #d4d4d4;
   position: fixed;
   right: 16px;
   bottom: 16px;
@@ -3520,6 +3539,12 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   color: var(--rvs-fg);
   box-shadow: 0 18px 60px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .28);
 }
+
+body[data-ds-dark-theme] .rvs-execpanel {
+  --rvs-code-bg: #1e1e1e;
+  --rvs-code-fg: #d4d4d4;
+}
+
 
 .rvs-execpanel-head {
   flex: none;
