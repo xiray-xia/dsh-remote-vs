@@ -2097,7 +2097,11 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   flex-direction: column;
   overflow: hidden;
   border-top: 1px solid var(--rvs-border);
-  background: var(--rvs-code-bg);
+  /* Same glass as the graph above (the sidebar's own backdrop shows through):
+     an opaque `.rvs-code-bg` here read as a separate dark slab glued under the
+     list. Patch rows already carry their own translucent add/del washes, so the
+     diff stays legible without a filled background. */
+  background: transparent;
 }
 
 /* Full-height mode: the graph is hidden by the panel, so the pane takes the
