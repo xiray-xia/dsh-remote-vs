@@ -100,6 +100,18 @@ export declare const api: {
         }>;
     };
     exec: (alias: string, command: string, timeoutMs?: number) => Promise<RemoteExecResult>;
+    /**
+     * Streaming exec: the network verbs' live log.
+     *
+     * The route answers as SSE frames; `onData` receives decoded text while the
+     * command runs, and the promise settles on the `exit` frame. An aborted
+     * `signal` cancels the remote process group on the host side (the route acts
+     * on the closed response), so a cancel button can actually stop a push.
+     */
+    execStream: (alias: string, command: string, timeoutMs: number, handlers: {
+        onData?: (stream: "out" | "err", text: string) => void;
+        signal?: AbortSignal;
+    }) => Promise<RemoteExecResult>;
     getWorkspaces: () => Promise<{
         workspaces: RemoteWorkspaceBinding[];
     } & RemoteRoutingStatus & RemotePluginMeta>;

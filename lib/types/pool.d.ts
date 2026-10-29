@@ -4,6 +4,15 @@ import type { RemoteExecResult } from './protocol.ts';
 export interface ExecOptions {
     timeoutMs?: number;
     /**
+     * Live sink for the command's output (the streaming network verbs). Called
+     * with already-decoded text so a multi-byte character split across ssh2
+     * chunks is never mangled; the accumulated `stdout`/`stderr` on the result
+     * keep the same bytes.
+     */
+    onData?: (stream: 'out' | 'err', text: string) => void;
+    /** Receives the cancel handle once the run is under way (see `cancel`). */
+    onCancel?: (cancel: () => void) => void;
+    /**
      * Internal: send the line exactly as given — no session wrapper, and no group
      * kill when it times out. Only the two commands the pool sends on its own
      * behalf (the setsid probe and the group kill) use it; wrapping those would

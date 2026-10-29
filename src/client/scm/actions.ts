@@ -62,7 +62,8 @@ import {
   unstageCommand,
 } from '../../git-ops.ts'
 import { api, gitTimeoutMs } from '../api.ts'
-import { DEFAULT_GIT_TIMEOUT_MS, MAX_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
+import { appendExecOutput, networkBudgetMs, networkCommands, type PushTarget } from '../exec-output.ts'
+import { DEFAULT_GIT_TIMEOUT_MS, DEFAULT_NETWORK_TIMEOUT_MS, MAX_TIMEOUT_MS, timeoutSeconds } from '../../timeouts.ts'
 
 /** Error carrying a message already fit for the UI. */
 export class GitOpError extends Error {}
@@ -80,12 +81,14 @@ export function joinRemote(dir: string, rel: string): string {
  * These were fixed (120 s normal / 300 s network) and were the reason a large
  * remote repository reported "git timed out" while git was still working: the
  * explorer's own client deadline cut in even earlier. Both now follow the
- * configured `gitTimeoutMs` (default 300 s), and the network verbs get double
- * that (capped by the Host route's ceiling), because fetch/pull/push on a big
- * tree legitimately outlast a status read.
+ * configured `gitTimeoutMs` (default 300 s), and the network verbs get at least
+ * `DEFAULT_NETWORK_TIMEOUT_MS` (20 min) — or double the configured budget when
+ * that is larger — capped by the Host route's 30-minute ceiling. A push waits
+ * for the far end's hooks and pack transfer, so the old 10-minute cap killed
+ * healthy Gerrit pushes.
  */
 const normalTimeoutMs = (): number => gitTimeoutMs()
-const longTimeoutMs = (): number => Math.min(MAX_TIMEOUT_MS, Math.max(DEFAULT_GIT_TIMEOUT_MS, gitTimeoutMs() * 2))
+const longTimeoutMs = (): number => Math.min(MAX_TIMEOUT_MS, Math.max(DEFAULT_NETWORK_TIMEOUT_MS, gitTimeoutMs() * 2))
 
 /** The readable error for a failed exec result (`run` and the strict probe share it). */
 function failureOf(result: RemoteExecResult, timeoutMs: number): GitOpError {
@@ -415,6 +418,42 @@ export async function syncRepo(alias: string, root: string, kind: 'fetch' | 'pul
 export async function pushWithRefspec(alias: string, root: string, remote: string, refspec: string): Promise<string> {
   const out = await run(alias, pushRefspecCommand(root, remote, refspec), longTimeoutMs())
   return `${out.stdout}\n${out.stderr}`.trim()
+}
+
+export interface NetworkStreamHandlers {
+  onData?: (stream: 'out' | 'err', text: string) => void
+  signal?: AbortSignal
+}
+
+/**
+ * Run one network verb over the STREAMING exec route and accumulate its log.
+ *
+ * Stops at the first failing step (a sync whose pull failed must not push a
+ * half-merged tree). The caller owns the live panel; this returns only once the
+ * whole verb has settled, with `output` capped to its tail.
+ */
+export async function streamNetworkVerb(
+  alias: string,
+  root: string,
+  kind: 'fetch' | 'pull' | 'push' | 'sync',
+  push: PushTarget,
+  handlers: NetworkStreamHandlers = {},
+): Promise<{ result: RemoteExecResult; output: string }> {
+  const timeoutMs = networkBudgetMs(gitTimeoutMs())
+  let output = ''
+  let result: RemoteExecResult | undefined
+  for (const command of networkCommands(root, kind, push)) {
+    result = await api.execStream(alias, command, timeoutMs, {
+      ...(handlers.signal === undefined ? {} : { signal: handlers.signal }),
+      onData: (stream, text) => {
+        output = appendExecOutput(output, text)
+        handlers.onData?.(stream, text)
+      },
+    })
+    if (!result.success) break
+    if (kind === 'sync') output = appendExecOutput(output, '\n')
+  }
+  return { result: result as RemoteExecResult, output }
 }
 
 /** Branch verbs. */

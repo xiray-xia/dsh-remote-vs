@@ -3493,3 +3493,89 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   color: var(--rvs-error, #f85149);
   font-size: 11.5px;
 }
+
+/* --------------------------------------------------- streaming exec panel */
+
+/**
+ * Live log for the network verbs (fetch / pull / push / sync).
+ *
+ * Fixed to the viewport's bottom-right instead of joining the panel's own
+ * column: the pane can be collapsed or scrolled away while the push runs, and a
+ * dialog that vanishes with its parent would hide the cancel button exactly
+ * when it matters.
+ */
+.rvs-execpanel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 45;
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(60vh, 520px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 10px;
+  background: var(--rvs-overlay);
+  color: var(--rvs-fg);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .28);
+}
+
+.rvs-execpanel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-execpanel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rvs-execpanel-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rvs-execpanel-status.done { color: var(--rvs-git-a); }
+.rvs-execpanel-status.error { color: var(--rvs-danger); }
+.rvs-execpanel-status.cancelled { color: var(--rvs-git-m); }
+
+.rvs-execpanel-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.rvs-execpanel-body {
+  flex: 1;
+  min-height: 60px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  background: var(--rvs-code-bg);
+  color: var(--rvs-code-fg);
+  font-family: var(--rvs-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.rvs-execpanel-foot {
+  flex: none;
+  padding: 4px 10px 6px;
+  border-top: 1px solid var(--rvs-border);
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+

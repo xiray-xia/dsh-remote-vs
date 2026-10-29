@@ -19,8 +19,14 @@
 import type { RemoteTimeouts } from './protocol.ts';
 /** Smallest accepted timeout: below this, local work would start failing. */
 export declare const MIN_TIMEOUT_MS = 1000;
-/** Largest accepted timeout — the exec route clamps to the same ceiling. */
-export declare const MAX_TIMEOUT_MS = 600000;
+/**
+ * Largest accepted timeout — the exec route clamps to the same ceiling.
+ *
+ * Raised from 10 to 30 minutes when the SCM push gained a live output panel:
+ * a Gerrit push on a large repo waits for server-side hooks and can outlast
+ * the old ceiling with nothing wrong on either side.
+ */
+export declare const MAX_TIMEOUT_MS = 1800000;
 /**
  * Default for one git command (status/log/branches/diff over exec).
  *
@@ -30,6 +36,15 @@ export declare const MAX_TIMEOUT_MS = 600000;
  * plausible cold index walk.
  */
 export declare const DEFAULT_GIT_TIMEOUT_MS = 300000;
+/**
+ * Floor for the NETWORK verbs (fetch / pull / push / sync).
+ *
+ * These wait on the far end's hooks and pack transfer, not on this machine, so
+ * their budget starts at 20 minutes and grows with `gitTimeoutMs × 2` up to
+ * `MAX_TIMEOUT_MS`. The old formula started at 5 minutes and capped at 10, which
+ * killed healthy Gerrit pushes.
+ */
+export declare const DEFAULT_NETWORK_TIMEOUT_MS = 1200000;
 /** Default for one SFTP file read (editor, diff sides, document preview). */
 export declare const DEFAULT_READ_TIMEOUT_MS = 120000;
 /** The pair every half starts from before any Host answer arrives. */

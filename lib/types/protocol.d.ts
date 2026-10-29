@@ -9,6 +9,8 @@ export declare const REMOTE_API: {
     readonly test: "/api/dsh-remote/test";
     readonly keygen: "/api/dsh-remote/keygen";
     readonly exec: "/api/dsh-remote/exec";
+    /** Streaming exec (server-sent events) for the long network verbs. */
+    readonly execStream: "/api/dsh-remote/exec-stream";
     readonly files: "/api/dsh-remote/files";
     /** Streaming binary upload: raw request body, host and path in the query. */
     readonly upload: "/api/dsh-remote/upload";
@@ -212,6 +214,27 @@ export interface RemoteExecResult {
     /** Connection error message when the command never ran. */
     error?: string | undefined;
 }
+/**
+ * One server-sent event of the streaming exec route.
+ *
+ * Used by the long network verbs (fetch / pull / push / sync) so the live git
+ * output can be shown while the command is still running; the unary exec route
+ * keeps serving everything that only needs the result.
+ */
+export type ExecStreamEvent = {
+    t: 'out';
+    d: string;
+} | {
+    t: 'err';
+    d: string;
+} | {
+    t: 'exit';
+    success: boolean;
+    exitCode: number | null;
+    timedOut: boolean;
+    durationMs: number;
+    error?: string;
+};
 /** Client -> server terminal frames (JSON text). */
 export type TerminalClientFrame = {
     t: 'in';

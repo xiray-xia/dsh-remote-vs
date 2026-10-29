@@ -3,6 +3,7 @@
  */
 import {
   REMOTE_API,
+  type ExecStreamEvent,
   type GitBranch,
   type GitCommit,
   type GitShow,
@@ -23,6 +24,7 @@ import {
   type RemoteWorkspaceBinding,
 } from '../protocol.ts'
 import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
+import { parseSseFrame, takeSseFrames } from './exec-output.ts'
 import {
   branchesCommand,
   gitFailed,
@@ -230,6 +232,65 @@ export const api = {
   // -- exec
   exec: (alias: string, command: string, timeoutMs?: number) =>
     post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs }),
+  /**
+   * Streaming exec: the network verbs' live log.
+   *
+   * The route answers as SSE frames; `onData` receives decoded text while the
+   * command runs, and the promise settles on the `exit` frame. An aborted
+   * `signal` cancels the remote process group on the host side (the route acts
+   * on the closed response), so a cancel button can actually stop a push.
+   */
+  execStream: async (
+    alias: string,
+    command: string,
+    timeoutMs: number,
+    handlers: { onData?: (stream: 'out' | 'err', text: string) => void; signal?: AbortSignal },
+  ): Promise<RemoteExecResult> => {
+    const response = await fetch(REMOTE_API.execStream, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ alias, command, timeoutMs }),
+      ...(handlers.signal === undefined ? {} : { signal: handlers.signal }),
+    })
+    if (!response.ok || response.body === null) {
+      let message = `request failed: HTTP ${response.status}`
+      try {
+        const data = await response.json() as { error?: unknown }
+        if (typeof data.error === 'string') message = data.error
+      } catch {
+        // Keep the status-based message.
+      }
+      throw new RemoteApiError(response.status, message)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let exit: Extract<ExecStreamEvent, { t: 'exit' }> | undefined
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const { frames, rest } = takeSseFrames(buffer)
+      buffer = rest
+      for (const frame of frames) {
+        const payload = parseSseFrame(frame)
+        if (payload === null || typeof payload !== 'object') continue
+        const event = payload as ExecStreamEvent
+        if (event.t === 'out' || event.t === 'err') handlers.onData?.(event.t, event.d)
+        else if (event.t === 'exit') exit = event
+      }
+    }
+    if (exit === undefined) throw new RemoteApiError(502, 'stream ended without an exit frame')
+    return {
+      success: exit.success,
+      exitCode: exit.exitCode,
+      timedOut: exit.timedOut,
+      stdout: '',
+      stderr: '',
+      durationMs: exit.durationMs,
+      ...(exit.error === undefined ? {} : { error: exit.error }),
+    }
+  },
   // -- workspaces
   getWorkspaces: () => call<{ workspaces: RemoteWorkspaceBinding[] } & RemoteRoutingStatus & RemotePluginMeta>(REMOTE_API.workspaces),
   createWorkspace: (payload: { name: string; alias: string; remotePath: string }) =>

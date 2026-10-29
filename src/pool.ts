@@ -8,6 +8,7 @@
  */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { StringDecoder } from 'node:string_decoder'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import type { RemoteStore } from './store.ts'
 import type { RemoteExecResult, RemoteHostEntry } from './protocol.ts'
@@ -99,6 +100,15 @@ interface Pooled {
 
 export interface ExecOptions {
   timeoutMs?: number
+  /**
+   * Live sink for the command's output (the streaming network verbs). Called
+   * with already-decoded text so a multi-byte character split across ssh2
+   * chunks is never mangled; the accumulated `stdout`/`stderr` on the result
+   * keep the same bytes.
+   */
+  onData?: (stream: 'out' | 'err', text: string) => void
+  /** Receives the cancel handle once the run is under way (see `cancel`). */
+  onCancel?: (cancel: () => void) => void
   /**
    * Internal: send the line exactly as given — no session wrapper, and no group
    * kill when it times out. Only the two commands the pool sends on its own
@@ -291,6 +301,34 @@ export class RemotePool {
         let stream: ClientChannel | undefined
         let out = ''
         let err = ''
+        /** Set by the cancel handle: closed + group-killed, reported as error. */
+        let cancelled = false
+        const outDecoder = new StringDecoder('utf8')
+        const errDecoder = new StringDecoder('utf8')
+        /** Wrapper marker never reaches the live log (see the data handler). */
+        let pendingForward = ''
+        const forward = (kind: 'out' | 'err', text: string): void => {
+          if (text !== '' && opts.onData !== undefined) opts.onData(kind, text)
+        }
+        /**
+         * Cancel the run: close our channel and kill the remote process group.
+         *
+         * `finish` reports it as an error rather than a timeout — "the user
+         * stopped it" and "the budget ran out" are different stories, and the
+         * UI must not blame the host for the former.
+         */
+        const cancel = (): void => {
+          if (settled) return
+          cancelled = true
+          try {
+            stream?.close()
+          } catch {
+            // Already gone.
+          }
+          if (pgid !== undefined) terminateGroup()
+          finish({ success: false, exitCode: null, timedOut: false, stdout: out, stderr: err, error: 'cancelled by user' })
+        }
+        opts.onCancel?.(cancel)
         conn.exec(session ? sessionLine(command) : command, (execError, channel) => {
           if (execError !== undefined && execError !== null) {
             finish({ success: false, exitCode: null, timedOut: false, stdout: '', stderr: '', error: execError.message })
@@ -318,11 +356,24 @@ export class RemotePool {
             // we send ourselves is not.
             if ((code !== null && code !== undefined) || (signalName !== null && signalName !== undefined)) exited = true
             if (timedOut && session && pgid === undefined) warnOnce()
+            // Flush a decoder-held partial character before the final result.
+            const tailOut = outDecoder.end()
+            const tailErr = errDecoder.end()
+            if (tailOut !== '') { out = appendCapped(out, tailOut); forward('out', tailOut) }
+            if (tailErr !== '') { err = appendCapped(err, tailErr); forward('err', tailErr) }
             finish({ success: code === 0, exitCode: code, timedOut: false, stdout: out, stderr: err })
           })
           channel.on('data', (chunk: Buffer) => {
-            out = appendCapped(out, chunk.toString('utf8'))
-            if (pgid !== undefined || !markerPending) return
+            const text = outDecoder.write(chunk)
+            out = appendCapped(out, text)
+            if (pgid !== undefined || !markerPending) {
+              forward('out', text)
+              return
+            }
+            // The wrapper's group-marker line is bookkeeping, not command
+            // output: hold output until the marker is resolved, then forward
+            // only what the command itself printed.
+            pendingForward += text
             const marker = takePgid(out)
             if (marker.pgid !== undefined) {
               pgid = marker.pgid
@@ -331,13 +382,25 @@ export class RemotePool {
               // Only reachable when the timeout fired before this channel was
               // open: the group had no id then, so kill it now that it has one.
               if (timedOut) terminateGroup()
-            } else if (out.includes('\n')) {
+              if (cancelled) terminateGroup()
+              const newline = pendingForward.indexOf('\n')
+              const visible = newline < 0 ? '' : pendingForward.slice(newline + 1)
+              pendingForward = ''
+              forward('out', visible)
+              return
+            }
+            if (out.includes('\n') || pendingForward.length > 8192) {
               // The first line is the command's own output, not our marker.
               markerPending = false
+              const visible = pendingForward
+              pendingForward = ''
+              forward('out', visible)
             }
           })
           channel.stderr.on('data', (chunk: Buffer) => {
-            err = appendCapped(err, chunk.toString('utf8'))
+            const text = errDecoder.write(chunk)
+            err = appendCapped(err, text)
+            forward('err', text)
           })
         })
       })

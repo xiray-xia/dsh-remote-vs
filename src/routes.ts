@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { readJsonBody, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
-import { REMOTE_API, type ImportReport, type RemoteTimeouts } from './protocol.ts'
+import { REMOTE_API, type ExecStreamEvent, type ImportReport, type RemoteTimeouts } from './protocol.ts'
 import type { HostPayload, RemoteStore } from './store.ts'
 import type { RemotePool } from './pool.ts'
 import type { RemoteWorlds } from './p2/worlds.ts'
@@ -300,6 +300,108 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         }
         const timeoutMs = clampExecTimeout(body.timeoutMs)
         writeJson(res, 200, await pool.exec(body.alias, body.command, timeoutMs === undefined ? {} : { timeoutMs }))
+      },
+    },
+    // ----------------------------------------------------- exec (streaming)
+    {
+      kind: 'exact',
+      path: REMOTE_API.execStream,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const body = (await readJsonBody(req, { objectOnly: true })) as {
+          alias?: unknown
+          command?: unknown
+          timeoutMs?: unknown
+        } | null
+        if (body === null || typeof body.alias !== 'string' || typeof body.command !== 'string' || body.command === '') {
+          writeJson(res, 400, { error: 'alias and a non-empty command are required' })
+          return
+        }
+        const timeoutMs = clampExecTimeout(body.timeoutMs)
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          // A reverse proxy must not buffer an event stream into uselessness.
+          'X-Accel-Buffering': 'no',
+        })
+        let closed = false
+        let cancel: (() => void) | undefined
+        /** Server-side forward cap: the client shows a scrolling tail anyway. */
+        let sent = 0
+        const FORWARD_CAP = 4 * 1024 * 1024
+        const send = (event: ExecStreamEvent): void => {
+          if (closed) return
+          try {
+            res.write(`data: ${JSON.stringify(event)}\n\n`)
+          } catch {
+            closed = true
+          }
+        }
+        const heartbeat = setInterval(() => {
+          if (closed) return
+          try {
+            // SSE comment: keeps an idle connection alive without inventing data.
+            res.write(': ping\n\n')
+          } catch {
+            closed = true
+          }
+        }, 15_000)
+        heartbeat.unref?.()
+        const stop = (): void => {
+          if (closed) return
+          closed = true
+          clearInterval(heartbeat)
+          try {
+            res.end()
+          } catch {
+            // Already gone.
+          }
+        }
+        res.on('close', () => {
+          // The client aborted (tab closed, cancel button): stop the remote git,
+          // not just our socket — a push left running is worse than none.
+          if (!closed) cancel?.()
+          stop()
+        })
+        try {
+          const result = await pool.exec(body.alias, body.command, {
+            ...(timeoutMs === undefined ? {} : { timeoutMs }),
+            onData: (stream, text) => {
+              if (closed || sent >= FORWARD_CAP) return
+              sent += text.length
+              send({ t: stream, d: text })
+            },
+            onCancel: (handle) => { cancel = handle },
+          })
+          if (closed) return
+          send({
+            t: 'exit',
+            success: result.success,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: result.durationMs,
+            ...(result.error === undefined ? {} : { error: result.error }),
+          })
+        } catch (error) {
+          send({
+            t: 'exit',
+            success: false,
+            exitCode: null,
+            timedOut: false,
+            durationMs: 0,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        } finally {
+          stop()
+        }
       },
     },
     // ------------------------------------------------------------- files

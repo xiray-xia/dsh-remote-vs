@@ -9,7 +9,7 @@
  * and the change list never disagree.
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
-import type { GitBranch, GitRemote, GitStash } from '../../protocol.ts'
+import type { GitBranch, GitRemote, GitStash, RemoteExecResult } from '../../protocol.ts'
 import { gitReadSettleMs, useExplorer } from '../store.tsx'
 import {
   branchOp,
@@ -23,8 +23,11 @@ import {
   pushWithRefspec,
   remoteOp,
   stashOp,
+  streamNetworkVerb,
   syncRepo,
 } from './actions.ts'
+import { appendExecOutput, formatElapsed, type PushTarget } from '../exec-output.ts'
+import { ExecPanel, type ExecPanelState } from './ExecPanel.tsx'
 import type { ChangeEntry } from './status-map.ts'
 import { rowVerb } from './status-map.ts'
 import { ReadQueue } from './read-queue.ts'
@@ -101,6 +104,10 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const store = useExplorer()
   const { t, lang, buckets, head, alias, repoRoot } = store
   const [folded, setFolded] = useState<Record<string, boolean>>({})
+  /** Live log of the running network verb (undefined = panel closed). */
+  const [execPanel, setExecPanel] = useState<ExecPanelState | undefined>(undefined)
+  const execAbort = useRef<AbortController | undefined>(undefined)
+  const execLog = useRef('')
   const [message, setMessage] = useState<string>(() => {
     try {
       return localStorage.getItem(MSG_KEY) ?? ''
@@ -455,16 +462,127 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
       })
       if (!ok) return
     }
-    await guard(kind, async () => {
-      const output = refspec === ''
-        ? await syncRepo(alias, repoRoot, kind)
-        : await pushWithRefspec(alias, repoRoot, remote, refspec)
-      const lastLine = output.split('\n').filter(line => line.trim() !== '').slice(-1)[0] ?? ''
-      const done = refspec === ''
-        ? t('scm.syncDone')
-        : t('scm.pushRefspecDone').replace('{refspec}', refspec)
-      toast(`${done} ${lastLine}`.trim())
-    })
+    const title = kind === 'push'
+      ? t('scm.pushTitle')
+      : kind === 'sync'
+        ? t('scm.syncTitle')
+        : kind === 'fetch'
+          ? t('scm.fetch')
+          : t('scm.pull')
+    await runNetwork(kind, title, { refspec, remote })
+  }
+
+  /**
+   * Run one network verb with its live output on screen.
+   *
+   * `streamNetworkVerb` speaks the SSE route; an older Host that has no such
+   * route falls back to the unary verb and shows the complete result in the same
+   * panel. The timer and the log are painted on their own 250 ms cadence — a
+   * per-chunk setState would re-render the whole SCM panel for every line git
+   * prints.
+   */
+  const runNetwork = async (
+    kind: 'fetch' | 'pull' | 'push' | 'sync',
+    title: string,
+    target: PushTarget,
+  ): Promise<void> => {
+    if (repoRoot === undefined) return
+    const startedAt = Date.now()
+    const controller = new AbortController()
+    execAbort.current = controller
+    execLog.current = ''
+    setExecPanel({ title, output: '', status: 'running', startedAt, elapsedMs: 0 })
+    setBusy(kind)
+    let painted = ''
+    const timer = setInterval(() => {
+      if (execLog.current !== painted) {
+        painted = execLog.current
+        setExecPanel(prev => (prev === undefined || prev.status !== 'running'
+          ? prev
+          : { ...prev, output: painted, elapsedMs: Date.now() - startedAt }))
+        return
+      }
+      setExecPanel(prev => (prev === undefined || prev.status !== 'running'
+        ? prev
+        : { ...prev, elapsedMs: Date.now() - startedAt }))
+    }, 250)
+    try {
+      let result: RemoteExecResult
+      let output = ''
+      try {
+        const streamed = await streamNetworkVerb(alias, repoRoot, kind, target, {
+          signal: controller.signal,
+          onData: (_stream, text) => {
+            execLog.current = appendExecOutput(execLog.current, text)
+          },
+        })
+        result = streamed.result
+        output = streamed.output
+        execLog.current = output
+      } catch (error) {
+        if (controller.signal.aborted) throw error
+        // No streaming route (older Host): the unary verb still has the answer.
+        output = kind === 'push' && target.refspec !== ''
+          ? await pushWithRefspec(alias, repoRoot, target.remote, target.refspec)
+          : await syncRepo(alias, repoRoot, kind)
+        execLog.current = appendExecOutput('', output)
+        result = {
+          success: true,
+          exitCode: 0,
+          timedOut: false,
+          stdout: output,
+          stderr: '',
+          durationMs: Date.now() - startedAt,
+        }
+      }
+      const exitText = result.timedOut
+        ? t('exec.timedOut')
+        : `${t('exec.exitCode')} ${result.exitCode ?? '?'} · ${formatElapsed(result.durationMs)}${
+          result.error === undefined ? '' : ` · ${result.error}`
+        }`
+      setExecPanel(prev => (prev === undefined
+        ? prev
+        : {
+          ...prev,
+          output: execLog.current,
+          elapsedMs: Date.now() - startedAt,
+          status: result.success ? 'done' : 'error',
+          exitText,
+        }))
+      if (result.success) {
+        const lastLine = output.split('\n').filter(line => line.trim() !== '').slice(-1)[0] ?? ''
+        const label = kind === 'sync'
+          ? t('scm.syncDone')
+          : kind === 'push' && target.refspec !== ''
+            ? t('scm.pushRefspecDone').replace('{refspec}', target.refspec)
+            : title
+        toast(`${label} ✓ ${lastLine}`.trim())
+      } else {
+        toast(result.timedOut ? t('exec.timedOut') : t('exec.failed'), true)
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setExecPanel(prev => (prev === undefined
+          ? prev
+          : { ...prev, output: execLog.current, status: 'cancelled', elapsedMs: Date.now() - startedAt }))
+        return
+      }
+      setExecPanel(prev => (prev === undefined
+        ? prev
+        : {
+          ...prev,
+          output: execLog.current,
+          status: 'error',
+          elapsedMs: Date.now() - startedAt,
+          exitText: messageOf(error),
+        }))
+      toast(messageOf(error), true)
+    } finally {
+      clearInterval(timer)
+      execAbort.current = undefined
+      setBusy(undefined)
+      await refreshAll()
+    }
   }
 
   const saveStash = async (): Promise<void> => {
@@ -600,6 +718,14 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
 
   return (
     <div className="rvs-pane grow">
+      {execPanel !== undefined && (
+        <ExecPanel
+          state={execPanel}
+          onCancel={() => { execAbort.current?.abort() }}
+          onClose={() => { setExecPanel(undefined) }}
+          t={t}
+        />
+      )}
       <div className="rvs-header">
         <span className="rvs-title">{t('scm.title')}</span>
         {store.gitBusy && <MiniSpinner />}

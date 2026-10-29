@@ -10,6 +10,8 @@ export const REMOTE_API = {
   test: '/api/dsh-remote/test',
   keygen: '/api/dsh-remote/keygen',
   exec: '/api/dsh-remote/exec',
+  /** Streaming exec (server-sent events) for the long network verbs. */
+  execStream: '/api/dsh-remote/exec-stream',
   files: '/api/dsh-remote/files',
   /** Streaming binary upload: raw request body, host and path in the query. */
   upload: '/api/dsh-remote/upload',
@@ -215,6 +217,18 @@ export interface RemoteExecResult {
   /** Connection error message when the command never ran. */
   error?: string | undefined
 }
+
+/**
+ * One server-sent event of the streaming exec route.
+ *
+ * Used by the long network verbs (fetch / pull / push / sync) so the live git
+ * output can be shown while the command is still running; the unary exec route
+ * keeps serving everything that only needs the result.
+ */
+export type ExecStreamEvent =
+  | { t: 'out'; d: string }
+  | { t: 'err'; d: string }
+  | { t: 'exit'; success: boolean; exitCode: number | null; timedOut: boolean; durationMs: number; error?: string }
 
 /** Client -> server terminal frames (JSON text). */
 export type TerminalClientFrame =

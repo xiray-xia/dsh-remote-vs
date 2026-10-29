@@ -8,7 +8,8 @@
  * messages a user can act on (missing identity, no upstream, conflicts, ...).
  */
 import { REMOTE_API } from '../../protocol.ts';
-import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteRead } from '../../protocol.ts';
+import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts';
+import { type PushTarget } from '../exec-output.ts';
 /** Error carrying a message already fit for the UI. */
 export declare class GitOpError extends Error {
 }
@@ -151,6 +152,21 @@ export declare function syncRepo(alias: string, root: string, kind: 'fetch' | 'p
  * `HEAD:refs/for/<branch>`). Same timeout budget as the other network verbs.
  */
 export declare function pushWithRefspec(alias: string, root: string, remote: string, refspec: string): Promise<string>;
+export interface NetworkStreamHandlers {
+    onData?: (stream: 'out' | 'err', text: string) => void;
+    signal?: AbortSignal;
+}
+/**
+ * Run one network verb over the STREAMING exec route and accumulate its log.
+ *
+ * Stops at the first failing step (a sync whose pull failed must not push a
+ * half-merged tree). The caller owns the live panel; this returns only once the
+ * whole verb has settled, with `output` capped to its tail.
+ */
+export declare function streamNetworkVerb(alias: string, root: string, kind: 'fetch' | 'pull' | 'push' | 'sync', push: PushTarget, handlers?: NetworkStreamHandlers): Promise<{
+    result: RemoteExecResult;
+    output: string;
+}>;
 /** Branch verbs. */
 export declare function branchOp(alias: string, root: string, op: {
     kind: 'checkout';
