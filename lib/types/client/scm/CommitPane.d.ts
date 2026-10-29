@@ -58,6 +58,10 @@ export interface CommitPaneProps {
     onFocusPath: (path: string) => void;
     /** `origPath` is a rename source: the editor drill-down must diff BOTH paths. */
     onOpenFile: (path: string, origPath?: string) => void;
+    /** Reveal a changed file's containing directory in the explorer. */
+    onRevealFile: (path: string) => void;
+    /** Open a terminal tab already `cd`d into the file's directory. */
+    onOpenTerminal: (path: string) => void;
     onCheckout: () => void;
     onReload: () => void;
     t: Translate;

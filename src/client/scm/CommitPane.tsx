@@ -121,6 +121,10 @@ export interface CommitPaneProps {
   onFocusPath: (path: string) => void
   /** `origPath` is a rename source: the editor drill-down must diff BOTH paths. */
   onOpenFile: (path: string, origPath?: string) => void
+  /** Reveal a changed file's containing directory in the explorer. */
+  onRevealFile: (path: string) => void
+  /** Open a terminal tab already `cd`d into the file's directory. */
+  onOpenTerminal: (path: string) => void
   onCheckout: () => void
   onReload: () => void
   t: Translate
@@ -319,6 +323,8 @@ function ContentTab(props: CommitPaneProps & { hidden: boolean }): ReactNode {
     menu.open(event.clientX, event.clientY, [
       { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path, file.origPath) } },
       { label: t('history.viewInDiff'), onSelect: () => { props.onFocusPath(file.path) } },
+      { label: t('history.revealInExplorer'), onSelect: () => { props.onRevealFile(file.path) } },
+      { label: t('history.openInTerminal'), onSelect: () => { props.onOpenTerminal(file.path) } },
       {
         label: t('history.copyPath'),
         separated: true,
@@ -494,8 +500,11 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
     event.stopPropagation()
     menu.open(event.clientX, event.clientY, [
       { label: t('history.openInEditor'), onSelect: () => { props.onOpenFile(file.path, file.oldPath === file.path ? undefined : file.oldPath) } },
+      { label: t('history.revealInExplorer'), onSelect: () => { props.onRevealFile(file.path) } },
+      { label: t('history.openInTerminal'), onSelect: () => { props.onOpenTerminal(file.path) } },
       {
         label: t('history.copyPath'),
+        separated: true,
         onSelect: () => { void copyText(file.path).then(() => toast(t('history.copiedPath'))) },
       },
       {

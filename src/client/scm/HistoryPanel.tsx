@@ -26,7 +26,7 @@ import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
 import { gitReadSettleMs, useExplorer } from '../store.tsx'
-import { checkoutCommit, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
+import { checkoutCommit, joinRemote, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
 import { CommitPane } from './CommitPane.tsx'
 import { isHistoryTab, needsPatchLoad, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
 import { ReadQueue } from './read-queue.ts'
@@ -438,6 +438,25 @@ export function HistoryPanel(): ReactNode {
     store.openCommitFile(selectedCommit.hash, path, origPath)
   }
 
+  /** Remote directory of a repo-relative commit path ('' = repository root). */
+  const commitFileDir = (path: string): string => {
+    const slash = path.lastIndexOf('/')
+    const dir = slash < 0 ? '' : path.slice(0, slash)
+    return joinRemote(repoRoot ?? '', dir)
+  }
+
+  /** Right-click menu: show the changed file's folder in the explorer tree. */
+  const revealCommitFile = (path: string): void => {
+    if (repoRoot === undefined) return
+    store.revealInExplorer(commitFileDir(path))
+  }
+
+  /** Right-click menu: a terminal tab that starts in the changed file's folder. */
+  const openCommitFileTerminal = (path: string): void => {
+    if (repoRoot === undefined) return
+    store.openTerminalAt(commitFileDir(path))
+  }
+
   const closePane = (): void => {
     setSelectedHash(undefined)
     setSelectedSnapshot(undefined)
@@ -735,6 +754,8 @@ export function HistoryPanel(): ReactNode {
                 focusPath={focusPath}
                 onFocusPath={focusCommitFile}
                 onOpenFile={openCommitFile}
+                onRevealFile={revealCommitFile}
+                onOpenTerminal={openCommitFileTerminal}
                 onCheckout={checkoutSelected}
                 onReload={reloadSelected}
                 t={t}
