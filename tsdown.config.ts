@@ -11,7 +11,7 @@
  */
 import { builtinModules, createRequire } from 'node:module'
 import { readFile } from 'node:fs/promises'
-import { dirname, resolve as resolvePath } from 'node:path'
+import { dirname, relative, resolve as resolvePath } from 'node:path'
 import type { UserConfig } from 'tsdown'
 
 const require = createRequire(import.meta.url)
@@ -78,14 +78,19 @@ function cssInlinePlugin(): BuildPlugin {
       } else {
         abs = require.resolve(source)
       }
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      // The VIRTUAL ID is package-relative too: rolldown emits it into
+      // `//#region` comments in the bundle, so an absolute id leaks the build
+      // machine's path just like the style key used to (0.11.0 audit).
+      const rel = relative(process.cwd(), abs).replace(/\\/g, '/')
+      return CSS_VIRTUAL_PREFIX + rel + CSS_VIRTUAL_SUFFIX
     },
     async load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const relId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = resolvePath(process.cwd(), relId)
       this.addWatchFile(fileId)
       const css = await readFile(fileId, 'utf8')
-      // One <style> per SOURCE FILE, keyed by its own path.
+      // One <style> per SOURCE FILE, keyed by its PACKAGE-RELATIVE path.
       //
       // A single shared marker looked equivalent and was not: the first sheet the
       // factory executed (vsc.css, imported by the entry) inserted its tag, and
@@ -93,13 +98,15 @@ function cssInlinePlugin(): BuildPlugin {
       // so the change panel's stylesheet never reached the page and its rows
       // rendered as bare inline buttons.
       //
-      // The key is compared in JS rather than inside an attribute selector: the
-      // path is a Windows absolute one, and a backslash in a CSS selector opens
-      // an escape sequence, so the selector spelling of this key would never
-      // match the attribute it just wrote.
+      // The key must be relative, not the absolute build-machine path: shipping
+      // `E:\work_base\...\vsc.css` inside the public bundle leaked the builder's
+      // directory layout (found by the release audit; fixed in 0.11.0). A
+      // package-relative spelling is also identical on every machine, so two
+      // builds of the same file dedupe correctly in the page.
+      const relKey = relId
       return [
         `const css = ${JSON.stringify(css)};`,
-        `const key = ${JSON.stringify(fileId)};`,
+        `const key = ${JSON.stringify(relKey)};`,
         `const injected = typeof document === 'undefined' ? undefined : Array.prototype.find.call(`,
         `  document.querySelectorAll('style[data-rvs-css]'),`,
         `  (tag) => tag.dataset.rvsCss === key,`,

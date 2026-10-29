@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-vs",
   "description": "VSCode-style remote development for DSH: SSH host manager (key/password), helper deploy pipeline with version check, remote file explorer + editor + terminal in dsh-better-sidebar.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "icon": "icon.svg",
   "keywords": [
     "dsh",
