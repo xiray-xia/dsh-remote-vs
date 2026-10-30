@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
 import type { RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
+import { downloadFileName, downloadUrl, triggerDownload } from './download.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { repoRelative, useExplorer } from './store.tsx'
 import { planUpload, withDroppedDirs, type DroppedFile } from './upload-plan.ts'
@@ -987,6 +988,26 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     // the listeners are re-attached whenever that identity would change.
   }, [root, alias, uploadFromDataTransfer])
 
+  // ------------------------------------------------------------- download
+
+  /**
+   * Send one remote file to the browser's download flow.
+   *
+   * The stat preflight is deliberate: the streaming route starts writing the
+   * body immediately, so a file deleted (or made unreadable) between the listing
+   * and the click would otherwise be saved as an error page or an empty file.
+   * The preflight surfaces the Host's real SFTP message instead.
+   */
+  const downloadEntry = async (entry: RemoteFileEntry): Promise<void> => {
+    try {
+      await api.fileOp.stat(alias, entry.path)
+    } catch (error) {
+      toast(`${t('files.downloadFailed')}: ${error instanceof Error ? error.message : String(error)}`, true)
+      return
+    }
+    triggerDownload(downloadUrl(alias, entry.path), downloadFileName(entry.path))
+  }
+
   // ---------------------------------------------------------- context menu
 
   const openMenu = (event: React.MouseEvent, entry: RemoteFileEntry | undefined): void => {
@@ -1073,6 +1094,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       })
       entries.push({ label: t('files.copyRel'), onSelect: () => { void copyText(targets.map(item => repoRelative(repoRoot, item.path) || item.path).join('\n')); toast(t('files.copiedClipboard')) }, separated: true })
       entries.push({ label: t('files.copyAbs'), onSelect: () => { void copyText(targets.map(item => item.path).join('\n')); toast(t('files.copiedClipboard')) } })
+      if (!entry.isDir && targets.length === 1) {
+        entries.push({ label: t('files.download'), onSelect: () => { void downloadEntry(entry) } })
+      }
       entries.push({
         label: t('files.referenceFile'),
         onSelect: () => {

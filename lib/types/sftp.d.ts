@@ -1,3 +1,4 @@
+import type { ServerResponse } from 'node:http';
 import type { RemotePool } from './pool.ts';
 import type { RemoteFileEntry, RemoteRead } from './protocol.ts';
 /** Single-read cap (matches the fs-ssh 8 MiB window). */
@@ -13,8 +14,27 @@ export declare const READ_CAP: number;
 export declare const LIST_ENTRY_CAP = 20000;
 /** Largest single upload accepted (matches the client-side planner cap). */
 export declare const UPLOAD_MAX_BYTES: number;
+/**
+ * How long one download stream may make no progress before it is failed.
+ *
+ * A download has no wall-clock budget for the same reason an upload does not: a
+ * big file on a slow link is healthy for minutes. What must never happen is a
+ * silently dead stream pinning the SFTP session (and its channel slot) forever,
+ * so progress is the bound — any chunk resets this clock.
+ */
+export declare const DOWNLOAD_IDLE_MS = 60000;
 /** Assert an absolute POSIX remote path and return its normalized form. */
 export declare function remotePath(path: string): string;
+/**
+ * `Content-Disposition` for one attachment (RFC 6266 + RFC 5987).
+ *
+ * Receivers prefer `filename*` when both forms are present (RFC 6266 §4.3),
+ * which is why a non-ASCII remote name survives the round trip; the quoted
+ * ASCII copy is the fallback for clients that do not understand the extended
+ * form. Quotes and backslashes are stripped from that fallback so they cannot
+ * break the header.
+ */
+export declare function attachmentHeader(fileName: string): string;
 export declare class RemoteFiles {
     private readonly pool;
     /**
@@ -57,6 +77,24 @@ export declare class RemoteFiles {
     upload(alias: string, file: string, source: NodeJS.ReadableStream, maxBytes?: number, overwrite?: boolean): Promise<{
         size: number;
     }>;
+    /**
+     * Stream one remote file into an HTTP response (download to the local machine).
+     *
+     * Streaming, not `read()`: `read()` caps at 8 MiB because it answers a JSON
+     * editor read, while a download is whatever the user pointed at — a log, a
+     * binary, an artifact. The file is opened through one SFTP handle before the
+     * headers are written: symlinks are followed (lstat's size is the link
+     * target's string length, not the file's), directories are refused, and the
+     * content length comes from the same handle the body is read through. The
+     * session has no wall-clock deadline (see `DOWNLOAD_IDLE_MS`); the caller's
+     * response close and stream errors are both handled, so a cancelled download
+     * never leaves the SFTP session or its channel slot pinned.
+     *
+     * @param alias - host alias.
+     * @param file - absolute remote source path.
+     * @param res - HTTP response to write the file into.
+     */
+    download(alias: string, file: string, res: ServerResponse): Promise<void>;
     mkdir(alias: string, dir: string): Promise<void>;
     remove(alias: string, target: string, recursive: boolean): Promise<void>;
     rename(alias: string, oldPath: string, newPath: string): Promise<void>;

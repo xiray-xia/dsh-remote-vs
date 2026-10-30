@@ -553,6 +553,49 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         }
       },
     },
+    // ----------------------------------------------------------- download
+    // Streaming binary download (the upload route's mirror): the response body
+    // IS the file, so a multi-GB file never passes through base64 or Host
+    // memory. The stat preflight lives in the client (`files` op=stat) so an
+    // error keeps a readable JSON body instead of a saved error page.
+    {
+      kind: 'exact',
+      path: REMOTE_API.download,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = url.searchParams.get('alias') ?? ''
+        const path = url.searchParams.get('path') ?? ''
+        if (alias === '' || path === '') {
+          writeJson(res, 400, { error: 'alias and path query parameters are required' })
+          return
+        }
+        if (!path.startsWith('/')) {
+          // The client passes an absolute remote path; a relative one would
+          // silently resolve against the SFTP home and download some other file.
+          writeJson(res, 400, { error: `path must be absolute: ${path}` })
+          return
+        }
+        try {
+          await files.download(alias, path, res)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // The stat/stream start can still fail before any byte goes out, and
+          // then the client expects its JSON error; once the body started (or
+          // the connection is already gone) the only honest answer is closing
+          // the connection.
+          if (!res.headersSent && !res.destroyed) writeJson(res, 502, { error: message })
+          else res.destroy(error instanceof Error ? error : undefined)
+        }
+      },
+    },
     // -------------------------------------------------------- workspaces
     {
       kind: 'exact',

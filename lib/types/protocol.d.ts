@@ -14,6 +14,8 @@ export declare const REMOTE_API: {
     readonly files: "/api/dsh-remote/files";
     /** Streaming binary upload: raw request body, host and path in the query. */
     readonly upload: "/api/dsh-remote/upload";
+    /** Streaming binary download: raw response body, host and path in the query. */
+    readonly download: "/api/dsh-remote/download";
     readonly workspaces: "/api/dsh-remote/workspaces";
     readonly deploy: "/api/dsh-remote/deploy";
     readonly importSshConfig: "/api/dsh-remote/import-ssh-config";

@@ -3,6 +3,7 @@
  * remote host; every entry point validates before touching the wire.
  */
 import { randomBytes } from 'node:crypto'
+import type { ServerResponse } from 'node:http'
 import { posix } from 'node:path'
 import type { SFTPWrapper, Stats } from 'ssh2'
 import type { RemotePool } from './pool.ts'
@@ -23,6 +24,19 @@ export const LIST_ENTRY_CAP = 20000
 
 /** Largest single upload accepted (matches the client-side planner cap). */
 export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+/**
+ * How long one download stream may make no progress before it is failed.
+ *
+ * A download has no wall-clock budget for the same reason an upload does not: a
+ * big file on a slow link is healthy for minutes. What must never happen is a
+ * silently dead stream pinning the SFTP session (and its channel slot) forever,
+ * so progress is the bound — any chunk resets this clock.
+ */
+export const DOWNLOAD_IDLE_MS = 60_000
+
+/** Chunk size for one download stream (one SFTP read at a time). */
+const DOWNLOAD_CHUNK_BYTES = 256 * 1024
 
 /**
  * Cap for both per-path memory sets below (levels confirmed to exist, listings
@@ -47,6 +61,22 @@ export function remotePath(path: string): string {
   const normalized = posix.normalize(path.replace(/\\/g, '/'))
   if (!normalized.startsWith('/')) throw new Error('remote path must be absolute')
   return normalized
+}
+
+/**
+ * `Content-Disposition` for one attachment (RFC 6266 + RFC 5987).
+ *
+ * Receivers prefer `filename*` when both forms are present (RFC 6266 §4.3),
+ * which is why a non-ASCII remote name survives the round trip; the quoted
+ * ASCII copy is the fallback for clients that do not understand the extended
+ * form. Quotes and backslashes are stripped from that fallback so they cannot
+ * break the header.
+ */
+export function attachmentHeader(fileName: string): string {
+  // eslint-disable-next-line no-control-regex -- stripping control bytes is the point
+  const fallback = fileName.replace(/[^\u0020-\u007e]/g, '_').replace(/["\\]/g, '_')
+  const encoded = encodeURIComponent(fileName).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
 }
 
 export class RemoteFiles {
@@ -208,6 +238,132 @@ export class RemoteFiles {
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
       }
     })
+  }
+
+  /**
+   * Stream one remote file into an HTTP response (download to the local machine).
+   *
+   * Streaming, not `read()`: `read()` caps at 8 MiB because it answers a JSON
+   * editor read, while a download is whatever the user pointed at — a log, a
+   * binary, an artifact. The file is opened through one SFTP handle before the
+   * headers are written: symlinks are followed (lstat's size is the link
+   * target's string length, not the file's), directories are refused, and the
+   * content length comes from the same handle the body is read through. The
+   * session has no wall-clock deadline (see `DOWNLOAD_IDLE_MS`); the caller's
+   * response close and stream errors are both handled, so a cancelled download
+   * never leaves the SFTP session or its channel slot pinned.
+   *
+   * @param alias - host alias.
+   * @param file - absolute remote source path.
+   * @param res - HTTP response to write the file into.
+   */
+  async download(alias: string, file: string, res: ServerResponse): Promise<void> {
+    const path = remotePath(file)
+    await this.pool.withSftp(alias, async (sftp) => {
+      const link = await lstatAsync(sftp, path).catch(async (error: unknown) => {
+        throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      })
+      // Same pre-check as read(): asking SFTP to open a directory yields a bare
+      // "Failure", while the stat that was needed anyway already says what the
+      // path is.
+      if (isDir(link.mode)) throw new Error(`not a file: ${path} is a directory`)
+      // A symlink must be OPENED, not trusted: lstat reports the LINK's size
+      // (the target string), while the body comes from the file the link names.
+      // Framing one against the other breaks the response for every symlink,
+      // and a link to a directory only fails once opened. One handle supplies
+      // the real type and length, and the stream below is bounded by that
+      // length so a file that grows mid-transfer cannot overrun the framing.
+      const handle = await openAsync(sftp, path).catch(async (error: unknown) => {
+        throw (await explainFollowFailure(sftp, path, error)) ?? error
+      })
+      let streamed = false
+      try {
+        const attrs = await fstatAsync(sftp, handle)
+        if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
+        // The client can disappear while the stat is in flight; there is nobody
+        // left to stream to, and writing headers to a closed response would turn
+        // "user cancelled" into a spurious Host error.
+        if (res.destroyed) return
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(attrs.size),
+          'content-disposition': attachmentHeader(posix.basename(path)),
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        })
+        if (attrs.size <= 0) {
+          res.end()
+          return
+        }
+        // Ownership of the handle transfers to the stream: ssh2 closes it on
+        // end, error and destroy (see ReadStream._destroy), so the session
+        // below can end without leaking a file handle.
+        const stream = sftp.createReadStream(path, {
+          handle,
+          start: 0,
+          end: attrs.size - 1,
+          highWaterMark: DOWNLOAD_CHUNK_BYTES,
+        })
+        streamed = true
+        await new Promise<void>((resolve, reject) => {
+          let settled = false
+          let idle: ReturnType<typeof setTimeout> | undefined
+          const finish = (error?: Error): void => {
+            if (settled) return
+            settled = true
+            if (idle !== undefined) clearTimeout(idle)
+            if (error === undefined) {
+              resolve()
+              return
+            }
+            res.destroy(error)
+            reject(error)
+          }
+          const arm = (): void => {
+            if (idle !== undefined) clearTimeout(idle)
+            idle = setTimeout(() => {
+              // `data` pauses while the pipe applies backpressure, so a slow
+              // browser or local disk is not a dead transfer: re-arm while the
+              // consumer still has buffered bytes to drain.
+              if (stream.isPaused() || res.writableLength > 0) {
+                arm()
+                return
+              }
+              try {
+                stream.destroy()
+              } catch {
+                // Ignore close errors; finish() still rejects.
+              }
+              finish(new Error(`download stalled: no bytes for ${DOWNLOAD_IDLE_MS / 1000}s`))
+            }, DOWNLOAD_IDLE_MS)
+          }
+          stream.on('data', arm)
+          res.on('drain', arm)
+          stream.on('error', (error: unknown) => {
+            finish(error instanceof Error ? error : new Error(String(error)))
+          })
+          // A closed response is the user/browser going away, not a Host
+          // failure: stop reading and let the session close instead of
+          // reporting an error.
+          res.on('close', () => {
+            if (res.writableEnded) return
+            try {
+              stream.destroy()
+            } catch {
+              // Ignore close errors.
+            }
+            finish()
+          })
+          stream.on('end', () => finish())
+          arm()
+          stream.pipe(res)
+        })
+      } finally {
+        // Only a failure BEFORE the stream exists still owns the handle; a
+        // created stream closes it itself (including on abort/destroy).
+        if (!streamed) await closeAsync(sftp, handle)
+      }
+    }, { timeoutMs: 0 })
   }
 
   async mkdir(alias: string, dir: string): Promise<void> {
@@ -470,6 +626,63 @@ function lstatAsync(sftp: SFTPWrapper, path: string): Promise<Stats> {
       else resolve(attrs)
     })
   })
+}
+
+function statAsync(sftp: SFTPWrapper, path: string): Promise<Stats> {
+  return new Promise((resolve, reject) => {
+    sftp.stat(path, (error, attrs) => {
+      if (error !== undefined && error !== null) reject(error)
+      else resolve(attrs)
+    })
+  })
+}
+
+function openAsync(sftp: SFTPWrapper, path: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    sftp.open(path, 'r', (error, handle) => {
+      if (error !== undefined && error !== null) reject(error)
+      else resolve(handle)
+    })
+  })
+}
+
+function fstatAsync(sftp: SFTPWrapper, handle: Buffer): Promise<Stats> {
+  return new Promise((resolve, reject) => {
+    sftp.fstat(handle, (error, attrs) => {
+      if (error !== undefined && error !== null) reject(error)
+      else resolve(attrs)
+    })
+  })
+}
+
+function closeAsync(sftp: SFTPWrapper, handle: Buffer): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      sftp.close(handle, () => resolve())
+    } catch {
+      resolve()
+    }
+  })
+}
+
+/**
+ * Explain an `open` failure after lstat already saw a symlink: lstat reports
+ * the LINK's type, so "the thing at the end of the link is a directory" only
+ * shows up after the follow. `stat` follows the link and answers the question
+ * a raw SFTP status never does.
+ */
+async function explainFollowFailure(sftp: SFTPWrapper, path: string, cause: unknown): Promise<Error | undefined> {
+  const code = (cause as { code?: number } | undefined)?.code
+  if (code !== SFTP_NO_SUCH_FILE && code !== SFTP_FAILURE) return undefined
+  let attrs: Stats
+  try {
+    attrs = await statAsync(sftp, path)
+  } catch (error) {
+    const followCode = (error as { code?: number } | undefined)?.code
+    return followCode === SFTP_NO_SUCH_FILE ? new Error(`no such file: ${path}`) : undefined
+  }
+  if (isDir(attrs.mode)) return new Error(`not a file: ${path} is a directory`)
+  return undefined
 }
 
 /**
