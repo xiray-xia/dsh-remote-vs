@@ -43,6 +43,8 @@ export declare class RemotePool {
     private readonly setsidProbes;
     /** Per-alias channel slots and the queue waiting for one (see acquireSlot). */
     private readonly slots;
+    /** Per-alias BROWSE SFTP session (see withBrowseSftp). */
+    private readonly browsed;
     constructor(store: RemoteStore);
     /** Drop one pooled connection (call after host update/delete). */
     drop(alias: string): void;
@@ -73,8 +75,86 @@ export declare class RemotePool {
     execChannel(alias: string, command: string): Promise<ClientChannel>;
     /** Run one callback with a fresh SFTP session (closed afterwards). */
     withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts?: SftpOptions): Promise<T>;
+    /**
+     * Run one bulk-transfer callback with a dedicated SFTP session, plus extra
+     * channel windows on demand (`addChannel`).
+     *
+     * Why extra channels: ssh2 (Channel.js `MAX_WINDOW`) and OpenSSH cap ONE SSH
+     * channel's window at 2 MiB, so a single channel can never hold 8 MiB of READs
+     * in flight however much concurrency the caller asks for; the rest queue
+     * client-side. Each extra session is another 2 MiB window. Measured against a
+     * real host (96 MiB file, 256 KiB chunks, same total concurrency):
+     * 1 channel 28.6 MiB/s, 2 channels 46.1, 4 channels 51.3 — two channels take
+     * most of the gain, four cost twice the channels for little more. Uploads
+     * showed no such gain (server-side write bound: 46.0 → 50.4 MiB/s), so only
+     * downloads spread out.
+     *
+     * `addChannel` is best-effort and late on purpose: a small download must not
+     * pay for a second channel, so the caller opens one only after it has the
+     * size. Every session opened here is closed, and every slot/hold released,
+     * when the callback settles — including a partially successful `addChannel`.
+     * There is no wall-clock deadline: callers bound bulk transfers by progress.
+     */
+    withTransferSftp<T>(alias: string, fn: (sftp: SFTPWrapper, addChannel: () => Promise<SFTPWrapper | undefined>) => Promise<T>): Promise<T>;
+    /**
+     * Run one callback on this alias's long-lived BROWSE SFTP session.
+     *
+     * Why: every list/stat/read used to open its own SFTP session, which is a
+     * whole channel-open round trip before the operation's own round trip. A
+     * single folder open is one list plus a stat per entry the explorer probes,
+     * and the panel's revision refresh re-lists every open directory, so that
+     * open/close churn sat directly on the click-to-pixels path (measured: ~2
+     * round trips per listing instead of ~1). The session is shared by every
+     * browse request for the alias; ssh2 multiplexes concurrent requests over one
+     * channel by packet id, which is also how its own fastGet/fastPut pipeline.
+     *
+     * Only read-only browse operations use it (`RemoteFiles.list/stat/read`):
+     * writes, uploads and downloads keep their own short-lived session, so a
+     * mutation never inherits a channel that a previous request may have left in
+     * an odd state.
+     *
+     * The session holds one channel slot and one connection hold while it exists,
+     * so the server's MaxSessions budget is unchanged — it is the same slot a
+     * per-request session took — and an idle session is closed after
+     * `BROWSE_IDLE_MS` so a dead remote can be picked up by the next request.
+     */
+    withBrowseSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts?: SftpOptions): Promise<T>;
     /** Upload one local file to an absolute remote path (parallel fastPut). */
     putFile(alias: string, localPath: string, remotePath: string): Promise<void>;
+    /**
+     * Open one SFTP session under its own deadline.
+     *
+     * ssh2 has no channel-open timeout: a server that never answers leaves this
+     * promise pending forever, which pins the connection's hold count and blocks
+     * idle re-arming (the "SSH looks dead" symptom) while the HTTP request hangs.
+     */
+    private openSession;
+    /**
+     * Take the browse channel for one operation (open it on first use).
+     *
+     * The returned lease counts as one in-flight operation; the caller's `finally`
+     * calls touchBrowse(). An open failure takes neither a slot nor a hold, so a
+     * failed host does not leave the pool's accounting skewed.
+     */
+    private leaseBrowse;
+    /**
+     * Open the browse session: a channel slot + a connection hold + the SFTP
+     * session itself, all released together by evictBrowse().
+     */
+    private openBrowse;
+    /** One completed browse operation: idle-close the channel when it is unused. */
+    private touchBrowse;
+    /**
+     * Close the browse session and give its slot and hold back. Idempotent; every
+     * way the session can end (idle, open failure, channel close, connection drop)
+     * goes through here so the accounting cannot drift.
+     *
+     * `expected` ties the eviction to ONE session object: a timer or a channel
+     * `close` event that fires after the state was already replaced must not close
+     * its successor. Callers that end the connection (drop/dispose) omit it.
+     */
+    private evictBrowse;
+    private browseState;
     /**
      * Take one channel slot for `alias`, waiting FIFO when the limit is reached.
      * The wait is bounded: waiting forever behind a peer that never finishes is

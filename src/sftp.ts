@@ -53,6 +53,27 @@ export const TRANSFER_CHUNK_BYTES = 256 * 1024
 export const TRANSFER_CONCURRENCY = 32
 
 /**
+ * Channels a big download spreads its READ window over.
+ *
+ * ssh2 (Channel.js `MAX_WINDOW`) and OpenSSH cap ONE SSH channel's window at
+ * 2 MiB, so a single channel can never keep more than that many bytes of READs
+ * outstanding however large the requested concurrency is. Measured against a
+ * real host on a 96 MiB file with the same total concurrency (256 KiB chunks):
+ * 1 channel 28.6 MiB/s, 2 channels 46.1, 4 channels 51.3 — two channels take
+ * most of the gain at a quarter of the cost of four. Uploads showed no such
+ * gain (46.0 → 50.4 MiB/s: the server's write path is the bound), so uploads
+ * stay on one channel.
+ */
+export const TRANSFER_SESSIONS = 2
+
+/**
+ * Below this size a second channel is not worth its channel-open round trip and
+ * channel slot: the file is only a handful of READ windows long, so the extra
+ * channel would mostly be opened and closed.
+ */
+export const MULTI_CHANNEL_MIN_BYTES = 4 * 1024 * 1024
+
+/**
  * Cap for both per-path memory sets below (levels confirmed to exist, listings
  * already reported as truncated). Each only ever saves round trips or a repeat
  * log line, so a small window is enough and a miss costs nothing but the work
@@ -106,7 +127,7 @@ export class RemoteFiles {
 
   async list(alias: string, dir: string): Promise<RemoteFileEntry[]> {
     const path = remotePath(dir)
-    return this.pool.withSftp(alias, async (sftp) => {
+    return this.pool.withBrowseSftp(alias, async (sftp) => {
       let rows: ReaddirRow[]
       try {
         rows = await readdirAsync(sftp, path)
@@ -137,7 +158,7 @@ export class RemoteFiles {
 
   async stat(alias: string, file: string): Promise<RemoteFileEntry> {
     const path = remotePath(file)
-    return this.pool.withSftp(alias, async (sftp) => {
+    return this.pool.withBrowseSftp(alias, async (sftp) => {
       const attrs = await lstatAsync(sftp, path)
       return toEntry(posix.dirname(path), posix.basename(path), attrs)
     })
@@ -145,7 +166,7 @@ export class RemoteFiles {
 
   async read(alias: string, file: string): Promise<RemoteRead> {
     const path = remotePath(file)
-    return this.pool.withSftp(alias, async (sftp) => {
+    return this.pool.withBrowseSftp(alias, async (sftp) => {
       const attrs = await lstatAsync(sftp, path).catch(async (error: unknown) => {
         // The stat fails first for a path that is not there, so without this the
         // caller got a bare "No such file" naming no path, while `list` and
@@ -276,7 +297,9 @@ export class RemoteFiles {
    */
   async download(alias: string, file: string, res: ServerResponse): Promise<void> {
     const path = remotePath(file)
-    await this.pool.withSftp(alias, async (sftp) => {
+    // No wall clock (progress-bounded, see DOWNLOAD_IDLE_MS); extra channel
+    // windows are opened only once the size says the file is worth them.
+    await this.pool.withTransferSftp(alias, async (sftp, addChannel) => {
       const link = await lstatAsync(sftp, path).catch(async (error: unknown) => {
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
       })
@@ -293,6 +316,9 @@ export class RemoteFiles {
       const handle = await openAsync(sftp, path).catch(async (error: unknown) => {
         throw (await explainFollowFailure(sftp, path, error)) ?? error
       })
+      // Each SFTP session has its own handle space, so every extra channel needs
+      // its own handle on the same file; the first one is always open already.
+      const channels: Array<{ sftp: SFTPWrapper; handle: Buffer }> = [{ sftp, handle }]
       try {
         const attrs = await fstatAsync(sftp, handle)
         if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
@@ -311,13 +337,27 @@ export class RemoteFiles {
           res.end()
           return
         }
+        if (attrs.size >= MULTI_CHANNEL_MIN_BYTES) {
+          // Best effort: a second channel that will not open just leaves the
+          // transfer on the first one, which is what it would have used anyway.
+          for (let extra = 1; extra < TRANSFER_SESSIONS; extra += 1) {
+            const channel = await addChannel()
+            if (channel === undefined) break
+            try {
+              const extraHandle = await openAsync(channel, path)
+              channels.push({ sftp: channel, handle: extraHandle })
+            } catch {
+              break
+            }
+          }
+        }
         // Parallel ordered reads; the writer here owns the response, never the
-        // handle, so the finally below always closes it exactly once.
-        await pipeHandleToResponse(sftp, handle, attrs.size, res)
+        // handles, so the finally below always closes each one exactly once.
+        await pipeChannelsToResponse(channels, attrs.size, res)
       } finally {
-        await closeAsync(sftp, handle)
+        for (const channel of channels) await closeAsync(channel.sftp, channel.handle)
       }
-    }, { timeoutMs: 0 })
+    })
   }
 
   async mkdir(alias: string, dir: string): Promise<void> {
@@ -616,19 +656,20 @@ async function readHandleFully(sftp: SFTPWrapper, handle: Buffer, buffer: Buffer
 }
 
 /**
- * Copy one open remote-file handle into an HTTP response with a bounded
- * parallel read window.
+ * Copy an open remote file into an HTTP response with a bounded parallel read
+ * window spread over one or more SFTP channels.
  *
- * `res` must already carry its headers (including content-length). Workers
- * pread 256 KiB chunks out of order into a bounded map, and one ordered writer
- * copies them to the socket, so the response bytes stay ordered while up to
- * `TRANSFER_CONCURRENCY` READs stay in flight. A closed response (user cancel)
- * resolves quietly — the route treats that as a cancellation, not an error —
- * and a no-progress watchdog fails a silently dead transfer.
+ * `res` must already carry its headers (including content-length). Workers pread
+ * 256 KiB chunks out of order into a bounded map, and one ordered writer copies
+ * them to the socket, so the response bytes stay ordered while up to
+ * `TRANSFER_CONCURRENCY` READs stay in flight. The chunk index picks the channel
+ * (`index % channels.length`) so the in-flight bytes are spread across the SSH
+ * channel windows instead of queueing behind one 2 MiB window. A closed response
+ * (user cancel) resolves quietly — the route treats that as a cancellation, not
+ * an error — and a no-progress watchdog fails a silently dead transfer.
  */
-async function pipeHandleToResponse(
-  sftp: SFTPWrapper,
-  handle: Buffer,
+async function pipeChannelsToResponse(
+  channels: Array<{ sftp: SFTPWrapper; handle: Buffer }>,
   size: number,
   res: ServerResponse,
 ): Promise<void> {
@@ -690,7 +731,8 @@ async function pipeHandleToResponse(
       const length = Math.min(chunkBytes, size - start)
       const buffer = Buffer.allocUnsafe(length)
       try {
-        await readHandleFully(sftp, handle, buffer, start)
+        const channel = channels[index % channels.length] as { sftp: SFTPWrapper; handle: Buffer }
+        await readHandleFully(channel.sftp, channel.handle, buffer, start)
       } catch (error) {
         release()
         fail(error)
@@ -871,7 +913,7 @@ function writeFileAsync(sftp: SFTPWrapper, path: string, data: Buffer): Promise<
  * Stream one readable request body into a new remote file with a bounded
  * parallel write window.
  *
- * The mirror of `pipeHandleToResponse`: incoming bytes are cut into
+ * The mirror of `pipeChannelsToResponse`: incoming bytes are cut into
  * `TRANSFER_CHUNK_BYTES` pieces and up to `TRANSFER_CONCURRENCY` WRITEs are in
  * flight at their own offsets. A single `createWriteStream` keeps one WRITE per
  * round trip and was far slower on the same link (~1 MiB/s, so a 64 MiB body

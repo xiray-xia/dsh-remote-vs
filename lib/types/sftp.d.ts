@@ -37,6 +37,25 @@ export declare const UPLOAD_IDLE_MS = 60000;
 export declare const TRANSFER_CHUNK_BYTES: number;
 /** In-flight chunk window (also the per-transfer memory bound: 8 MiB). */
 export declare const TRANSFER_CONCURRENCY = 32;
+/**
+ * Channels a big download spreads its READ window over.
+ *
+ * ssh2 (Channel.js `MAX_WINDOW`) and OpenSSH cap ONE SSH channel's window at
+ * 2 MiB, so a single channel can never keep more than that many bytes of READs
+ * outstanding however large the requested concurrency is. Measured against a
+ * real host on a 96 MiB file with the same total concurrency (256 KiB chunks):
+ * 1 channel 28.6 MiB/s, 2 channels 46.1, 4 channels 51.3 — two channels take
+ * most of the gain at a quarter of the cost of four. Uploads showed no such
+ * gain (46.0 → 50.4 MiB/s: the server's write path is the bound), so uploads
+ * stay on one channel.
+ */
+export declare const TRANSFER_SESSIONS = 2;
+/**
+ * Below this size a second channel is not worth its channel-open round trip and
+ * channel slot: the file is only a handful of READ windows long, so the extra
+ * channel would mostly be opened and closed.
+ */
+export declare const MULTI_CHANNEL_MIN_BYTES: number;
 /** Assert an absolute POSIX remote path and return its normalized form. */
 export declare function remotePath(path: string): string;
 /**

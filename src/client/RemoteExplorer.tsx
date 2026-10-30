@@ -148,6 +148,13 @@ function formatUploadLabel(
 const LISTING_CACHE_KEEP = 50
 
 /**
+ * Hover intent before a directory's listing is prefetched: long enough that
+ * sweeping the pointer across the tree does not fire a request per row, short
+ * enough that arriving at a folder and clicking it finds the listing warm.
+ */
+const PREFETCH_HOVER_MS = 150
+
+/**
  * Insert one listing as the newest, so "the first key is the oldest" stays
  * true and `trimListings` can evict from the front.
  */
@@ -196,6 +203,16 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const { t, alias, root, repoRoot, marks } = store
   const ctx = store.ctx
   const [listings, setListings] = useState<Record<string, RemoteFileEntry[]>>({})
+  /**
+   * The same listings, readable synchronously. `prefetchDir` has to answer "is
+   * this already cached?" at pointer time, and a state value would be one render
+   * behind (asking again for a directory that was just listed).
+   */
+  const listingsRef = useRef<Record<string, RemoteFileEntry[]>>({})
+  /** Listing requests on the wire, by alias+path: hover and click share one. */
+  const inFlight = useRef(new Map<string, Promise<RemoteFileEntry[]>>())
+  /** Hover-intent timer for prefetch; one pointer means one candidate. */
+  const prefetchTimer = useRef<number | undefined>(undefined)
   const [loading, setLoading] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -238,14 +255,41 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     && viewedAliasPath !== undefined
     && sameLocalDir(chatTarget.sessionWorkspacePath, viewedAliasPath)
 
+  /**
+   * List one directory, sharing an already-running request for it.
+   *
+   * A hover prefetch and the click that follows it are the same request, and so
+   * are a double click and the reveal chain's level: without the shared map each
+   * one opened its own SFTP listing for the same path. The promise settles both
+   * callers; the cache write happens once, here.
+   */
+  const fetchListing = useCallback((dir: string): Promise<RemoteFileEntry[]> => {
+    const key = dirKey(alias, dir)
+    const running = inFlight.current.get(key)
+    if (running !== undefined) return running
+    const request = api.fileOp.list(alias, dir)
+    inFlight.current.set(key, request)
+    const clear = (): void => {
+      if (inFlight.current.get(key) === request) inFlight.current.delete(key)
+    }
+    request.then(
+      (entries) => {
+        setListings(prev => withListing(prev, key, entries))
+        clear()
+      },
+      clear,
+    )
+    return request
+  }, [alias])
+
   const loadDir = useCallback(async (dir: string, force = false): Promise<void> => {
     if (alias === '') return
     const key = dirKey(alias, dir)
-    // NOTE: a cached listing is deliberately NOT reused here. The old form was
-    // `setListings(prev => prev[key] === undefined ? prev : prev)`, an identity
-    // update that changed nothing and read like a cache short-circuit; every
-    // caller therefore re-lists, which is what the tree relies on after a
-    // write. (The `force` flag only distinguishes caller intent.)
+    // NOTE: a cached listing is deliberately NOT reused as the only source. The
+    // tree relies on every caller re-listing after a write (`force` is caller
+    // intent, same as before); a PREFETCHED listing is still on screen while
+    // the revalidation runs, which is what makes the open feel instant without
+    // serving stale content as final.
     void force
     setLoading(prev => {
       const next = new Set(prev)
@@ -253,8 +297,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       return next
     })
     try {
-      const entries = await api.fileOp.list(alias, dir)
-      setListings(prev => withListing(prev, key, entries))
+      await fetchListing(dir)
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), true)
     } finally {
@@ -264,7 +307,37 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         return next
       })
     }
-  }, [alias])
+  }, [alias, fetchListing])
+
+  /**
+   * Warm the listing cache for a directory the pointer is resting on.
+   *
+   * The open itself still revalidates through `loadDir` (the explorer must show
+   * writes made elsewhere), but with the rows already in memory the expand
+   * paints immediately instead of showing a loading line for one round trip.
+   * Speculative by nature, so a failure is not a toast — the real listing, when
+   * the user opens it, still explains itself.
+   */
+  const prefetchDir = useCallback((dir: string): void => {
+    if (alias === '') return
+    const key = dirKey(alias, dir)
+    if (listingsRef.current[key] !== undefined) return
+    if (inFlight.current.has(key)) return
+    fetchListing(dir).catch(() => undefined)
+  }, [alias, fetchListing])
+
+  /** Hover intent: prefetch the row under the pointer after a short rest. */
+  const hoverDir = (path: string | undefined): void => {
+    if (prefetchTimer.current !== undefined) {
+      window.clearTimeout(prefetchTimer.current)
+      prefetchTimer.current = undefined
+    }
+    if (path === undefined) return
+    prefetchTimer.current = window.setTimeout(() => {
+      prefetchTimer.current = undefined
+      prefetchDir(path)
+    }, PREFETCH_HOVER_MS)
+  }
 
   /**
    * "Show this folder in the tree" — raised by a search result's menu.
@@ -337,7 +410,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (rebind) setExpanded(new Set([root]))
     // Root plus every open directory, once each: `expanded` always holds the
     // root, and listing it separately on top of the loop listed it twice. They
-    // are fired concurrently — each one opens its own SFTP session host side.
+    // are fired concurrently; Host side they share the alias's browse SFTP
+    // session, so a refresh of a deep tree no longer opens one channel per level.
     for (const dir of new Set(rebind ? [root] : [root, ...expanded])) void loadDir(dir, true)
     // `expanded` is deliberately not a dependency: opening a directory lists it
     // itself, so re-listing the whole tree per expand would put the bug back.
@@ -357,6 +431,16 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     for (const dir of expanded) keep.add(dirKey(alias, dir))
     setListings(prev => trimListings(prev, keep))
   }, [expanded, alias, listings])
+
+  /** Keep the synchronous cache view in step (prefetch reads it at pointer time). */
+  useEffect(() => {
+    listingsRef.current = listings
+  }, [listings])
+
+  /** A hover prefetch that never fired must not fire after the panel is gone. */
+  useEffect(() => () => {
+    if (prefetchTimer.current !== undefined) window.clearTimeout(prefetchTimer.current)
+  }, [])
 
   const rowsOf = useCallback((dir: string): RemoteFileEntry[] | undefined => {
     const rows = listings[dirKey(alias, dir)]
@@ -1183,6 +1267,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
                 draggable
                 onClick={(e) => selectRow(entry, e)}
                 onDoubleClick={() => { if (!entry.isDir) store.openFile(entry.path) }}
+                // Hover-intent prefetch: a directory the pointer rests on gets its
+                // listing warmed, so the click that follows paints instead of
+                // waiting one round trip. Leave/collapse cancels the pending one.
+                onMouseEnter={() => { if (entry.isDir) hoverDir(entry.path) }}
+                onMouseLeave={() => hoverDir(undefined)}
                 onContextMenu={(e) => openMenu(e, entry)}
                 onDragStart={(e) => {
                   dragPaths.current = selected.has(entry.path) ? [...selected] : [entry.path]

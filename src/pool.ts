@@ -89,6 +89,18 @@ const CHANNEL_LIMIT = 6
  */
 const CHANNEL_WAIT_MS = 30_000
 
+/**
+ * Idle time after which the shared BROWSE SFTP session is closed.
+ *
+ * Browsing is bursty (open a folder, look around, edit for a while, browse
+ * again), so a channel that survives only the burst costs one channel-open
+ * round trip per burst and saves one per request inside it. Two minutes covers
+ * the burst without keeping a channel slot parked for a five-minute pause; the
+ * slot it holds is the same one a per-request session took, so peak channel
+ * usage against the server's MaxSessions does not change.
+ */
+const BROWSE_IDLE_MS = 2 * 60 * 1000
+
 interface Pooled {
   conn: Client
   timer: ReturnType<typeof setTimeout> | undefined
@@ -96,6 +108,25 @@ interface Pooled {
   connecting: Promise<Client> | undefined
   /** Live users (channels/sessions); idle eviction only fires at zero. */
   held: number
+}
+
+/**
+ * The per-alias BROWSE SFTP session (see `withBrowseSftp`).
+ *
+ * `active` counts operations in flight; the idle timer only runs at zero.
+ * `stale` means an operation hit its deadline, so the channel must not be
+ * reused once the current operations drain — a session whose request never
+ * answered is not worth trusting, and closing it under a peer still using it
+ * would fail that peer instead.
+ */
+interface BrowseChannel {
+  session: SFTPWrapper | undefined
+  opening: Promise<SFTPWrapper> | undefined
+  active: number
+  stale: boolean
+  /** This channel holds one channel slot and one connection hold. */
+  leased: boolean
+  idle: ReturnType<typeof setTimeout> | undefined
 }
 
 export interface ExecOptions {
@@ -158,11 +189,16 @@ export class RemotePool {
   private readonly setsidProbes = new Map<string, Promise<boolean>>()
   /** Per-alias channel slots and the queue waiting for one (see acquireSlot). */
   private readonly slots = new Map<string, Slots>()
+  /** Per-alias BROWSE SFTP session (see withBrowseSftp). */
+  private readonly browsed = new Map<string, BrowseChannel>()
 
   constructor(private readonly store: RemoteStore) {}
 
   /** Drop one pooled connection (call after host update/delete). */
   drop(alias: string): void {
+    // Order matters: the open browse channel must give its slot and hold back
+    // while the pooled entry still exists, or the release would be a no-op.
+    this.evictBrowse(alias)
     const pooled = this.conns.get(alias)
     // The host entry can change under an alias, so the capability answer goes
     // with the connection; the next exec probes again.
@@ -485,21 +521,7 @@ export class RemotePool {
     // idle timer armed by a concurrent release() could evict it mid-call.
     this.hold(alias)
     try {
-      // The session open needs its own deadline. It used to sit outside the
-      // `withDeadline` below, and ssh2 has no channel-open timeout — a server
-      // that never answers leaves this promise pending forever, which pins
-      // `held` above zero and therefore blocks idle re-arming (the "SSH looks
-      // dead" symptom) while the HTTP request hangs.
-      const sftp = await withDeadline(
-        new Promise<SFTPWrapper>((resolve, reject) => {
-          conn.sftp((error, session) => {
-            if (error !== undefined && error !== null) reject(error)
-            else resolve(session)
-          })
-        }),
-        SFTP_OP_TIMEOUT_MS,
-        `SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`,
-      )
+      const sftp = await this.openSession(conn)
       try {
         const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
         if (limit <= 0) return await fn(sftp)
@@ -514,6 +536,118 @@ export class RemotePool {
     } finally {
       this.release(alias)
       this.releaseSlot(alias)
+    }
+  }
+
+  /**
+   * Run one bulk-transfer callback with a dedicated SFTP session, plus extra
+   * channel windows on demand (`addChannel`).
+   *
+   * Why extra channels: ssh2 (Channel.js `MAX_WINDOW`) and OpenSSH cap ONE SSH
+   * channel's window at 2 MiB, so a single channel can never hold 8 MiB of READs
+   * in flight however much concurrency the caller asks for; the rest queue
+   * client-side. Each extra session is another 2 MiB window. Measured against a
+   * real host (96 MiB file, 256 KiB chunks, same total concurrency):
+   * 1 channel 28.6 MiB/s, 2 channels 46.1, 4 channels 51.3 — two channels take
+   * most of the gain, four cost twice the channels for little more. Uploads
+   * showed no such gain (server-side write bound: 46.0 → 50.4 MiB/s), so only
+   * downloads spread out.
+   *
+   * `addChannel` is best-effort and late on purpose: a small download must not
+   * pay for a second channel, so the caller opens one only after it has the
+   * size. Every session opened here is closed, and every slot/hold released,
+   * when the callback settles — including a partially successful `addChannel`.
+   * There is no wall-clock deadline: callers bound bulk transfers by progress.
+   */
+  async withTransferSftp<T>(
+    alias: string,
+    fn: (sftp: SFTPWrapper, addChannel: () => Promise<SFTPWrapper | undefined>) => Promise<T>,
+  ): Promise<T> {
+    const sessions: SFTPWrapper[] = []
+    let slots = 0
+    let holds = 0
+    let conn: Client
+    try {
+      // An SFTP session IS a channel, so each one takes a slot: the ceiling this
+      // protects is the server's MaxSessions, not our own bookkeeping.
+      await this.acquireSlot(alias)
+      slots += 1
+      conn = await this.acquire(alias)
+      // Hold BEFORE the first await (same reason as withSftp).
+      this.hold(alias)
+      holds += 1
+      sessions.push(await this.openSession(conn))
+      const addChannel = async (): Promise<SFTPWrapper | undefined> => {
+        try {
+          await this.acquireSlot(alias)
+          slots += 1
+        } catch {
+          return undefined
+        }
+        this.hold(alias)
+        holds += 1
+        try {
+          const extra = await this.openSession(conn)
+          sessions.push(extra)
+          return extra
+        } catch {
+          // The slot and hold this attempt took are released by the finally; one
+          // channel still streams the file, so this is not a failure.
+          return undefined
+        }
+      }
+      return await fn(sessions[0] as SFTPWrapper, addChannel)
+    } finally {
+      for (const session of sessions) {
+        try {
+          session.end()
+        } catch {
+          // Ignore close errors.
+        }
+      }
+      for (let i = 0; i < holds; i += 1) this.release(alias)
+      for (let i = 0; i < slots; i += 1) this.releaseSlot(alias)
+    }
+  }
+
+  /**
+   * Run one callback on this alias's long-lived BROWSE SFTP session.
+   *
+   * Why: every list/stat/read used to open its own SFTP session, which is a
+   * whole channel-open round trip before the operation's own round trip. A
+   * single folder open is one list plus a stat per entry the explorer probes,
+   * and the panel's revision refresh re-lists every open directory, so that
+   * open/close churn sat directly on the click-to-pixels path (measured: ~2
+   * round trips per listing instead of ~1). The session is shared by every
+   * browse request for the alias; ssh2 multiplexes concurrent requests over one
+   * channel by packet id, which is also how its own fastGet/fastPut pipeline.
+   *
+   * Only read-only browse operations use it (`RemoteFiles.list/stat/read`):
+   * writes, uploads and downloads keep their own short-lived session, so a
+   * mutation never inherits a channel that a previous request may have left in
+   * an odd state.
+   *
+   * The session holds one channel slot and one connection hold while it exists,
+   * so the server's MaxSessions budget is unchanged — it is the same slot a
+   * per-request session took — and an idle session is closed after
+   * `BROWSE_IDLE_MS` so a dead remote can be picked up by the next request.
+   */
+  async withBrowseSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts: SftpOptions = {}): Promise<T> {
+    const lease = await this.leaseBrowse(alias)
+    const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
+    try {
+      if (limit <= 0) return await fn(lease.sftp)
+      return await withDeadline(fn(lease.sftp), limit, `SFTP operation timed out after ${limit / 1000}s`)
+    } catch (error) {
+      // A request that never answered stays queued inside ssh2. Retire the
+      // session once the operations sharing it drain (touchBrowse below does
+      // it) instead of closing a channel a peer may still be using.
+      if (error instanceof Error && error.message === `SFTP operation timed out after ${limit / 1000}s`) {
+        lease.state.stale = true
+      }
+      throw error
+    } finally {
+      this.touchBrowse(alias, lease.state)
     }
   }
 
@@ -567,6 +701,155 @@ export class RemotePool {
   }
 
   // ------------------------------------------------------------ internals
+
+  /**
+   * Open one SFTP session under its own deadline.
+   *
+   * ssh2 has no channel-open timeout: a server that never answers leaves this
+   * promise pending forever, which pins the connection's hold count and blocks
+   * idle re-arming (the "SSH looks dead" symptom) while the HTTP request hangs.
+   */
+  private openSession(conn: Client): Promise<SFTPWrapper> {
+    return withDeadline(
+      new Promise<SFTPWrapper>((resolve, reject) => {
+        conn.sftp((error, session) => {
+          if (error !== undefined && error !== null) reject(error)
+          else resolve(session)
+        })
+      }),
+      SFTP_OP_TIMEOUT_MS,
+      `SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`,
+    )
+  }
+
+  /**
+   * Take the browse channel for one operation (open it on first use).
+   *
+   * The returned lease counts as one in-flight operation; the caller's `finally`
+   * calls touchBrowse(). An open failure takes neither a slot nor a hold, so a
+   * failed host does not leave the pool's accounting skewed.
+   */
+  private async leaseBrowse(alias: string): Promise<{ state: BrowseChannel; sftp: SFTPWrapper }> {
+    const state = this.browseState(alias)
+    if (state.idle !== undefined) {
+      clearTimeout(state.idle)
+      state.idle = undefined
+    }
+    if (state.session !== undefined) {
+      state.active += 1
+      return { state, sftp: state.session }
+    }
+    if (state.opening === undefined) state.opening = this.openBrowse(alias, state)
+    const opening = state.opening
+    try {
+      const sftp = await opening
+      state.active += 1
+      return { state, sftp }
+    } finally {
+      // Several callers may await the same open; clearing the shared field is
+      // safe because each of them holds its own reference to the promise, and
+      // the successful path has already stored `session` by now.
+      if (state.opening === opening) state.opening = undefined
+    }
+  }
+
+  /**
+   * Open the browse session: a channel slot + a connection hold + the SFTP
+   * session itself, all released together by evictBrowse().
+   */
+  private async openBrowse(alias: string, state: BrowseChannel): Promise<SFTPWrapper> {
+    await this.acquireSlot(alias)
+    let conn: Client
+    try {
+      conn = await this.acquire(alias)
+    } catch (error) {
+      this.releaseSlot(alias)
+      throw error
+    }
+    // Hold before the first await, for the same reason withSftp does: a
+    // concurrent release() must not arm idle eviction mid-open.
+    this.hold(alias)
+    state.leased = true
+    try {
+      const sftp = await this.openSession(conn)
+      state.session = sftp
+      // The channel can die on its own (remote restart, network blip). Clearing
+      // bookkeeping here means the next browse operation reopens instead of
+      // talking to a dead wrapper; a close we initiated is ignored because the
+      // session has already been detached by evictBrowse().
+      sftp.on('close', () => {
+        if (state.session !== sftp) return
+        state.session = undefined
+        this.evictBrowse(alias, state)
+      })
+      return sftp
+    } catch (error) {
+      this.evictBrowse(alias, state)
+      throw error
+    }
+  }
+
+  /** One completed browse operation: idle-close the channel when it is unused. */
+  private touchBrowse(alias: string, state: BrowseChannel): void {
+    if (state.active > 0) state.active -= 1
+    if (state.active > 0) return
+    if (state.stale) {
+      // The operation that timed out has settled, so nobody else is using the
+      // channel: drop it now and let the next request open a fresh session.
+      this.evictBrowse(alias, state)
+      return
+    }
+    if (state.idle !== undefined) clearTimeout(state.idle)
+    state.idle = setTimeout(() => {
+      state.idle = undefined
+      // The state may have been evicted (and replaced by a NEW session) while
+      // this timer was pending — a tied eviction would close that successor.
+      if (state.active === 0) this.evictBrowse(alias, state)
+    }, BROWSE_IDLE_MS)
+    state.idle.unref?.()
+  }
+
+  /**
+   * Close the browse session and give its slot and hold back. Idempotent; every
+   * way the session can end (idle, open failure, channel close, connection drop)
+   * goes through here so the accounting cannot drift.
+   *
+   * `expected` ties the eviction to ONE session object: a timer or a channel
+   * `close` event that fires after the state was already replaced must not close
+   * its successor. Callers that end the connection (drop/dispose) omit it.
+   */
+  private evictBrowse(alias: string, expected?: BrowseChannel): void {
+    const state = this.browsed.get(alias)
+    if (state === undefined) return
+    if (expected !== undefined && state !== expected) return
+    this.browsed.delete(alias)
+    if (state.idle !== undefined) {
+      clearTimeout(state.idle)
+      state.idle = undefined
+    }
+    const session = state.session
+    state.session = undefined
+    if (session !== undefined) {
+      try {
+        session.end()
+      } catch {
+        // Already gone.
+      }
+    }
+    if (state.leased) {
+      state.leased = false
+      this.release(alias)
+      this.releaseSlot(alias)
+    }
+  }
+
+  private browseState(alias: string): BrowseChannel {
+    const existing = this.browsed.get(alias)
+    if (existing !== undefined) return existing
+    const created: BrowseChannel = { session: undefined, opening: undefined, active: 0, stale: false, leased: false, idle: undefined }
+    this.browsed.set(alias, created)
+    return created
+  }
 
   /**
    * Take one channel slot for `alias`, waiting FIFO when the limit is reached.
