@@ -28,8 +28,11 @@ export const DYNAMIC_KEYS = [
   'history.content',
   'history.diff',
   // Reached through the `STATUS_KEY` lookup in `DownloadDock.tsx` (running is
-  // the only status the detail line never prints as a literal `t()` call).
+  // the only status the detail line never prints as a literal `t()` call), and
+  // through the archive-vs-file ternary for the unknown-size note.
   'downloads.running',
+  'downloads.indeterminate',
+  'downloads.sizeUnknown',
 ] as const
 
 const zh: Record<string, string> = {
@@ -203,6 +206,7 @@ const zh: Record<string, string> = {
   'downloads.close': '关闭',
   'downloads.browserDefault': '已保存到浏览器默认下载目录',
   'downloads.indeterminate': '正在打包…',
+  'downloads.sizeUnknown': '大小未知',
   'downloads.tooMany': '选择项过多（最多 100 项），请改为下载所在目录',
   'files.copied': '已复制',
   'files.moved': '已移动',
@@ -630,6 +634,7 @@ const en: Record<string, string> = {
   'downloads.close': 'Dismiss',
   'downloads.browserDefault': 'Saved to the browser download folder',
   'downloads.indeterminate': 'Packaging…',
+  'downloads.sizeUnknown': 'size unknown',
   'downloads.tooMany': 'Too many entries (max 100); download the containing folder instead',
   'files.copied': 'Copied',
   'files.moved': 'Moved',

@@ -30,8 +30,12 @@ function detailText(task: DownloadTask, t: (key: string) => string): string {
     return task.via === 'browserDefault' ? t('downloads.browserDefault') : t('downloads.done')
   }
   const loaded = formatByteCount(task.loaded)
-  if (task.total === undefined || task.total <= 0) return `${loaded} · ${t('downloads.indeterminate')}`
-  return `${loaded} / ${formatByteCount(task.total)}`
+  const archive = task.directory || task.selection !== undefined
+  if (task.total !== undefined && task.total > 0) return `${loaded} / ${formatByteCount(task.total)}`
+  // An archive has no length by design (chunked tar). A plain FILE with no
+  // known total means a shell/proxy stripped content-length (DSH Desktop does)
+  // — saying "packaging…" there wrongly suggests we re-archive the file.
+  return `${loaded} · ${t(archive ? 'downloads.indeterminate' : 'downloads.sizeUnknown')}`
 }
 
 /** Percent for the bar, or `undefined` while the size is unknown (archives). */

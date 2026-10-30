@@ -141,7 +141,11 @@ export function startDownload(alias: string, path: string, hint: { name: string;
   const { id, controller } = newTask({ name: hint.name, directory: hint.directory })
   launch(id, controller, async (options) => {
     const entry = await api.fileOp.stat(alias, path)
-    patch(id, { directory: entry.isDir })
+    // Seed the size from the stat, not from the HTTP response alone: the route
+    // sends `content-length`, but a shell or proxy in front of the page may
+    // strip it (DSH Desktop's forwarder deletes it), and then a plain file
+    // download would fall back to the archive wording ("packaging…").
+    patch(id, entry.isDir ? { directory: true } : { directory: false, total: entry.size })
     return entry.isDir ? await saveRemoteDir(alias, path, options) : await saveRemoteFile(alias, path, options)
   })
   return id
