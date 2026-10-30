@@ -550,7 +550,15 @@ export class RemotePool {
           timer.unref?.()
         }
         arm()
-        sftp.fastPut(localPath, remotePath, { step: () => { arm() } }, (error) => {
+        // ssh2's fastPut defaults to 64 concurrent WRITEs but only 32 KiB per
+        // chunk; 256 KiB chunks amortise the two round trips per write (request
+        // + status) and are what the sibling Tauri tool measured fastest for the
+        // same library. Progress still arms the idle bound on every step.
+        sftp.fastPut(localPath, remotePath, {
+          concurrency: 64,
+          chunkSize: 256 * 1024,
+          step: () => { arm() },
+        }, (error) => {
           finish(error === undefined || error === null ? undefined : new Error(error.message))
         })
       })

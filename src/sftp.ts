@@ -5,7 +5,7 @@
 import { randomBytes } from 'node:crypto'
 import type { ServerResponse } from 'node:http'
 import { posix } from 'node:path'
-import type { SFTPWrapper, Stats } from 'ssh2'
+import type { OpenMode, SFTPWrapper, Stats } from 'ssh2'
 import type { RemotePool } from './pool.ts'
 import type { RemoteFileEntry, RemoteRead } from './protocol.ts'
 
@@ -35,8 +35,22 @@ export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
  */
 export const DOWNLOAD_IDLE_MS = 60_000
 
-/** Chunk size for one download stream (one SFTP read at a time). */
-const DOWNLOAD_CHUNK_BYTES = 256 * 1024
+/** Upload progress bound (no body bytes and no write acknowledgements). */
+export const UPLOAD_IDLE_MS = 60_000
+
+/**
+ * Parallel-transfer shape, shared by download and upload.
+ *
+ * A single `createReadStream`/`createWriteStream` keeps exactly ONE SFTP request
+ * in flight per round trip; measured against a real host that cost about 8x
+ * (4.4 MiB/s single stream vs 35.4 MiB/s for ssh2's pipelined fastGet on the
+ * same link). 256 KiB chunks with 32 in-flight requests (8 MiB window) are the
+ * same tuning ssh2's fastGet/fastPut use, and bound the per-transfer memory.
+ */
+export const TRANSFER_CHUNK_BYTES = 256 * 1024
+
+/** In-flight chunk window (also the per-transfer memory bound: 8 MiB). */
+export const TRANSFER_CONCURRENCY = 32
 
 /**
  * Cap for both per-path memory sets below (levels confirmed to exist, listings
@@ -220,6 +234,9 @@ export class RemoteFiles {
     const path = remotePath(file)
     const dir = posix.dirname(path)
     const partial = `${path}.part-${randomBytes(4).toString('hex')}`
+    // No wall-clock deadline: a large body on a slow upload link is healthy for
+    // minutes; `streamIntoFile` bounds a dead transfer by progress instead
+    // (the old 60 s wrapper turned a healthy 64 MiB upload into a timeout).
     return this.pool.withSftp(alias, async (sftp) => {
       try {
         await this.withDirRetry(alias, dir, async () => {
@@ -237,7 +254,7 @@ export class RemoteFiles {
         await unlinkAsync(sftp, partial).catch(() => undefined)
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
       }
-    })
+    }, { timeoutMs: 0 })
   }
 
   /**
@@ -276,7 +293,6 @@ export class RemoteFiles {
       const handle = await openAsync(sftp, path).catch(async (error: unknown) => {
         throw (await explainFollowFailure(sftp, path, error)) ?? error
       })
-      let streamed = false
       try {
         const attrs = await fstatAsync(sftp, handle)
         if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
@@ -295,73 +311,11 @@ export class RemoteFiles {
           res.end()
           return
         }
-        // Ownership of the handle transfers to the stream: ssh2 closes it on
-        // end, error and destroy (see ReadStream._destroy), so the session
-        // below can end without leaking a file handle.
-        const stream = sftp.createReadStream(path, {
-          handle,
-          start: 0,
-          end: attrs.size - 1,
-          highWaterMark: DOWNLOAD_CHUNK_BYTES,
-        })
-        streamed = true
-        await new Promise<void>((resolve, reject) => {
-          let settled = false
-          let idle: ReturnType<typeof setTimeout> | undefined
-          const finish = (error?: Error): void => {
-            if (settled) return
-            settled = true
-            if (idle !== undefined) clearTimeout(idle)
-            if (error === undefined) {
-              resolve()
-              return
-            }
-            res.destroy(error)
-            reject(error)
-          }
-          const arm = (): void => {
-            if (idle !== undefined) clearTimeout(idle)
-            idle = setTimeout(() => {
-              // `data` pauses while the pipe applies backpressure, so a slow
-              // browser or local disk is not a dead transfer: re-arm while the
-              // consumer still has buffered bytes to drain.
-              if (stream.isPaused() || res.writableLength > 0) {
-                arm()
-                return
-              }
-              try {
-                stream.destroy()
-              } catch {
-                // Ignore close errors; finish() still rejects.
-              }
-              finish(new Error(`download stalled: no bytes for ${DOWNLOAD_IDLE_MS / 1000}s`))
-            }, DOWNLOAD_IDLE_MS)
-          }
-          stream.on('data', arm)
-          res.on('drain', arm)
-          stream.on('error', (error: unknown) => {
-            finish(error instanceof Error ? error : new Error(String(error)))
-          })
-          // A closed response is the user/browser going away, not a Host
-          // failure: stop reading and let the session close instead of
-          // reporting an error.
-          res.on('close', () => {
-            if (res.writableEnded) return
-            try {
-              stream.destroy()
-            } catch {
-              // Ignore close errors.
-            }
-            finish()
-          })
-          stream.on('end', () => finish())
-          arm()
-          stream.pipe(res)
-        })
+        // Parallel ordered reads; the writer here owns the response, never the
+        // handle, so the finally below always closes it exactly once.
+        await pipeHandleToResponse(sftp, handle, attrs.size, res)
       } finally {
-        // Only a failure BEFORE the stream exists still owns the handle; a
-        // created stream closes it itself (including on abort/destroy).
-        if (!streamed) await closeAsync(sftp, handle)
+        await closeAsync(sftp, handle)
       }
     }, { timeoutMs: 0 })
   }
@@ -637,13 +591,184 @@ function statAsync(sftp: SFTPWrapper, path: string): Promise<Stats> {
   })
 }
 
-function openAsync(sftp: SFTPWrapper, path: string): Promise<Buffer> {
+function openAsync(sftp: SFTPWrapper, path: string, flags: OpenMode = 'r'): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    sftp.open(path, 'r', (error, handle) => {
+    sftp.open(path, flags, (error, handle) => {
       if (error !== undefined && error !== null) reject(error)
       else resolve(handle)
     })
   })
+}
+
+/** Read exactly `buffer.length` bytes at `position` (SFTP may answer short reads). */
+async function readHandleFully(sftp: SFTPWrapper, handle: Buffer, buffer: Buffer, position: number): Promise<void> {
+  let filled = 0
+  while (filled < buffer.length) {
+    const read = await new Promise<number>((resolve, reject) => {
+      sftp.read(handle, buffer.subarray(filled), 0, buffer.length - filled, position + filled, (error, bytesRead) => {
+        if (error !== undefined && error !== null) reject(error)
+        else resolve(bytesRead)
+      })
+    })
+    if (read <= 0) throw new Error(`short read at ${position + filled}`)
+    filled += read
+  }
+}
+
+/**
+ * Copy one open remote-file handle into an HTTP response with a bounded
+ * parallel read window.
+ *
+ * `res` must already carry its headers (including content-length). Workers
+ * pread 256 KiB chunks out of order into a bounded map, and one ordered writer
+ * copies them to the socket, so the response bytes stay ordered while up to
+ * `TRANSFER_CONCURRENCY` READs stay in flight. A closed response (user cancel)
+ * resolves quietly — the route treats that as a cancellation, not an error —
+ * and a no-progress watchdog fails a silently dead transfer.
+ */
+async function pipeHandleToResponse(
+  sftp: SFTPWrapper,
+  handle: Buffer,
+  size: number,
+  res: ServerResponse,
+): Promise<void> {
+  const chunkBytes = TRANSFER_CHUNK_BYTES
+  const totalChunks = Math.ceil(size / chunkBytes)
+  const windowChunks = Math.min(TRANSFER_CONCURRENCY, totalChunks)
+  const ready = new Map<number, Buffer>()
+  const chunkWaiters = new Map<number, () => void>()
+  const slotWaiters: Array<() => void> = []
+  let slots = windowChunks
+  let nextRead = 0
+  let cancelled = false
+  let failure: Error | undefined
+  let lastActivity = Date.now()
+
+  const wakeSlots = (): void => {
+    for (const wake of slotWaiters.splice(0)) wake()
+  }
+  const wakeChunks = (): void => {
+    for (const wake of chunkWaiters.values()) wake()
+    chunkWaiters.clear()
+  }
+  const signalChunk = (index: number): void => {
+    const wake = chunkWaiters.get(index)
+    if (wake !== undefined) {
+      chunkWaiters.delete(index)
+      wake()
+    }
+  }
+  const fail = (error: unknown): void => {
+    if (failure !== undefined) return
+    failure = error instanceof Error ? error : new Error(String(error))
+    wakeSlots()
+    wakeChunks()
+  }
+  const acquire = async (): Promise<void> => {
+    while (slots <= 0) await new Promise<void>(resolve => slotWaiters.push(resolve))
+    slots -= 1
+  }
+  const release = (): void => {
+    slots += 1
+    const wake = slotWaiters.shift()
+    if (wake !== undefined) wake()
+  }
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (cancelled || failure !== undefined) return
+      await acquire()
+      if (cancelled || failure !== undefined) {
+        release()
+        return
+      }
+      const index = nextRead++
+      if (index >= totalChunks) {
+        release()
+        return
+      }
+      const start = index * chunkBytes
+      const length = Math.min(chunkBytes, size - start)
+      const buffer = Buffer.allocUnsafe(length)
+      try {
+        await readHandleFully(sftp, handle, buffer, start)
+      } catch (error) {
+        release()
+        fail(error)
+        return
+      }
+      lastActivity = Date.now()
+      ready.set(index, buffer)
+      signalChunk(index)
+    }
+  }
+  const waitChunk = (index: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (ready.has(index) || failure !== undefined) resolve()
+      else chunkWaiters.set(index, resolve)
+    })
+  const waitDrain = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (cancelled || failure !== undefined) {
+        resolve()
+        return
+      }
+      res.once('drain', resolve)
+    })
+  const onResponseClose = (): void => {
+    if (res.writableEnded) return
+    cancelled = true
+    wakeSlots()
+    wakeChunks()
+  }
+  res.on('close', onResponseClose)
+  const idle = setInterval(() => {
+    if (cancelled || failure !== undefined) return
+    if (Date.now() - lastActivity < DOWNLOAD_IDLE_MS) return
+    // Buffered output waiting on a slow socket is not a dead transfer.
+    if (res.writableLength > 0) {
+      lastActivity = Date.now()
+      return
+    }
+    fail(new Error(`download stalled: no bytes for ${DOWNLOAD_IDLE_MS / 1000}s`))
+  }, Math.min(5_000, DOWNLOAD_IDLE_MS))
+  idle.unref?.()
+
+  const workers = Array.from({ length: windowChunks }, () => worker())
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      if (cancelled) break
+      if (failure !== undefined) break
+      if (!ready.has(index)) await waitChunk(index)
+      if (cancelled) break
+      if (failure !== undefined) break
+      const buffer = ready.get(index)
+      if (buffer === undefined) continue
+      ready.delete(index)
+      if (!res.write(buffer)) await waitDrain()
+      release()
+      lastActivity = Date.now()
+    }
+  } finally {
+    clearInterval(idle)
+    res.removeListener('close', onResponseClose)
+    const drained = Promise.all(workers.map(workerPromise => workerPromise.catch(() => undefined)))
+    if (failure !== undefined || cancelled) {
+      // An in-flight READ cannot be aborted at the SFTP layer: do not block the
+      // request on it. The caller's `withSftp` finally closes the session, which
+      // settles those reads; the workers then find `cancelled` and exit.
+      cancelled = true
+      wakeSlots()
+      wakeChunks()
+      await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, 250))])
+    } else {
+      await drained
+    }
+  }
+  if (failure !== undefined) {
+    res.destroy(failure)
+    throw failure
+  }
+  if (!cancelled) res.end()
 }
 
 function fstatAsync(sftp: SFTPWrapper, handle: Buffer): Promise<Stats> {
@@ -743,11 +868,18 @@ function writeFileAsync(sftp: SFTPWrapper, path: string, data: Buffer): Promise<
 }
 
 /**
- * Pipe a readable request body into one remote file.
+ * Stream one readable request body into a new remote file with a bounded
+ * parallel write window.
  *
- * Destroys the write stream on any failure so a half-written upload cannot sit
- * on the wire after the response has already been sent, and counts bytes while
- * they pass so the caller can report and cap the transfer.
+ * The mirror of `pipeHandleToResponse`: incoming bytes are cut into
+ * `TRANSFER_CHUNK_BYTES` pieces and up to `TRANSFER_CONCURRENCY` WRITEs are in
+ * flight at their own offsets. A single `createWriteStream` keeps one WRITE per
+ * round trip and was far slower on the same link (~1 MiB/s, so a 64 MiB body
+ * could not even finish inside the old 60 s session deadline).
+ *
+ * The producer is paused while more than two windows of chunks are waiting, so
+ * Host memory stays bounded. Aborted clients (no `end`) fail instead of hanging:
+ * a stuck upload used to pin the SFTP session and block every later operation.
  *
  * @param sftp - live SFTP session.
  * @param path - absolute remote destination.
@@ -762,50 +894,153 @@ function streamIntoFile(
   maxBytes: number,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    const out = sftp.createWriteStream(path)
-    let bytes = 0
+    const chunkBytes = TRANSFER_CHUNK_BYTES
+    const windowChunks = TRANSFER_CONCURRENCY
+    const chunks = new Map<number, Buffer>()
+    let nextChunk = 0
+    let nextWrite = 0
+    let pendingWrites = 0
+    let received = 0
+    let carry: Buffer | undefined
+    let handle: Buffer | undefined
+    let ended = false
     let settled = false
-    const fail = (error: unknown): void => {
+    let lastActivity = Date.now()
+    let idle: ReturnType<typeof setInterval> | undefined
+
+    const finish = (error?: Error): void => {
       if (settled) return
       settled = true
+      if (idle !== undefined) clearInterval(idle)
       try {
-        out.destroy()
+        source.pause()
       } catch {
-        // Already closed: the original error is the one worth reporting.
+        // Source already gone.
       }
-      reject(error instanceof Error ? error : new Error(String(error)))
+      if (error === undefined) {
+        resolve(received)
+        return
+      }
+      try {
+        (source as unknown as { destroy?: (error?: Error) => void }).destroy?.(error)
+      } catch {
+        // Already destroyed.
+      }
+      if (handle !== undefined) {
+        const current = handle
+        handle = undefined
+        void closeAsync(sftp, current)
+      }
+      reject(error)
     }
-    source.on('data', (chunk: Buffer) => {
-      bytes += chunk.length
-      if (bytes > maxBytes) {
-        try {
-          source.pause()
-        } catch {
-          // A destroyed source is exactly what we want next.
-        }
-        fail(new Error(`upload exceeds the ${formatBytes(maxBytes)} limit`))
+
+    const pump = (): void => {
+      const current = handle
+      if (settled || current === undefined) return
+      while (pendingWrites < windowChunks && chunks.has(nextWrite)) {
+        const index = nextWrite++
+        const buffer = chunks.get(index)
+        if (buffer === undefined) break
+        chunks.delete(index)
+        pendingWrites += 1
+        sftp.write(current, buffer, 0, buffer.length, index * chunkBytes, (error) => {
+          pendingWrites -= 1
+          if (settled) return
+          if (error !== undefined && error !== null) {
+            finish(error instanceof Error ? error : new Error(String(error)))
+            return
+          }
+          lastActivity = Date.now()
+          pump()
+          maybeFinish()
+          try {
+            if (chunks.size < windowChunks) source.resume()
+          } catch {
+            // Source ended.
+          }
+        })
       }
+    }
+
+    const maybeFinish = (): void => {
+      if (settled || !ended) return
+      if (pendingWrites > 0 || chunks.size > 0) return
+      const current = handle
+      handle = undefined
+      if (current === undefined) {
+        finish()
+        return
+      }
+      closeAsync(sftp, current).then(() => finish(), () => finish())
+    }
+
+    const enqueue = (buffer: Buffer): void => {
+      chunks.set(nextChunk, buffer)
+      nextChunk += 1
+      try {
+        if (chunks.size + pendingWrites >= windowChunks * 2) source.pause()
+      } catch {
+        // Source already gone.
+      }
+      pump()
+    }
+
+    const pushData = (chunk: Buffer): void => {
+      const data = carry === undefined ? chunk : Buffer.concat([carry, chunk])
+      let offset = 0
+      while (data.length - offset >= chunkBytes) {
+        enqueue(Buffer.from(data.subarray(offset, offset + chunkBytes)))
+        offset += chunkBytes
+      }
+      carry = offset < data.length ? Buffer.from(data.subarray(offset)) : undefined
+    }
+
+    source.on('data', (chunk: Buffer) => {
+      if (settled) return
+      received += chunk.length
+      if (received > maxBytes) {
+        finish(new Error(`upload exceeds the ${formatBytes(maxBytes)} limit`))
+        return
+      }
+      lastActivity = Date.now()
+      pushData(chunk)
     })
-    source.on('error', fail)
+    source.on('end', () => {
+      if (settled || ended) return
+      ended = true
+      if (carry !== undefined) {
+        const tail = carry
+        carry = undefined
+        enqueue(tail)
+      }
+      maybeFinish()
+    })
+    source.on('error', (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))))
     // A client that gives up (the explorer's ✕, a closed tab) never sends 'end',
     // and without this the promise below never settles: the SFTP session stays
     // held, every later operation on that host queues behind it, and the next
     // `stat` looks like a dead host (2026-10-20: an aborted 64 MB upload made the
     // following drop sit at "正在读取拖放内容…" forever).
-    const aborted = (): void => fail(new Error('upload aborted by the client'))
+    const aborted = (): void => finish(new Error('upload aborted by the client'))
     source.on('aborted', aborted)
     source.on('close', () => {
       // `complete` is false when the request ended before its body finished.
       const complete = (source as unknown as { complete?: boolean }).complete
       if (complete === false) aborted()
     })
-    out.on('error', fail)
-    out.on('close', () => {
+
+    idle = setInterval(() => {
       if (settled) return
-      settled = true
-      resolve(bytes)
-    })
-    source.pipe(out)
+      if (Date.now() - lastActivity < UPLOAD_IDLE_MS) return
+      finish(new Error(`SFTP upload stalled: no progress for ${UPLOAD_IDLE_MS / 1000}s`))
+    }, Math.min(5_000, UPLOAD_IDLE_MS))
+    idle.unref?.()
+
+    openAsync(sftp, path, 'w').then((opened) => {
+      handle = opened
+      pump()
+      maybeFinish()
+    }, (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))))
   })
 }
 

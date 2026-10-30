@@ -23,6 +23,20 @@ export declare const UPLOAD_MAX_BYTES: number;
  * so progress is the bound — any chunk resets this clock.
  */
 export declare const DOWNLOAD_IDLE_MS = 60000;
+/** Upload progress bound (no body bytes and no write acknowledgements). */
+export declare const UPLOAD_IDLE_MS = 60000;
+/**
+ * Parallel-transfer shape, shared by download and upload.
+ *
+ * A single `createReadStream`/`createWriteStream` keeps exactly ONE SFTP request
+ * in flight per round trip; measured against a real host that cost about 8x
+ * (4.4 MiB/s single stream vs 35.4 MiB/s for ssh2's pipelined fastGet on the
+ * same link). 256 KiB chunks with 32 in-flight requests (8 MiB window) are the
+ * same tuning ssh2's fastGet/fastPut use, and bound the per-transfer memory.
+ */
+export declare const TRANSFER_CHUNK_BYTES: number;
+/** In-flight chunk window (also the per-transfer memory bound: 8 MiB). */
+export declare const TRANSFER_CONCURRENCY = 32;
 /** Assert an absolute POSIX remote path and return its normalized form. */
 export declare function remotePath(path: string): string;
 /**
