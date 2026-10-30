@@ -95,9 +95,10 @@ const CHANNEL_WAIT_MS = 30_000
  * Browsing is bursty (open a folder, look around, edit for a while, browse
  * again), so a channel that survives only the burst costs one channel-open
  * round trip per burst and saves one per request inside it. Two minutes covers
- * the burst without keeping a channel slot parked for a five-minute pause; the
- * slot it holds is the same one a per-request session took, so peak channel
- * usage against the server's MaxSessions does not change.
+ * the burst without keeping a channel slot parked for a five-minute pause. The
+ * slot it holds is the one a per-request session took, so peak channel usage
+ * against the server's MaxSessions does not change; the parked-slot trade-off
+ * is spelled out in withBrowseSftp's docstring.
  */
 const BROWSE_IDLE_MS = 2 * 60 * 1000
 

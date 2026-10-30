@@ -75,6 +75,18 @@ const DOWNLOAD_META_TIMEOUT_MS = 60_000
 const EXTRA_CHANNEL_TIMEOUT_MS = 10_000
 
 /**
+ * How long a handle close may take before it is abandoned.
+ *
+ * ssh2 only settles the CLOSE requests that were pending when a channel closed:
+ * a close issued on an already-dead channel never calls back (the payload is
+ * dropped or written to a stale recipient). Awaiting that forever would hang the
+ * transfer AFTER its body was delivered and pin both the channels and their
+ * slots — the session teardown that follows settles the request anyway, so the
+ * wait is abandoned and the pool's `finally` proceeds.
+ */
+const HANDLE_CLOSE_TIMEOUT_MS = 2_000
+
+/**
  * Channels a big download spreads its READ window over.
  *
  * ssh2 (Channel.js `MAX_WINDOW`) and OpenSSH cap ONE SSH channel's window at
@@ -422,7 +434,7 @@ export class RemoteFiles {
         // handles, so the finally below always closes each one exactly once.
         await pipeChannelsToResponse(channels, attrs.size, res)
       } finally {
-        for (const channel of channels) await closeAsync(channel.sftp, channel.handle)
+        for (const channel of channels) await closeQuietly(channel.sftp, channel.handle)
       }
     })
   }
@@ -923,6 +935,21 @@ function closeAsync(sftp: SFTPWrapper, handle: Buffer): Promise<void> {
 }
 
 /**
+ * Close one handle, but never wait forever for a channel that is already gone.
+ *
+ * A close on a dead channel never calls back (see HANDLE_CLOSE_TIMEOUT_MS); the
+ * session teardown that follows settles it, so abandoning the wait is safe and
+ * keeps a delivered download (or a finished upload) from pinning its channels.
+ */
+function closeQuietly(sftp: SFTPWrapper, handle: Buffer): Promise<void> {
+  const abandoned = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, HANDLE_CLOSE_TIMEOUT_MS)
+    timer.unref?.()
+  })
+  return Promise.race([closeAsync(sftp, handle), abandoned])
+}
+
+/**
  * Explain an `open` failure after lstat already saw a symlink: lstat reports
  * the LINK's type, so "the thing at the end of the link is a directory" only
  * shows up after the follow. `stat` follows the link and answers the question
@@ -1061,7 +1088,7 @@ function streamIntoFile(
       if (handle !== undefined) {
         const current = handle
         handle = undefined
-        void closeAsync(sftp, current)
+        void closeQuietly(sftp, current)
       }
       reject(error)
     }
@@ -1103,7 +1130,7 @@ function streamIntoFile(
         finish()
         return
       }
-      closeAsync(sftp, current).then(() => finish(), () => finish())
+      closeQuietly(sftp, current).then(() => finish(), () => finish())
     }
 
     const enqueue = (buffer: Buffer): void => {
