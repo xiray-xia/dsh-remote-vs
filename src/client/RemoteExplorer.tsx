@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
 import type { RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
-import { downloadFileName, downloadUrl, triggerDownload } from './download.ts'
+import { startDownload } from './downloads.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { repoRelative, useExplorer } from './store.tsx'
 import { planUpload, withDroppedDirs, type DroppedFile } from './upload-plan.ts'
@@ -991,21 +991,14 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   // ------------------------------------------------------------- download
 
   /**
-   * Send one remote file to the browser's download flow.
+   * Download one remote file, or one directory as a `.tar.gz`.
    *
-   * The stat preflight is deliberate: the streaming route starts writing the
-   * body immediately, so a file deleted (or made unreadable) between the listing
-   * and the click would otherwise be saved as an error page or an empty file.
-   * The preflight surfaces the Host's real SFTP message instead.
+   * Everything after the click (stat preflight, save dialog, progress, cancel,
+   * completion/failure) lives in `downloads.ts`, so the transfer keeps running
+   * when this panel is hidden or unmounted.
    */
-  const downloadEntry = async (entry: RemoteFileEntry): Promise<void> => {
-    try {
-      await api.fileOp.stat(alias, entry.path)
-    } catch (error) {
-      toast(`${t('files.downloadFailed')}: ${error instanceof Error ? error.message : String(error)}`, true)
-      return
-    }
-    triggerDownload(downloadUrl(alias, entry.path), downloadFileName(entry.path))
+  const downloadEntry = (entry: RemoteFileEntry): void => {
+    startDownload(alias, entry.path, { name: entry.name, directory: entry.isDir })
   }
 
   // ---------------------------------------------------------- context menu
@@ -1094,8 +1087,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       })
       entries.push({ label: t('files.copyRel'), onSelect: () => { void copyText(targets.map(item => repoRelative(repoRoot, item.path) || item.path).join('\n')); toast(t('files.copiedClipboard')) }, separated: true })
       entries.push({ label: t('files.copyAbs'), onSelect: () => { void copyText(targets.map(item => item.path).join('\n')); toast(t('files.copiedClipboard')) } })
-      if (!entry.isDir && targets.length === 1) {
-        entries.push({ label: t('files.download'), onSelect: () => { void downloadEntry(entry) } })
+      if (targets.length === 1) {
+        entries.push({ label: t('files.download'), onSelect: () => { downloadEntry(entry) } })
       }
       entries.push({
         label: t('files.referenceFile'),

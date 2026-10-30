@@ -11,7 +11,7 @@
  * them here keeps the check meaningful in both directions: every entry must
  * exist in both dictionaries, and nothing else may be unreferenced.
  */
-export declare const DYNAMIC_KEYS: readonly ["common.loading", "editor.saving", "editor.unsaved", "editor.saved", "scm.hunkStaged", "scm.hunkUnstaged", "scm.hunkReverted", "history.details", "history.content", "history.diff"];
+export declare const DYNAMIC_KEYS: readonly ["common.loading", "editor.saving", "editor.unsaved", "editor.saved", "scm.hunkStaged", "scm.hunkUnstaged", "scm.hunkReverted", "history.details", "history.content", "history.diff", "downloads.running"];
 export type Lang = 'zh' | 'en';
 export declare function detectLang(): Lang;
 export declare function makeT(lang: Lang): (key: string) => string;

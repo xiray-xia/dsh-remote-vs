@@ -3604,3 +3604,122 @@ body[data-ds-dark-theme] .rvs-execpanel {
   font-size: 11px;
 }
 
+/* --------------------------------------------------------- download dock */
+/* PORTALed to <body>, i.e. OUTSIDE `.rvs-root` where the tokens are declared:
+   declare the subset this panel uses (same rule as `.rvs-execpanel`). */
+.rvs-downloads {
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
+  --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
+  --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-git-m: #e2b714;
+  --rvs-git-a: #4ec9b0;
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 46;
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(45vh, 420px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 10px;
+  background: var(--rvs-overlay);
+  color: var(--rvs-fg);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .28);
+}
+
+.rvs-download {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 8px;
+  background: rgba(127, 127, 127, .06);
+}
+
+.rvs-download-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rvs-download-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--rvs-fg2);
+}
+
+.rvs-download-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rvs-download-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-download-status.done { color: var(--rvs-git-a); }
+.rvs-download-status.failed { color: var(--rvs-danger); }
+.rvs-download-status.cancelled { color: var(--rvs-git-m); }
+
+.rvs-download-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(127, 127, 127, .22);
+}
+
+.rvs-download-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--rvs-brand);
+  transition: width .12s linear;
+}
+
+.rvs-download-fill.indeterminate {
+  width: 35%;
+  animation: rvs-download-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes rvs-download-slide {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(320%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rvs-download-fill.indeterminate { animation-duration: 2.4s; }
+  .rvs-download-fill { transition: none; }
+}
+
+.rvs-download-meta {
+  overflow: hidden;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-download-meta.failed { color: var(--rvs-danger); white-space: normal; word-break: break-word; }
+.rvs-download-meta.done { color: var(--rvs-fg2); }
+.rvs-download-meta.cancelled { color: var(--rvs-git-m); }
+
+

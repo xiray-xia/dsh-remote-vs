@@ -22,7 +22,7 @@ import {
 import { searchFiles, type SearchHit } from './scm/actions.ts'
 import { repoRelative, useExplorer } from './store.tsx'
 import { api } from './api.ts'
-import { downloadFileName, downloadUrl, triggerDownload } from './download.ts'
+import { startDownload } from './downloads.ts'
 import {
   ContextMenu,
   FileIcon,
@@ -240,19 +240,10 @@ export function SearchView(): ReactNode {
     return { abs, dir }
   }
 
-  /** Send one found file to the browser's download flow. */
-  const downloadHit = async (hit: SearchHit): Promise<void> => {
+  /** Download one found path (a file, or a directory as a `.tar.gz`). */
+  const downloadHit = (hit: SearchHit): void => {
     const { abs } = nameHitPaths(hit)
-    try {
-      // Same stat preflight as the explorer's download entry: the streaming
-      // route starts the body immediately, so the real SFTP error (deleted,
-      // unreadable) must be turned into a toast before the anchor fires.
-      await api.fileOp.stat(alias, abs)
-    } catch (error) {
-      toast(`${t('files.downloadFailed')}: ${error instanceof Error ? error.message : String(error)}`, true)
-      return
-    }
-    triggerDownload(downloadUrl(alias, abs), downloadFileName(abs))
+    startDownload(alias, abs, { name: baseName(abs), directory: hit.isDir })
   }
 
   /**
@@ -272,7 +263,7 @@ export function SearchView(): ReactNode {
     menu.open(event.clientX, event.clientY, [
       { label: t('files.copyAbs'), onSelect: () => { void copyText(abs); toast(t('files.copiedClipboard')) } },
       { label: t('files.copyRel'), onSelect: () => { void copyText(rel); toast(t('files.copiedClipboard')) } },
-      ...(hit.isDir ? [] : [{ label: t('files.download'), onSelect: () => { void downloadHit(hit) } }]),
+      { label: t('files.download'), onSelect: () => { downloadHit(hit) } },
       {
         label: t('files.openInFloat'),
         onSelect: () => { store.openInFloatEditor(abs) },

@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
+import { DownloadDock } from './DownloadDock.tsx'
 import { RemoteExplorer } from './RemoteExplorer.tsx'
 import { SearchView } from './SearchView.tsx'
 import { HistoryPanel } from './scm/HistoryPanel.tsx'
@@ -328,6 +329,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
 
   return (
     <div className="rvs-root" ref={attachRoot}>
+      <DownloadDock t={t} />
       <div className="rvs-rail">
         {railButton('explorer', t('tab.files'), <IconCode size={17} />)}
         {railButton('search', t('tab.search'), <IconSearch size={17} />)}

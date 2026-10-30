@@ -27,6 +27,9 @@ export const DYNAMIC_KEYS = [
   'history.details',
   'history.content',
   'history.diff',
+  // Reached through the `STATUS_KEY` lookup in `DownloadDock.tsx` (running is
+  // the only status the detail line never prints as a literal `t()` call).
+  'downloads.running',
 ] as const
 
 const zh: Record<string, string> = {
@@ -192,7 +195,14 @@ const zh: Record<string, string> = {
   'files.copyRel': '复制相对路径',
   'files.copyAbs': '复制绝对路径',
   'files.download': '下载到本地',
-  'files.downloadFailed': '下载失败',
+  'downloads.running': '下载中',
+  'downloads.done': '下载完成',
+  'downloads.failed': '下载失败',
+  'downloads.cancelled': '已取消',
+  'downloads.cancel': '取消下载',
+  'downloads.close': '关闭',
+  'downloads.browserDefault': '已保存到浏览器默认下载目录',
+  'downloads.indeterminate': '正在打包目录…',
   'files.copied': '已复制',
   'files.moved': '已移动',
   'files.pasteFailed': '操作失败',
@@ -611,7 +621,14 @@ const en: Record<string, string> = {
   'files.copyRel': 'Copy relative path',
   'files.copyAbs': 'Copy absolute path',
   'files.download': 'Download to Local',
-  'files.downloadFailed': 'Download failed',
+  'downloads.running': 'Downloading',
+  'downloads.done': 'Downloaded',
+  'downloads.failed': 'Download failed',
+  'downloads.cancelled': 'Cancelled',
+  'downloads.cancel': 'Cancel download',
+  'downloads.close': 'Dismiss',
+  'downloads.browserDefault': 'Saved to the browser download folder',
+  'downloads.indeterminate': 'Packaging directory…',
   'files.copied': 'Copied',
   'files.moved': 'Moved',
   'files.pasteFailed': 'operation failed',
