@@ -261,9 +261,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
    *
    * A ref, not a hook dependency: a revision bump must not re-create `loadDir`
    * (the reveal/refresh effects list it, and their identity churn would re-run
-   * both). Only the request-time check in `ListingRequests` reads it.
+   * both). Only the request-time check in `ListingRequests` reads it. It is
+   * written during render on purpose (an idempotent latest-value ref): an
+   * effect-synced ref is one commit stale, so a read triggered from the same
+   * commit as the write could still be labelled with the previous revision.
    */
   const revisionRef = useRef(store.revision)
+  revisionRef.current = store.revision
+  /** Current binding, for the late-answer guard below (the memo is per alias). */
+  const aliasRef = useRef(alias)
 
   /**
    * The in-flight listing reads (see `ListingRequests`).
@@ -278,7 +284,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     dir => dirKey(alias, dir),
     dir => api.fileOp.list(alias, dir),
     (key, entries) => {
-      if (alive.current) setListings(prev => withListing(prev, key, entries))
+      // A late answer must not paint after unmount, nor write the PREVIOUS
+      // workspace's cache key after a binding change.
+      if (alive.current && aliasRef.current === alias) setListings(prev => withListing(prev, key, entries))
     },
   ), [alias])
 
@@ -386,12 +394,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   // Root listing + refresh on the shared revision bump (git writes, saves...).
   const revision = store.revision
-  // Label new listing reads with the revision they reflect. Declared before the
-  // refresh effect below so a write's OWN revalidation is labelled with the new
-  // revision and cannot join a request issued before the write.
+  /** Keep the late-answer guard current for the NEXT commit's callbacks. */
   useEffect(() => {
-    revisionRef.current = revision
-  }, [revision])
+    aliasRef.current = alias
+  }, [alias])
   /**
    * The binding this tree was listed from and the revision it was listed at.
    * A parked panel stays MOUNTED behind `display:none`, so a write made off
@@ -444,9 +450,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   }, [listings])
 
   /** A hover prefetch / late listing must not fire or paint after the panel is gone. */
-  useEffect(() => () => {
-    alive.current = false
-    if (prefetchTimer.current !== undefined) window.clearTimeout(prefetchTimer.current)
+  useEffect(() => {
+    // Re-armed on every effect run: a StrictMode/replay remount runs
+    // setup → cleanup → setup, and an `alive` that only ever got set to false
+    // would freeze every listing on the second pass.
+    alive.current = true
+    return () => {
+      alive.current = false
+      if (prefetchTimer.current !== undefined) window.clearTimeout(prefetchTimer.current)
+    }
   }, [])
 
   const rowsOf = useCallback((dir: string): RemoteFileEntry[] | undefined => {
