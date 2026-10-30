@@ -555,9 +555,15 @@ export class RemotePool {
    *
    * `addChannel` is best-effort and late on purpose: a small download must not
    * pay for a second channel, so the caller opens one only after it has the
-   * size. Every session opened here is closed, and every slot/hold released,
-   * when the callback settles — including a partially successful `addChannel`.
-   * There is no wall-clock deadline: callers bound bulk transfers by progress.
+   * size. It never queues for a channel slot (a 30 s wait would stall a body that
+   * is already streaming) and a late call after the callback settled is a no-op.
+   * Every session opened here is closed, and every slot/hold released, when the
+   * callback settles — including a partially successful `addChannel`.
+   *
+   * There is no wall-clock deadline of its own: streaming is progress-bounded by
+   * the caller, and the caller also bounds the one-shot SFTP calls it makes
+   * around the stream (metadata phase, optional channel opens), because nothing
+   * there produces progress to watch.
    */
   async withTransferSftp<T>(
     alias: string,
@@ -566,6 +572,8 @@ export class RemotePool {
     const sessions: SFTPWrapper[] = []
     let slots = 0
     let holds = 0
+    /** Set when the callback settles: a late `addChannel` must not leak resources. */
+    let closed = false
     let conn: Client
     try {
       // An SFTP session IS a channel, so each one takes a slot: the ceiling this
@@ -578,16 +586,26 @@ export class RemotePool {
       holds += 1
       sessions.push(await this.openSession(conn))
       const addChannel = async (): Promise<SFTPWrapper | undefined> => {
-        try {
-          await this.acquireSlot(alias)
-          slots += 1
-        } catch {
-          return undefined
-        }
+        if (closed) return undefined
+        // NEVER queue for an optional channel: a busy host would otherwise delay
+        // the body of a download that is already streaming by up to
+        // CHANNEL_WAIT_MS, which is worse than one channel.
+        if (!this.tryAcquireSlot(alias)) return undefined
+        slots += 1
         this.hold(alias)
         holds += 1
         try {
           const extra = await this.openSession(conn)
+          if (closed) {
+            // The transfer settled while this channel was opening; the finally
+            // already returned its slot and hold, so close it here.
+            try {
+              extra.end()
+            } catch {
+              // Already gone.
+            }
+            return undefined
+          }
           sessions.push(extra)
           return extra
         } catch {
@@ -598,6 +616,7 @@ export class RemotePool {
       }
       return await fn(sessions[0] as SFTPWrapper, addChannel)
     } finally {
+      closed = true
       for (const session of sessions) {
         try {
           session.end()
@@ -614,13 +633,12 @@ export class RemotePool {
    * Run one callback on this alias's long-lived BROWSE SFTP session.
    *
    * Why: every list/stat/read used to open its own SFTP session, which is a
-   * whole channel-open round trip before the operation's own round trip. A
-   * single folder open is one list plus a stat per entry the explorer probes,
-   * and the panel's revision refresh re-lists every open directory, so that
-   * open/close churn sat directly on the click-to-pixels path (measured: ~2
-   * round trips per listing instead of ~1). The session is shared by every
-   * browse request for the alias; ssh2 multiplexes concurrent requests over one
-   * channel by packet id, which is also how its own fastGet/fastPut pipeline.
+   * whole channel-open round trip BEFORE the operation's own round trip. A single
+   * folder open is one list plus a stat per entry the explorer probes, and the
+   * panel's revision refresh re-lists every open directory, so that open/close
+   * churn sat directly on the click-to-pixels path. The session is shared by
+   * every browse request for the alias; ssh2 multiplexes concurrent requests
+   * over one channel by packet id (the same request map fastGet/fastPut use).
    *
    * Only read-only browse operations use it (`RemoteFiles.list/stat/read`):
    * writes, uploads and downloads keep their own short-lived session, so a
@@ -628,21 +646,23 @@ export class RemotePool {
    * an odd state.
    *
    * The session holds one channel slot and one connection hold while it exists,
-   * so the server's MaxSessions budget is unchanged — it is the same slot a
-   * per-request session took — and an idle session is closed after
-   * `BROWSE_IDLE_MS` so a dead remote can be picked up by the next request.
+   * which is what a per-request session took too, so peak channel usage against
+   * the server's MaxSessions does not change. The trade-off is that the slot
+   * stays PARKED for up to `BROWSE_IDLE_MS` after the last request: the extras a
+   * bulk transfer asks for use `tryAcquireSlot`, so they never wait on it.
    */
   async withBrowseSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts: SftpOptions = {}): Promise<T> {
     const lease = await this.leaseBrowse(alias)
     const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
     try {
       if (limit <= 0) return await fn(lease.sftp)
-      return await withDeadline(fn(lease.sftp), limit, `SFTP operation timed out after ${limit / 1000}s`)
+      return await withDeadline(fn(lease.sftp), limit, `SFTP operation on ${alias} timed out after ${limit / 1000}s`)
     } catch (error) {
-      // A request that never answered stays queued inside ssh2. Retire the
-      // session once the operations sharing it drain (touchBrowse below does
-      // it) instead of closing a channel a peer may still be using.
-      if (error instanceof Error && error.message === `SFTP operation timed out after ${limit / 1000}s`) {
+      // A request that never answered stays queued inside ssh2, and this session
+      // was already handed to other browse operations. Mark it stale: the next
+      // lease retires it (leaseBrowse), and operations sharing it fail fast
+      // instead of waiting out their own deadlines.
+      if (error instanceof DeadlineError) {
         lease.state.stale = true
       }
       throw error
@@ -731,6 +751,17 @@ export class RemotePool {
    */
   private async leaseBrowse(alias: string): Promise<{ state: BrowseChannel; sftp: SFTPWrapper }> {
     const state = this.browseState(alias)
+    // A session whose request hit its deadline is not trusted any more: retire it
+    // NOW instead of handing it to the request that just arrived. Waiting for the
+    // operations on it to drain looked safer, but any continuous browse traffic
+    // (a hover prefetch every few seconds is enough) keeps `active` above zero and
+    // postpones the retirement forever, so every subsequent list/stat/read paid
+    // the full 60 s deadline. Peers sharing the retired session fail fast (the
+    // close settles their requests) instead of waiting each of them out.
+    if (state.stale) {
+      this.evictBrowse(alias, state)
+      return this.leaseBrowse(alias)
+    }
     if (state.idle !== undefined) {
       clearTimeout(state.idle)
       state.idle = undefined
@@ -772,6 +803,17 @@ export class RemotePool {
     state.leased = true
     try {
       const sftp = await this.openSession(conn)
+      // The host can be dropped while the session is opening: the slot and hold
+      // are already returned and nobody would ever close this channel, so refuse
+      // it instead of handing out a session on a dead connection.
+      if (this.browsed.get(alias) !== state || !state.leased) {
+        try {
+          sftp.end()
+        } catch {
+          // Already gone.
+        }
+        throw new Error(`host ${alias} was disconnected while opening the browse session`)
+      }
       state.session = sftp
       // The channel can die on its own (remote restart, network blip). Clearing
       // bookkeeping here means the next browse operation reopens instead of
@@ -880,6 +922,23 @@ export class RemotePool {
       waiter.timer.unref?.()
       state.queue.push(waiter)
     })
+  }
+
+  /**
+   * Take one channel slot only if one is free RIGHT NOW; never queue.
+   *
+   * Optional work (a bulk transfer's second channel) must not wait behind
+   * `CHANNEL_WAIT_MS` of other operations: a "best effort" extra channel that
+   * delays the body of an already-streaming download by 30 s is worse than the
+   * one channel the transfer would have used anyway. A queued waiter also blocks
+   * the attempt on purpose — it has been waiting longer, and stealing its slot
+   * would just move the wait.
+   */
+  private tryAcquireSlot(alias: string): boolean {
+    const state = this.slotState(alias)
+    if (state.active >= CHANNEL_LIMIT || state.queue.length > 0) return false
+    state.active += 1
+    return true
   }
 
   /** Give a slot back, handing it straight to the longest-waiting operation. */
@@ -1161,12 +1220,21 @@ function warnDetached(alias: string): void {
 }
 
 /**
+ * An operation that ran out of its wall-clock budget.
+ *
+ * Tagged on purpose: callers have to tell "the remote never answered" from a real
+ * remote failure (a missing path must not cost the session), and matching on the
+ * message text would silently stop working the moment the template changed.
+ */
+export class DeadlineError extends Error {}
+
+/**
  * Reject when `promise` has not settled within `ms`, so a stalled remote
  * callback cannot keep a session (and its pooled connection) alive forever.
  */
 function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms)
+    const timer = setTimeout(() => reject(new DeadlineError(message)), ms)
     timer.unref?.()
     promise.then(
       (value) => {

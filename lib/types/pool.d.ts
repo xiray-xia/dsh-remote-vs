@@ -91,22 +91,27 @@ export declare class RemotePool {
      *
      * `addChannel` is best-effort and late on purpose: a small download must not
      * pay for a second channel, so the caller opens one only after it has the
-     * size. Every session opened here is closed, and every slot/hold released,
-     * when the callback settles — including a partially successful `addChannel`.
-     * There is no wall-clock deadline: callers bound bulk transfers by progress.
+     * size. It never queues for a channel slot (a 30 s wait would stall a body that
+     * is already streaming) and a late call after the callback settled is a no-op.
+     * Every session opened here is closed, and every slot/hold released, when the
+     * callback settles — including a partially successful `addChannel`.
+     *
+     * There is no wall-clock deadline of its own: streaming is progress-bounded by
+     * the caller, and the caller also bounds the one-shot SFTP calls it makes
+     * around the stream (metadata phase, optional channel opens), because nothing
+     * there produces progress to watch.
      */
     withTransferSftp<T>(alias: string, fn: (sftp: SFTPWrapper, addChannel: () => Promise<SFTPWrapper | undefined>) => Promise<T>): Promise<T>;
     /**
      * Run one callback on this alias's long-lived BROWSE SFTP session.
      *
      * Why: every list/stat/read used to open its own SFTP session, which is a
-     * whole channel-open round trip before the operation's own round trip. A
-     * single folder open is one list plus a stat per entry the explorer probes,
-     * and the panel's revision refresh re-lists every open directory, so that
-     * open/close churn sat directly on the click-to-pixels path (measured: ~2
-     * round trips per listing instead of ~1). The session is shared by every
-     * browse request for the alias; ssh2 multiplexes concurrent requests over one
-     * channel by packet id, which is also how its own fastGet/fastPut pipeline.
+     * whole channel-open round trip BEFORE the operation's own round trip. A single
+     * folder open is one list plus a stat per entry the explorer probes, and the
+     * panel's revision refresh re-lists every open directory, so that open/close
+     * churn sat directly on the click-to-pixels path. The session is shared by
+     * every browse request for the alias; ssh2 multiplexes concurrent requests
+     * over one channel by packet id (the same request map fastGet/fastPut use).
      *
      * Only read-only browse operations use it (`RemoteFiles.list/stat/read`):
      * writes, uploads and downloads keep their own short-lived session, so a
@@ -114,9 +119,10 @@ export declare class RemotePool {
      * an odd state.
      *
      * The session holds one channel slot and one connection hold while it exists,
-     * so the server's MaxSessions budget is unchanged — it is the same slot a
-     * per-request session took — and an idle session is closed after
-     * `BROWSE_IDLE_MS` so a dead remote can be picked up by the next request.
+     * which is what a per-request session took too, so peak channel usage against
+     * the server's MaxSessions does not change. The trade-off is that the slot
+     * stays PARKED for up to `BROWSE_IDLE_MS` after the last request: the extras a
+     * bulk transfer asks for use `tryAcquireSlot`, so they never wait on it.
      */
     withBrowseSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts?: SftpOptions): Promise<T>;
     /** Upload one local file to an absolute remote path (parallel fastPut). */
@@ -161,6 +167,17 @@ export declare class RemotePool {
      * worse than a readable error naming the cause and what to do about it.
      */
     private acquireSlot;
+    /**
+     * Take one channel slot only if one is free RIGHT NOW; never queue.
+     *
+     * Optional work (a bulk transfer's second channel) must not wait behind
+     * `CHANNEL_WAIT_MS` of other operations: a "best effort" extra channel that
+     * delays the body of an already-streaming download by 30 s is worse than the
+     * one channel the transfer would have used anyway. A queued waiter also blocks
+     * the attempt on purpose — it has been waiting longer, and stealing its slot
+     * would just move the wait.
+     */
+    private tryAcquireSlot;
     /** Give a slot back, handing it straight to the longest-waiting operation. */
     private releaseSlot;
     private slotState;
@@ -191,4 +208,13 @@ export declare class RemotePool {
     private release;
     private acquire;
     private dial;
+}
+/**
+ * An operation that ran out of its wall-clock budget.
+ *
+ * Tagged on purpose: callers have to tell "the remote never answered" from a real
+ * remote failure (a missing path must not cost the session), and matching on the
+ * message text would silently stop working the moment the template changed.
+ */
+export declare class DeadlineError extends Error {
 }

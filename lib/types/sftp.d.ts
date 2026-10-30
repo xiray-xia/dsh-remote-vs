@@ -31,11 +31,13 @@ export declare const UPLOAD_IDLE_MS = 60000;
  * A single `createReadStream`/`createWriteStream` keeps exactly ONE SFTP request
  * in flight per round trip; measured against a real host that cost about 8x
  * (4.4 MiB/s single stream vs 35.4 MiB/s for ssh2's pipelined fastGet on the
- * same link). 256 KiB chunks with 32 in-flight requests (8 MiB window) are the
- * same tuning ssh2's fastGet/fastPut use, and bound the per-transfer memory.
+ * same link). 256 KiB chunks with 32 in-flight requests (8 MiB of app-side
+ * buffers) are the same tuning ssh2's fastGet/fastPut use and bound the
+ * per-transfer memory; on top of that ssh2 holds up to one 2 MiB channel window
+ * per channel in flight, so a two-channel download peaks around 12 MiB.
  */
 export declare const TRANSFER_CHUNK_BYTES: number;
-/** In-flight chunk window (also the per-transfer memory bound: 8 MiB). */
+/** In-flight chunk window (also the per-transfer APP-side memory bound: 8 MiB). */
 export declare const TRANSFER_CONCURRENCY = 32;
 /**
  * Channels a big download spreads its READ window over.

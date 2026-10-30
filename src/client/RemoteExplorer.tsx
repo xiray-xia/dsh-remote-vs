@@ -16,6 +16,7 @@ import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
 import { startDownload, startSelectionDownload } from './downloads.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
+import { ListingRequests } from './listing-requests.ts'
 import { repoRelative, useExplorer } from './store.tsx'
 import { planUpload, withDroppedDirs, type DroppedFile } from './upload-plan.ts'
 import { collectDroppedFiles, type EntryLike } from './upload-source.ts'
@@ -209,8 +210,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
    * behind (asking again for a directory that was just listed).
    */
   const listingsRef = useRef<Record<string, RemoteFileEntry[]>>({})
-  /** Listing requests on the wire, by alias+path: hover and click share one. */
-  const inFlight = useRef(new Map<string, Promise<RemoteFileEntry[]>>())
+  /** Set false on unmount so a listing that lands late does not touch state. */
+  const alive = useRef(true)
   /** Hover-intent timer for prefetch; one pointer means one candidate. */
   const prefetchTimer = useRef<number | undefined>(undefined)
   const [loading, setLoading] = useState<Set<string>>(new Set())
@@ -256,48 +257,47 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     && sameLocalDir(chatTarget.sessionWorkspacePath, viewedAliasPath)
 
   /**
-   * List one directory, sharing an already-running request for it.
+   * The revision this component's listing traffic is labelled with.
+   *
+   * A ref, not a hook dependency: a revision bump must not re-create `loadDir`
+   * (the reveal/refresh effects list it, and their identity churn would re-run
+   * both). Only the request-time check in `ListingRequests` reads it.
+   */
+  const revisionRef = useRef(store.revision)
+
+  /**
+   * The in-flight listing reads (see `ListingRequests`).
    *
    * A hover prefetch and the click that follows it are the same request, and so
    * are a double click and the reveal chain's level: without the shared map each
-   * one opened its own SFTP listing for the same path. The promise settles both
-   * callers; the cache write happens once, here.
+   * one opened its own SFTP listing for the same path. A request is only shared
+   * when it started at the same revision, so a read AFTER a write never gets an
+   * answer issued before it.
    */
-  const fetchListing = useCallback((dir: string): Promise<RemoteFileEntry[]> => {
-    const key = dirKey(alias, dir)
-    const running = inFlight.current.get(key)
-    if (running !== undefined) return running
-    const request = api.fileOp.list(alias, dir)
-    inFlight.current.set(key, request)
-    const clear = (): void => {
-      if (inFlight.current.get(key) === request) inFlight.current.delete(key)
-    }
-    request.then(
-      (entries) => {
-        setListings(prev => withListing(prev, key, entries))
-        clear()
-      },
-      clear,
-    )
-    return request
-  }, [alias])
+  const listingsApi = useMemo(() => new ListingRequests(
+    dir => dirKey(alias, dir),
+    dir => api.fileOp.list(alias, dir),
+    (key, entries) => {
+      if (alive.current) setListings(prev => withListing(prev, key, entries))
+    },
+  ), [alias])
 
   const loadDir = useCallback(async (dir: string, force = false): Promise<void> => {
     if (alias === '') return
     const key = dirKey(alias, dir)
     // NOTE: a cached listing is deliberately NOT reused as the only source. The
-    // tree relies on every caller re-listing after a write (`force` is caller
-    // intent, same as before); a PREFETCHED listing is still on screen while
-    // the revalidation runs, which is what makes the open feel instant without
-    // serving stale content as final.
-    void force
+    // tree relies on every caller re-listing after a write (`force` = start a
+    // fresh request instead of joining one that may predate the write); a
+    // PREFETCHED listing is still on screen while the revalidation runs, which
+    // is what makes the open feel instant without serving stale content as
+    // final.
     setLoading(prev => {
       const next = new Set(prev)
       next.add(key)
       return next
     })
     try {
-      await fetchListing(dir)
+      await listingsApi.request(dir, revisionRef.current, force)
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), true)
     } finally {
@@ -307,7 +307,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         return next
       })
     }
-  }, [alias, fetchListing])
+  }, [alias, listingsApi])
 
   /**
    * Warm the listing cache for a directory the pointer is resting on.
@@ -322,9 +322,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (alias === '') return
     const key = dirKey(alias, dir)
     if (listingsRef.current[key] !== undefined) return
-    if (inFlight.current.has(key)) return
-    fetchListing(dir).catch(() => undefined)
-  }, [alias, fetchListing])
+    if (listingsApi.busy(dir)) return
+    listingsApi.request(dir, revisionRef.current).catch(() => undefined)
+  }, [alias, listingsApi])
 
   /** Hover intent: prefetch the row under the pointer after a short rest. */
   const hoverDir = (path: string | undefined): void => {
@@ -386,6 +386,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   // Root listing + refresh on the shared revision bump (git writes, saves...).
   const revision = store.revision
+  // Label new listing reads with the revision they reflect. Declared before the
+  // refresh effect below so a write's OWN revalidation is labelled with the new
+  // revision and cannot join a request issued before the write.
+  useEffect(() => {
+    revisionRef.current = revision
+  }, [revision])
   /**
    * The binding this tree was listed from and the revision it was listed at.
    * A parked panel stays MOUNTED behind `display:none`, so a write made off
@@ -437,8 +443,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     listingsRef.current = listings
   }, [listings])
 
-  /** A hover prefetch that never fired must not fire after the panel is gone. */
+  /** A hover prefetch / late listing must not fire or paint after the panel is gone. */
   useEffect(() => () => {
+    alive.current = false
     if (prefetchTimer.current !== undefined) window.clearTimeout(prefetchTimer.current)
   }, [])
 

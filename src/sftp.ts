@@ -44,13 +44,35 @@ export const UPLOAD_IDLE_MS = 60_000
  * A single `createReadStream`/`createWriteStream` keeps exactly ONE SFTP request
  * in flight per round trip; measured against a real host that cost about 8x
  * (4.4 MiB/s single stream vs 35.4 MiB/s for ssh2's pipelined fastGet on the
- * same link). 256 KiB chunks with 32 in-flight requests (8 MiB window) are the
- * same tuning ssh2's fastGet/fastPut use, and bound the per-transfer memory.
+ * same link). 256 KiB chunks with 32 in-flight requests (8 MiB of app-side
+ * buffers) are the same tuning ssh2's fastGet/fastPut use and bound the
+ * per-transfer memory; on top of that ssh2 holds up to one 2 MiB channel window
+ * per channel in flight, so a two-channel download peaks around 12 MiB.
  */
 export const TRANSFER_CHUNK_BYTES = 256 * 1024
 
-/** In-flight chunk window (also the per-transfer memory bound: 8 MiB). */
+/** In-flight chunk window (also the per-transfer APP-side memory bound: 8 MiB). */
 export const TRANSFER_CONCURRENCY = 32
+
+/**
+ * Deadline for a download's one-shot metadata calls (`lstat`, `open`, `fstat`).
+ *
+ * Nothing is streaming while they run, so there is no progress signal to watch
+ * and no idle watchdog can help: a server that never answers one would pin the
+ * transfer, its channels and its slots forever. The streaming phase stays
+ * progress-bounded (`DOWNLOAD_IDLE_MS`) because a big file on a slow link is
+ * healthy for minutes.
+ */
+const DOWNLOAD_META_TIMEOUT_MS = 60_000
+
+/**
+ * Deadline for the OPTIONAL second channel's handle open.
+ *
+ * This runs after the response headers are sent, so a hang here is worse than a
+ * missing second channel: the client is already reading a 200 body. Short on
+ * purpose — the fallback (one channel) is always correct.
+ */
+const EXTRA_CHANNEL_TIMEOUT_MS = 10_000
 
 /**
  * Channels a big download spreads its READ window over.
@@ -96,6 +118,30 @@ export function remotePath(path: string): string {
   const normalized = posix.normalize(path.replace(/\\/g, '/'))
   if (!normalized.startsWith('/')) throw new Error('remote path must be absolute')
   return normalized
+}
+
+/**
+ * Reject when `promise` has not settled within `ms`.
+ *
+ * The download's one-shot calls (`lstat`, `open`, `fstat`, an extra channel's
+ * handle) have no progress signal, so this is the only thing between a stalled
+ * server and a response — and two SFTP channels — pinned forever.
+ */
+function bounded<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    timer.unref?.()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
 }
 
 /**
@@ -297,12 +343,18 @@ export class RemoteFiles {
    */
   async download(alias: string, file: string, res: ServerResponse): Promise<void> {
     const path = remotePath(file)
-    // No wall clock (progress-bounded, see DOWNLOAD_IDLE_MS); extra channel
-    // windows are opened only once the size says the file is worth them.
+    // Streaming itself has no wall clock (progress-bounded, see DOWNLOAD_IDLE_MS);
+    // the one-shot calls around it do, because they produce no progress to watch
+    // and a server that never answers one would hold the transfer (and its two
+    // channel slots) forever.
     await this.pool.withTransferSftp(alias, async (sftp, addChannel) => {
-      const link = await lstatAsync(sftp, path).catch(async (error: unknown) => {
-        throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
-      })
+      const link = await bounded(
+        lstatAsync(sftp, path).catch(async (error: unknown) => {
+          throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+        }),
+        DOWNLOAD_META_TIMEOUT_MS,
+        `listing ${path} timed out after ${DOWNLOAD_META_TIMEOUT_MS / 1000}s`,
+      )
       // Same pre-check as read(): asking SFTP to open a directory yields a bare
       // "Failure", while the stat that was needed anyway already says what the
       // path is.
@@ -313,14 +365,22 @@ export class RemoteFiles {
       // and a link to a directory only fails once opened. One handle supplies
       // the real type and length, and the stream below is bounded by that
       // length so a file that grows mid-transfer cannot overrun the framing.
-      const handle = await openAsync(sftp, path).catch(async (error: unknown) => {
-        throw (await explainFollowFailure(sftp, path, error)) ?? error
-      })
+      const handle = await bounded(
+        openAsync(sftp, path).catch(async (error: unknown) => {
+          throw (await explainFollowFailure(sftp, path, error)) ?? error
+        }),
+        DOWNLOAD_META_TIMEOUT_MS,
+        `opening ${path} timed out after ${DOWNLOAD_META_TIMEOUT_MS / 1000}s`,
+      )
       // Each SFTP session has its own handle space, so every extra channel needs
       // its own handle on the same file; the first one is always open already.
       const channels: Array<{ sftp: SFTPWrapper; handle: Buffer }> = [{ sftp, handle }]
       try {
-        const attrs = await fstatAsync(sftp, handle)
+        const attrs = await bounded(
+          fstatAsync(sftp, handle),
+          DOWNLOAD_META_TIMEOUT_MS,
+          `stat of ${path} timed out after ${DOWNLOAD_META_TIMEOUT_MS / 1000}s`,
+        )
         if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
         // The client can disappear while the stat is in flight; there is nobody
         // left to stream to, and writing headers to a closed response would turn
@@ -338,13 +398,20 @@ export class RemoteFiles {
           return
         }
         if (attrs.size >= MULTI_CHANNEL_MIN_BYTES) {
-          // Best effort: a second channel that will not open just leaves the
-          // transfer on the first one, which is what it would have used anyway.
+          // Best effort: a second channel (or a handle on it) that will not open
+          // just leaves the transfer on the first one, which is what it would
+          // have used anyway. Bounded, because this runs AFTER the headers are
+          // sent: an answer that never comes would otherwise hang the response
+          // and pin both channels forever (no progress signal exists yet).
           for (let extra = 1; extra < TRANSFER_SESSIONS; extra += 1) {
             const channel = await addChannel()
             if (channel === undefined) break
             try {
-              const extraHandle = await openAsync(channel, path)
+              const extraHandle = await bounded(
+                openAsync(channel, path),
+                EXTRA_CHANNEL_TIMEOUT_MS,
+                `opening ${path} on the second channel timed out after ${EXTRA_CHANNEL_TIMEOUT_MS / 1000}s`,
+              )
               channels.push({ sftp: channel, handle: extraHandle })
             } catch {
               break
@@ -714,6 +781,21 @@ async function pipeChannelsToResponse(
     const wake = slotWaiters.shift()
     if (wake !== undefined) wake()
   }
+  /**
+   * Channels whose READ failed. Their chunks are re-read on the first channel:
+   * the extra channel is an optimisation, so losing it must degrade the transfer
+   * to the single-channel shape it would have used anyway instead of failing a
+   * download the first channel can still finish. (A channel that STALLS rather
+   * than errors is not recoverable here: no bytes means the ordered writer has
+   * nothing to reorder, and the no-progress watchdog ends the transfer.)
+   */
+  const failedChannels = new Set<number>()
+  const primary = channels[0] as { sftp: SFTPWrapper; handle: Buffer }
+  const channelFor = (index: number): { sftp: SFTPWrapper; handle: Buffer; slot: number } => {
+    const slot = channels.length > 1 ? index % channels.length : 0
+    if (slot === 0 || failedChannels.has(slot)) return { ...primary, slot }
+    return { ...(channels[slot] as { sftp: SFTPWrapper; handle: Buffer }), slot }
+  }
   const worker = async (): Promise<void> => {
     for (;;) {
       if (cancelled || failure !== undefined) return
@@ -731,8 +813,16 @@ async function pipeChannelsToResponse(
       const length = Math.min(chunkBytes, size - start)
       const buffer = Buffer.allocUnsafe(length)
       try {
-        const channel = channels[index % channels.length] as { sftp: SFTPWrapper; handle: Buffer }
-        await readHandleFully(channel.sftp, channel.handle, buffer, start)
+        const channel = channelFor(index)
+        try {
+          await readHandleFully(channel.sftp, channel.handle, buffer, start)
+        } catch (error) {
+          // A broken optional channel must not fail the whole file: retire it and
+          // read this chunk again through the primary one.
+          if (channel.slot === 0 || cancelled || failure !== undefined) throw error
+          failedChannels.add(channel.slot)
+          await readHandleFully(primary.sftp, primary.handle, buffer, start)
+        }
       } catch (error) {
         release()
         fail(error)
