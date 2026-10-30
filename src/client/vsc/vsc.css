@@ -3619,9 +3619,14 @@ body[data-ds-dark-theme] .rvs-execpanel {
   --rvs-git-m: #e2b714;
   --rvs-git-a: #4ec9b0;
   position: fixed;
-  left: 16px;
-  bottom: 16px;
-  z-index: 46;
+  /* Bottom-RIGHT, not over the sidebar's own footer (first screenshot: the
+     dock sat on the usage/account block). `bottom: 64px` keeps it above the
+     transient toast stack (right 16 / bottom 18 / z 100001) and above the
+     network exec panel (right 16 / bottom 16 / z 45), so neither covers it. */
+  right: 16px;
+  bottom: 64px;
+  z-index: 100000;
+  animation: rvsFade .12s ease;
   width: min(380px, calc(100vw - 32px));
   max-height: min(45vh, 420px);
   overflow-y: auto;
