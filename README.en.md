@@ -41,7 +41,8 @@ Requires DSH `0.2.2-alpha.2` or newer (`engines.dsh` enforces the range; **the t
 baseline is `0.2.2-alpha.2`**). Older Hosts (`0.2.1-rc.2` generation) need plugin `0.9.3`: the
 Remote preset of this version uses the `0.2.2-alpha.2` tool schema. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
-the common name; use your own profile's name).
+the common name; use your own profile's name). Desktop uses the reserved `desktop`
+profile instead — see [Desktop](#desktop-dsh-desktop) below.
 
 **That one command is all it takes — no build scripts have to be approved.** The package
 has no `prepare`/`postinstall` and no package in the dependency tree carries an install
@@ -51,6 +52,33 @@ also ships the built `lib/`. The old "allow the printed build scripts in that pr
 with lifecycle scripts (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`);
 it cannot be waived from the dependency side, only removed from the tree. Then restart
 `dsh web` and open Settings → Remote hosts to configure.
+
+### Desktop (DSH Desktop)
+
+The Desktop app is an Electron shell around the complete dsh Web application, but it runs
+in its own reserved profile, `desktop`, managed by the app itself: it does **not** share
+`node_modules`, lockfiles, or plugin activation with the `web` profile of `dsh web`, so the
+plugin has to be installed once for Desktop too. Sessions, settings, credentials and the
+`dsh-remote.json` host configuration under `$DSH_HOME` are shared, so the host list needs
+no re-setup.
+
+Install either way:
+
+1. **Desktop's Plugins page**: launch Desktop once → enter `dsh-remote-vs` (a pinned
+   version works too) on the Plugins page → install → **fully quit** Desktop (tray Quit /
+   application menu exit; the window close button only hides it) and reopen it.
+2. **Desktop's bundled dsh command**: application menu → **Manage dsh Command… →
+   Install**, fully quit Desktop, run `dsh plugin --profile desktop add dsh-remote-vs`,
+   then reopen Desktop.
+
+`desktop` is reserved for the Electron application: an **npm-installed `dsh` cannot manage
+it** (it answers `profile "desktop" is managed exclusively by the Electron application`),
+so one of the two routes above is required. The Desktop release version equals the DSH
+runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-alpha.2`; check About);
+older releases make the Plugins page refuse the install. Desktop opens no visible Web
+port, but the plugin's HTTP routes and terminal socket are forwarded through Desktop's
+Host (the terminal resolves its address from `__DSH_TRANSPORT__.streamBaseUrl`), so no
+extra configuration is needed.
 
 > The package carries the prebuilt helper (`vendor/dsh-remote-helpers/`, ~45 MB), so the
 > first install is a large download — it is the **only** channel that delivers a helper

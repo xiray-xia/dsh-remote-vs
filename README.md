@@ -37,13 +37,35 @@ dsh plugin --profile web add dsh-remote-vs
 要求 DSH `0.2.2-alpha.2` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.2-alpha.2`**）。
 旧 Host（`0.2.1-rc.2` 一代）请用插件 `0.9.3`：新版的 Remote 预设用了 `0.2.2-alpha.2` 的工具 schema。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
-必须装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）。
+要装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）；
+桌面端用的是保留 profile `desktop`，见下面「桌面端」。
 
 **这一条命令就够了，不需要放行任何构建脚本**：包本身没有 `prepare`/`postinstall`，依赖树里也没有任何
 带安装脚本的包（`ssh2` 是**打进产物**的，不是依赖）；走仓库安装时还带着构建好的 `lib/`。
 以前需要「在 profile 的 `pnpm-workspace.yaml` 里放行构建脚本后重跑」，那是 pnpm 12 对
 「带安装脚本的依赖」的硬策略门（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`），
 依赖侧无法豁免，只能从树里消掉。装完重启 `dsh web`，打开设置 → 远程主机开配。
+
+### 桌面端（DSH Desktop）
+
+桌面端是 Electron 壳 + 完整的 dsh Web 应用，但它跑在**独立的保留 profile `desktop`**
+里（由桌面端自身管理）：和 `dsh web` 的 `web` profile **不共享** `node_modules`、锁文件
+和插件激活，需要在桌面端再装一次。`$DSH_HOME` 下的会话、设置、凭据和
+`~/.dsh/dsh-remote.json` 主机配置是共享的，所以主机列表不用重配。
+
+安装（二选一）：
+
+1. **桌面端「插件」页面**：完全启动桌面端一次 → 插件页输入 `dsh-remote-vs`（可钉版本）
+   安装 → **完全退出**桌面端（托盘 Quit / 菜单退出；点窗口 × 只是隐藏到托盘）再重开。
+2. **桌面端自带的 dsh 命令**：应用菜单 → **Manage dsh Command… → Install**，然后
+   完全退出桌面端，执行 `dsh plugin --profile desktop add dsh-remote-vs`，再重开。
+
+注意：`desktop` 是桌面端独占的保留 profile，**npm 全局安装的 `dsh` 不能管理它**
+（会报 `profile "desktop" is managed exclusively by the Electron application`），
+只能走上面两条路径。桌面端的版本号等于它捆绑的 DSH 运行时版本，同样要满足
+`engines.dsh` 要求（`>=0.2.2-alpha.2`，关于面板可看）；低于该版本时插件页会直接拒绝
+安装。桌面端没有可见的 Web 端口，但本插件的 HTTP 路由与终端 socket 都经桌面端的
+Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无需额外设置。
 
 > 包内含预编译的 helper（`vendor/dsh-remote-helpers/`，约 45 MB），所以首次安装下载量偏大 ——
 > 它是**唯一**的 helper 投放渠道（官方 Release 不带 helper 可执行文件），去掉它就没法给新主机部署。

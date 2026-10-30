@@ -81,6 +81,43 @@ function throwIfGitFailed(r: RemoteExecResult, timeoutMs: number): void {
   throw new RemoteApiError(502, friendly ?? (r.stderr.trim() || r.error || `git failed [exit code: ${r.exitCode}]`))
 }
 
+/** Query for one remote terminal socket. */
+export interface TerminalSocketQuery {
+  alias?: string
+  session?: string
+  cols: number
+  rows: number
+}
+
+/**
+ * Origin the remote terminal socket dials.
+ *
+ * `dsh web` serves the app from the Host itself, so `location` already names the
+ * Host. DSH Desktop serves the app from `dsh-app://app` and forwards HTTP to its
+ * own loopback Host, publishing that Host's origin as
+ * `__DSH_TRANSPORT__.streamBaseUrl` (the shell also attaches the Host cookie to
+ * `ws://127.0.0.1/*` handshakes). Prefer a published origin; without one keep
+ * the page origin, which is exactly the pre-Desktop behaviour.
+ */
+export function terminalSocketBase(): string {
+  const transport = (globalThis as unknown as { __DSH_TRANSPORT__?: { streamBaseUrl?: unknown } }).__DSH_TRANSPORT__
+  const published = transport?.streamBaseUrl
+  if (typeof published === 'string' && /^https?:\/\//i.test(published)) return published
+  return `${location.protocol}//${location.host}`
+}
+
+/** Absolute socket URL for one remote terminal, resolved against `base`. */
+export function terminalSocketUrl(params: TerminalSocketQuery, base = terminalSocketBase()): string {
+  const url = new URL(REMOTE_API.terminal, base)
+  if (url.protocol === 'http:') url.protocol = 'ws:'
+  else if (url.protocol === 'https:') url.protocol = 'wss:'
+  if (params.alias !== undefined) url.searchParams.set('alias', params.alias)
+  if (params.session !== undefined) url.searchParams.set('session', params.session)
+  url.searchParams.set('cols', String(params.cols))
+  url.searchParams.set('rows', String(params.rows))
+  return url.toString()
+}
+
 /**
  * Effective remote timeouts (see `src/timeouts.ts`).
  *
@@ -379,14 +416,6 @@ export const api = {
       return parseShow(ref, message.stdout, stat.stdout)
     },
   },
-  // -- terminal socket URL
-  terminalUrl: (params: { alias?: string; session?: string; cols: number; rows: number }) => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = new URL(`${proto}//${location.host}${REMOTE_API.terminal}`)
-    if (params.alias !== undefined) url.searchParams.set('alias', params.alias)
-    if (params.session !== undefined) url.searchParams.set('session', params.session)
-    url.searchParams.set('cols', String(params.cols))
-    url.searchParams.set('rows', String(params.rows))
-    return url.toString()
-  },
+  // -- terminal socket URL (Desktop resolves it against its published Host origin)
+  terminalUrl: (params: TerminalSocketQuery) => terminalSocketUrl(params),
 }

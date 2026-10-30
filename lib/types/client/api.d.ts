@@ -6,6 +6,26 @@ export declare class RemoteApiError extends Error {
     readonly status: number;
     constructor(status: number, message: string);
 }
+/** Query for one remote terminal socket. */
+export interface TerminalSocketQuery {
+    alias?: string;
+    session?: string;
+    cols: number;
+    rows: number;
+}
+/**
+ * Origin the remote terminal socket dials.
+ *
+ * `dsh web` serves the app from the Host itself, so `location` already names the
+ * Host. DSH Desktop serves the app from `dsh-app://app` and forwards HTTP to its
+ * own loopback Host, publishing that Host's origin as
+ * `__DSH_TRANSPORT__.streamBaseUrl` (the shell also attaches the Host cookie to
+ * `ws://127.0.0.1/*` handshakes). Prefer a published origin; without one keep
+ * the page origin, which is exactly the pre-Desktop behaviour.
+ */
+export declare function terminalSocketBase(): string;
+/** Absolute socket URL for one remote terminal, resolved against `base`. */
+export declare function terminalSocketUrl(params: TerminalSocketQuery, base?: string): string;
 /** Apply the Host-provided pair (clamped; a malformed answer keeps defaults). */
 export declare function configureTimeouts(value: unknown): RemoteTimeouts;
 /** Current per-git-command timeout in milliseconds. */
@@ -165,10 +185,5 @@ export declare const api: {
         branches(alias: string, path: string, current: string): Promise<GitBranch[]>;
         show(alias: string, path: string, ref: string): Promise<GitShow>;
     };
-    terminalUrl: (params: {
-        alias?: string;
-        session?: string;
-        cols: number;
-        rows: number;
-    }) => string;
+    terminalUrl: (params: TerminalSocketQuery) => string;
 };
