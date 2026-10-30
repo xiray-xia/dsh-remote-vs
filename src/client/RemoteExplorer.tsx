@@ -12,9 +12,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
-import type { RemoteFileEntry } from '../protocol.ts'
+import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
-import { startDownload } from './downloads.ts'
+import { startDownload, startSelectionDownload } from './downloads.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { repoRelative, useExplorer } from './store.tsx'
 import { planUpload, withDroppedDirs, type DroppedFile } from './upload-plan.ts'
@@ -1087,9 +1087,22 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       })
       entries.push({ label: t('files.copyRel'), onSelect: () => { void copyText(targets.map(item => repoRelative(repoRoot, item.path) || item.path).join('\n')); toast(t('files.copiedClipboard')) }, separated: true })
       entries.push({ label: t('files.copyAbs'), onSelect: () => { void copyText(targets.map(item => item.path).join('\n')); toast(t('files.copiedClipboard')) } })
-      if (targets.length === 1) {
-        entries.push({ label: t('files.download'), onSelect: () => { downloadEntry(entry) } })
-      }
+      entries.push({
+        label: t('files.download') + (targets.length > 1 ? ` (${targets.length})` : ''),
+        onSelect: () => {
+          if (targets.length === 1) {
+            downloadEntry(entry)
+            return
+          }
+          if (targets.length > MAX_SELECTION_DOWNLOAD) {
+            toast(t('downloads.tooMany'), true)
+            return
+          }
+          // One archive for the whole selection: the user answers ONE save
+          // dialog instead of one per entry, and mixed files/directories work.
+          startSelectionDownload(alias, targets.map(item => item.path))
+        },
+      })
       entries.push({
         label: t('files.referenceFile'),
         onSelect: () => {

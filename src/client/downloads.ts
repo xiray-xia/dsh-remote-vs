@@ -9,7 +9,7 @@
  */
 
 import { api } from './api.ts'
-import { saveRemoteDir, saveRemoteFile } from './download.ts'
+import { saveRemoteDir, saveRemoteFile, saveRemoteMany, type DownloadOutcome } from './download.ts'
 
 /** One download's lifecycle state. */
 export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled'
@@ -17,13 +17,15 @@ export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled'
 /** One task as the dock renders it. */
 export interface DownloadTask {
   id: string
-  /** Basename of the remote path. */
+  /** Basename of the remote path (or `selection-N` for a multi-selection). */
   name: string
   /** Resolved from the stat preflight; `hint.directory` until then. */
   directory: boolean
+  /** Entries in a multi-selection archive; absent for a single path. */
+  selection?: number
   status: DownloadStatus
   loaded: number
-  /** Absent for a streamed directory archive (chunked, size unknown). */
+  /** Absent for a streamed archive (chunked, size unknown). */
   total?: number
   /** Failure text, or the note shown for the browser-default fallback. */
   error?: string
@@ -74,45 +76,31 @@ export const downloadsStore = {
   },
 }
 
+/** Progress sink handed to every starter. */
+interface RunnerOptions {
+  signal: AbortSignal
+  onProgress: (progress: { loaded: number; total?: number }) => void
+}
+
 /**
- * Start one download (file or directory) and return its task id.
+ * Run one task body: progress patches, terminal status, cancel mapping.
  *
- * The stat preflight runs here — not in the menus — so a deleted/unreadable
- * remote path becomes a failed task with the Host's real message, and the
- * file-vs-directory decision comes from the Host rather than a possibly stale
- * tree row.
+ * The task row is published by the caller before any await, so the dock shows
+ * the row immediately and only the numbers move afterwards.
  */
-export function startDownload(alias: string, path: string, hint: { name: string; directory: boolean }): string {
-  const id = `download-${++sequence}`
-  const controller = new AbortController()
-  controllers.set(id, controller)
-  tasks = [...tasks, {
-    id,
-    name: hint.name,
-    directory: hint.directory,
-    status: 'running',
-    loaded: 0,
-    startedAt: Date.now(),
-  }]
-  notify()
+const launch = (id: string, controller: AbortController, run: (options: RunnerOptions) => Promise<DownloadOutcome>): void => {
   void (async () => {
     try {
-      const entry = await api.fileOp.stat(alias, path)
-      const directory = entry.isDir
-      patch(id, { directory })
-      const options = {
+      const outcome = await run({
         signal: controller.signal,
-        onProgress: (progress: { loaded: number; total?: number }): void => {
+        onProgress: (progress) => {
           if (controller.signal.aborted) return
           patch(id, {
             loaded: progress.loaded,
             ...(progress.total === undefined ? {} : { total: progress.total }),
           })
         },
-      }
-      const outcome = directory
-        ? await saveRemoteDir(alias, path, options)
-        : await saveRemoteFile(alias, path, options)
+      })
       patch(id, {
         status: 'done',
         finishedAt: Date.now(),
@@ -129,6 +117,47 @@ export function startDownload(alias: string, path: string, hint: { name: string;
       controllers.delete(id)
     }
   })()
+}
+
+/** Publish one running task and return its id plus cancel handle. */
+const newTask = (task: Pick<DownloadTask, 'name' | 'directory'> & Partial<Pick<DownloadTask, 'selection'>>): { id: string; controller: AbortController } => {
+  const id = `download-${++sequence}`
+  const controller = new AbortController()
+  controllers.set(id, controller)
+  tasks = [...tasks, { ...task, id, status: 'running', loaded: 0, startedAt: Date.now() }]
+  notify()
+  return { id, controller }
+}
+
+/**
+ * Start one download (file or directory) and return its task id.
+ *
+ * The stat preflight runs here — not in the menus — so a deleted/unreadable
+ * remote path becomes a failed task with the Host's real message, and the
+ * file-vs-directory decision comes from the Host rather than a possibly stale
+ * tree row.
+ */
+export function startDownload(alias: string, path: string, hint: { name: string; directory: boolean }): string {
+  const { id, controller } = newTask({ name: hint.name, directory: hint.directory })
+  launch(id, controller, async (options) => {
+    const entry = await api.fileOp.stat(alias, path)
+    patch(id, { directory: entry.isDir })
+    return entry.isDir ? await saveRemoteDir(alias, path, options) : await saveRemoteFile(alias, path, options)
+  })
+  return id
+}
+
+/**
+ * Start one multi-selection download.
+ *
+ * The Host archives every selected entry into a single `.tar.gz`, so the user
+ * picks one destination instead of answering N save dialogs; mixed files and
+ * directories are fine (tar recurses). Entry validation happens Host-side
+ * before the archive starts, so no client preflight round trip is needed.
+ */
+export function startSelectionDownload(alias: string, paths: readonly string[]): string {
+  const { id, controller } = newTask({ name: `selection-${paths.length}`, directory: true, selection: paths.length })
+  launch(id, controller, options => saveRemoteMany(alias, paths, options))
   return id
 }
 

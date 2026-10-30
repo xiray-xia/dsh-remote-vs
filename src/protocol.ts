@@ -19,6 +19,8 @@ export const REMOTE_API = {
   download: '/api/dsh-remote/download',
   /** Streaming directory download: a remote `tar -czf -` of the directory. */
   downloadDir: '/api/dsh-remote/download-dir',
+  /** Streaming multi-selection download: one remote tar of repeated `path` params. */
+  downloadMany: '/api/dsh-remote/download-many',
   workspaces: '/api/dsh-remote/workspaces',
   deploy: '/api/dsh-remote/deploy',
   importSshConfig: '/api/dsh-remote/import-ssh-config',
@@ -31,6 +33,18 @@ export const REMOTE_API = {
   /** What one live session changed on its remote host (the review panel). */
   changes: '/api/dsh-remote/changes',
 } as const
+
+/**
+ * Most entries one multi-selection download may archive. The selection rides in
+ * the request URL (one `path` param per entry), so this bounds both the archive
+ * and the request line; a larger selection should download its folder instead.
+ */
+export const MAX_SELECTION_DOWNLOAD = 100
+
+/** Suggested/attachment file name for one multi-selection archive. */
+export function selectionDownloadName(count: number): string {
+  return `selection-${count}.tar.gz`
+}
 
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */
 export type RemoteAuthKind = 'key' | 'password'

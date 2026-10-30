@@ -18,6 +18,8 @@ export declare const REMOTE_API: {
     readonly download: "/api/dsh-remote/download";
     /** Streaming directory download: a remote `tar -czf -` of the directory. */
     readonly downloadDir: "/api/dsh-remote/download-dir";
+    /** Streaming multi-selection download: one remote tar of repeated `path` params. */
+    readonly downloadMany: "/api/dsh-remote/download-many";
     readonly workspaces: "/api/dsh-remote/workspaces";
     readonly deploy: "/api/dsh-remote/deploy";
     readonly importSshConfig: "/api/dsh-remote/import-ssh-config";
@@ -30,6 +32,14 @@ export declare const REMOTE_API: {
     /** What one live session changed on its remote host (the review panel). */
     readonly changes: "/api/dsh-remote/changes";
 };
+/**
+ * Most entries one multi-selection download may archive. The selection rides in
+ * the request URL (one `path` param per entry), so this bounds both the archive
+ * and the request line; a larger selection should download its folder instead.
+ */
+export declare const MAX_SELECTION_DOWNLOAD = 100;
+/** Suggested/attachment file name for one multi-selection archive. */
+export declare function selectionDownloadName(count: number): string;
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */
 export type RemoteAuthKind = 'key' | 'password';
 /** One stored host entry (the $DSH_HOME/dsh-remote.json store shape). */

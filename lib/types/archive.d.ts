@@ -17,3 +17,14 @@ export declare function directoryArchiveName(dir: string): string;
  * quotes and `$()` in a real path cannot escape into the command.
  */
 export declare function directoryArchiveCommand(dir: string): string;
+/**
+ * One POSIX shell command archiving several selected paths to stdout.
+ *
+ * GNU tar accepts one `-C` before each member, so every entry is stored as its
+ * own bare `./name` while keeping its real parent on the remote side; that is
+ * what lets a selection span several directories (mixed files and directories
+ * are fine — tar recurses into directories). Two entries with the same basename
+ * from different directories collide inside the archive by design: the
+ * alternative would be a synthetic directory tree the remote never had.
+ */
+export declare function selectionArchiveCommand(paths: readonly string[]): string;

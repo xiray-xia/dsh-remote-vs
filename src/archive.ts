@@ -9,6 +9,7 @@
 
 import { posix } from 'node:path'
 import { shQuote } from './git-format.ts'
+import { MAX_SELECTION_DOWNLOAD } from './protocol.ts'
 
 /** Download file name for one archived directory. */
 export function directoryArchiveName(dir: string): string {
@@ -33,4 +34,27 @@ export function directoryArchiveCommand(dir: string): string {
   const parent = posix.dirname(path)
   const name = posix.basename(path)
   return `tar -czf - -C ${shQuote(parent)} ${shQuote(`./${name}`)}`
+}
+
+/**
+ * One POSIX shell command archiving several selected paths to stdout.
+ *
+ * GNU tar accepts one `-C` before each member, so every entry is stored as its
+ * own bare `./name` while keeping its real parent on the remote side; that is
+ * what lets a selection span several directories (mixed files and directories
+ * are fine — tar recurses into directories). Two entries with the same basename
+ * from different directories collide inside the archive by design: the
+ * alternative would be a synthetic directory tree the remote never had.
+ */
+export function selectionArchiveCommand(paths: readonly string[]): string {
+  if (paths.length === 0) throw new Error('refusing to archive an empty selection')
+  if (paths.length > MAX_SELECTION_DOWNLOAD) throw new Error(`too many entries: ${paths.length} (max ${MAX_SELECTION_DOWNLOAD})`)
+  let command = 'tar -czf -'
+  for (const raw of paths) {
+    const path = String(raw).replace(/\\/g, '/').replace(/\/+$/, '')
+    if (path === '' || path === '/') throw new Error('refusing to archive the remote root')
+    if (!path.startsWith('/')) throw new Error('remote path must be absolute')
+    command += ` -C ${shQuote(posix.dirname(path))} ${shQuote(`./${posix.basename(path)}`)}`
+  }
+  return command
 }

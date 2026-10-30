@@ -14,7 +14,7 @@
  * unreadable path shows the Host's real error instead of an empty saved file.
  */
 
-import { REMOTE_API } from '../protocol.ts'
+import { REMOTE_API, selectionDownloadName } from '../protocol.ts'
 
 /** What one download attempt ended as. */
 export type DownloadOutcome = 'saved' | 'downloaded'
@@ -71,6 +71,13 @@ export function downloadUrl(alias: string, path: string): string {
 /** Same-origin URL of the streaming directory-archive route. */
 export function downloadDirUrl(alias: string, path: string): string {
   return `${REMOTE_API.downloadDir}?${new URLSearchParams({ alias, path }).toString()}`
+}
+
+/** Same-origin URL of the multi-selection archive route (one `path` per entry). */
+export function downloadManyUrl(alias: string, paths: readonly string[]): string {
+  const query = new URLSearchParams({ alias })
+  for (const path of paths) query.append('path', path)
+  return `${REMOTE_API.downloadMany}?${query.toString()}`
 }
 
 /**
@@ -197,4 +204,9 @@ export function saveRemoteFile(alias: string, path: string, options: SaveOptions
 export function saveRemoteDir(alias: string, path: string, options: SaveOptions = {}): Promise<DownloadOutcome> {
   const name = downloadFileName(path) || 'root'
   return saveRemoteUrl(downloadDirUrl(alias, path), `${name}.tar.gz`, options)
+}
+
+/** Save several selected entries as one `.tar.gz` archive. */
+export function saveRemoteMany(alias: string, paths: readonly string[], options: SaveOptions = {}): Promise<DownloadOutcome> {
+  return saveRemoteUrl(downloadManyUrl(alias, paths), selectionDownloadName(paths.length), options)
 }

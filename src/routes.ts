@@ -12,12 +12,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { readJsonBody, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
-import { REMOTE_API, type ExecStreamEvent, type ImportReport, type RemoteTimeouts } from './protocol.ts'
+import { REMOTE_API, MAX_SELECTION_DOWNLOAD, selectionDownloadName, type ExecStreamEvent, type ImportReport, type RemoteTimeouts } from './protocol.ts'
 import type { HostPayload, RemoteStore } from './store.ts'
 import type { RemotePool } from './pool.ts'
 import type { RemoteWorlds } from './p2/worlds.ts'
 import { RemoteFiles, attachmentHeader } from './sftp.ts'
-import { directoryArchiveCommand, directoryArchiveName } from './archive.ts'
+import { directoryArchiveCommand, directoryArchiveName, selectionArchiveCommand } from './archive.ts'
 import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
 import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport } from './importers.ts'
@@ -144,6 +144,90 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   const timeouts = (): RemoteTimeouts => deps.timeouts?.() ?? DEFAULT_TIMEOUTS
   const files = new RemoteFiles(pool)
   const terminalSessions = new TerminalSessionRegistry(pool)
+
+  /**
+   * Stream one remote `tar -czf -` command into a `.tar.gz` download response.
+   *
+   * Shared by the directory and multi-selection routes (they differ only in the
+   * command and the attachment name). The archive is produced remotely; the
+   * response has no length, backpressure pauses the channel, and a non-zero tar
+   * exit destroys the response with the stderr tail.
+   */
+  const streamArchive = async (alias: string, command: string, res: ServerResponse, downloadName: string): Promise<void> => {
+    let channel: Awaited<ReturnType<typeof pool.execChannel>>
+    try {
+      channel = await pool.execChannel(alias, command)
+    } catch (error) {
+      writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    res.writeHead(200, {
+      'content-type': 'application/gzip',
+      'content-disposition': attachmentHeader(downloadName),
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    })
+    let closed = false
+    /** `undefined` until the remote process reports one. */
+    let exitCode: number | null | undefined
+    let stderr = ''
+    /** Finish once: end on success, destroy on failure, close the remote channel either way. */
+    const stop = (error?: Error): void => {
+      if (closed) return
+      closed = true
+      try {
+        channel.close()
+      } catch {
+        // Channel already gone.
+      }
+      if (error === undefined) {
+        try {
+          res.end()
+        } catch {
+          // Already gone.
+        }
+        return
+      }
+      res.destroy(error)
+    }
+    channel.stdout.on('data', (chunk: Buffer) => {
+      if (closed) return
+      try {
+        // Backpressure reaches the remote tar via the channel window.
+        if (!res.write(chunk)) channel.stdout.pause()
+      } catch (error) {
+        stop(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+    res.on('drain', () => {
+      if (!closed) {
+        try {
+          channel.stdout.resume()
+        } catch {
+          // Already closed.
+        }
+      }
+    })
+    channel.stderr.on('data', (chunk: Buffer) => {
+      // Keep a bounded tail: it explains a non-zero tar exit to the client.
+      if (stderr.length < 16_384) stderr += chunk.toString('utf8')
+    })
+    channel.on('error', (error: Error) => stop(error))
+    ;(channel as unknown as { on(event: 'exit', listener: (code: number | null, signal?: string) => void): void })
+      .on('exit', (code) => {
+        exitCode = code
+      })
+    channel.on('close', () => {
+      if (closed) return
+      if (exitCode !== 0) {
+        const detail = stderr.trim() === '' ? 'no stderr' : stderr.trim().slice(0, 400)
+        stop(new Error(`tar failed (${exitCode === null ? 'signal' : exitCode}): ${detail}`))
+        return
+      }
+      stop()
+    })
+    res.on('close', () => stop())
+  }
 
   /** Apply parsed import payloads; per-entry errors become skips. */
   const applyImport = (parsed: ParsedImport): ImportReport => {
@@ -638,79 +722,54 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
           return
         }
-        let channel: Awaited<ReturnType<typeof pool.execChannel>>
+        await streamArchive(alias, command, res, directoryArchiveName(path))
+      },
+    },
+    // ---------------------------------------- download (multi selection)
+    // A selection is archived on the remote host as ONE tar stream (repeated
+    // `path` params): every entry is validated before the response starts, so
+    // the client shows one save dialog instead of N downloads and a missing
+    // entry is a JSON error rather than a truncated archive.
+    {
+      kind: 'exact',
+      path: REMOTE_API.downloadMany,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = url.searchParams.get('alias') ?? ''
+        const paths = url.searchParams.getAll('path')
+        if (alias === '' || paths.length === 0) {
+          writeJson(res, 400, { error: 'alias and at least one path query parameter are required' })
+          return
+        }
+        if (paths.length > MAX_SELECTION_DOWNLOAD) {
+          writeJson(res, 400, { error: `too many entries: ${paths.length} (max ${MAX_SELECTION_DOWNLOAD})` })
+          return
+        }
+        for (const path of paths) {
+          if (!path.startsWith('/')) {
+            writeJson(res, 400, { error: `path must be absolute: ${path}` })
+            return
+          }
+        }
+        let command: string
         try {
-          channel = await pool.execChannel(alias, command)
+          // Validate every entry BEFORE the archive starts: a vanished/renamed
+          // entry would otherwise surface as a truncated download.
+          for (const path of paths) await files.stat(alias, path)
+          command = selectionArchiveCommand(paths)
         } catch (error) {
           writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
           return
         }
-        res.writeHead(200, {
-          'content-type': 'application/gzip',
-          'content-disposition': attachmentHeader(directoryArchiveName(path)),
-          'cache-control': 'no-store',
-          'x-content-type-options': 'nosniff',
-        })
-        let closed = false
-        /** `undefined` until the remote process reports one. */
-        let exitCode: number | null | undefined
-        let stderr = ''
-        /** Finish once: end on success, destroy on failure, close the remote channel either way. */
-        const stop = (error?: Error): void => {
-          if (closed) return
-          closed = true
-          try {
-            channel.close()
-          } catch {
-            // Channel already gone.
-          }
-          if (error === undefined) {
-            try {
-              res.end()
-            } catch {
-              // Already gone.
-            }
-            return
-          }
-          res.destroy(error)
-        }
-        channel.stdout.on('data', (chunk: Buffer) => {
-          if (closed) return
-          try {
-            // Backpressure reaches the remote tar via the channel window.
-            if (!res.write(chunk)) channel.stdout.pause()
-          } catch (error) {
-            stop(error instanceof Error ? error : new Error(String(error)))
-          }
-        })
-        res.on('drain', () => {
-          if (!closed) {
-            try {
-              channel.stdout.resume()
-            } catch {
-              // Already closed.
-            }
-          }
-        })
-        channel.stderr.on('data', (chunk: Buffer) => {
-          // Keep a bounded tail: it explains a non-zero tar exit to the client.
-          if (stderr.length < 16_384) stderr += chunk.toString('utf8')
-        })
-        channel.on('error', (error: Error) => stop(error))
-        ;(channel as unknown as { on(event: 'exit', listener: (code: number | null, signal?: string) => void): void })
-          .on('exit', (code) => {
-            exitCode = code
-          })
-        channel.on('close', () => {
-          if (closed) return
-          if (exitCode !== 0) {
-            const detail = stderr.trim() === '' ? 'no stderr' : stderr.trim().slice(0, 400)
-            stop(new Error(`tar failed (${exitCode === null ? 'signal' : exitCode}): ${detail}`))
-            return
-          }
-          stop()
-        })
-        res.on('close', () => stop())
+        await streamArchive(alias, command, res, selectionDownloadName(paths.length))
       },
     },
     // -------------------------------------------------------- workspaces

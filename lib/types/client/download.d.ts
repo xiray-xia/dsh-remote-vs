@@ -39,6 +39,8 @@ export declare function downloadFileName(path: string): string;
 export declare function downloadUrl(alias: string, path: string): string;
 /** Same-origin URL of the streaming directory-archive route. */
 export declare function downloadDirUrl(alias: string, path: string): string;
+/** Same-origin URL of the multi-selection archive route (one `path` per entry). */
+export declare function downloadManyUrl(alias: string, paths: readonly string[]): string;
 /**
  * Hand one download to the browser (fallback when no save picker exists).
  *
@@ -63,3 +65,5 @@ export declare function saveRemoteUrl(href: string, fileName: string, options?: 
 export declare function saveRemoteFile(alias: string, path: string, options?: SaveOptions): Promise<DownloadOutcome>;
 /** Save one remote directory as a single `.tar.gz`. */
 export declare function saveRemoteDir(alias: string, path: string, options?: SaveOptions): Promise<DownloadOutcome>;
+/** Save several selected entries as one `.tar.gz` archive. */
+export declare function saveRemoteMany(alias: string, paths: readonly string[], options?: SaveOptions): Promise<DownloadOutcome>;
