@@ -306,30 +306,52 @@ export class RemotePool {
     this.health.set(alias, { state: 'error', errorAt: Date.now(), error: message })
   }
 
-  /** Test a connection without disturbing the pool. */
+  /**
+   * Probe one connection and record the outcome for the status indicator.
+   *
+   * "Test" must PROVE the link, not report that a pooled Client object exists:
+   * the old version answered ok without any traffic, so a retry against a
+   * half-open link painted the host green until the next real request failed.
+   *
+   * It must also NOT disturb the pool: this is what host settings' "test" and
+   * the chip's retry run, and the host being tested is often the one the user is
+   * working on (a terminal open, a transfer running). So a live connection gets
+   * a real round trip on itself (a trivial bare command under the control
+   * deadline), and only a COLD alias dials. Tearing the connection down instead
+   * would end every channel on it, including the terminal that the user opened
+   * to debug the flaky host.
+   */
   async test(alias: string): Promise<{ ok: boolean; banner?: string; error?: string; durationMs: number }> {
     const started = Date.now()
-    // A test must PROVE the link, not report that a pooled Client object
-    // exists. On a connection that survived a transport failure the old version
-    // answered ok without dialing, so the status chip's retry looked like it
-    // worked while the link was still broken — and a half-open link then
-    // oscillated green/red between retry and the next real request. Drop first
-    // so cquire dials for real.
-    this.drop(alias)
+    const finish = (ok: boolean, error?: string): { ok: boolean; banner?: string; error?: string; durationMs: number } => ({
+      ok,
+      ...(error === undefined ? {} : { error }),
+      durationMs: Date.now() - started,
+    })
+    if (this.conns.has(alias)) {
+      try {
+        const probe = await this.exec(alias, 'true', { timeoutMs: CONTROL_TIMEOUT_MS, bare: true })
+        // A non-zero exit still proves the transport; only an error field means
+        // the link itself failed (same rule as exec's own marking).
+        if (probe.success || probe.exitCode !== null) {
+          this.markOk(alias)
+          return finish(true)
+        }
+        if (probe.error !== undefined && isConnectionFailure(probe.error)) this.markError(alias, probe.error)
+        return finish(false, probe.error ?? 'the probe command did not complete')
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (isConnectionFailure(error)) this.markError(alias, error)
+        return finish(false, message)
+      }
+    }
     try {
-      const conn = await this.acquire(alias)
-      this.hold(alias)
-      this.release(alias)
-      void conn
-      // A surviving pooled connection never re-dials, so the success has to be
-      // recorded HERE: this is what the status chip's retry runs, and without it
-      // a retry against a still-open-but-unhealthy connection could never paint
-      // the host healthy again.
+      await this.acquire(alias)
       this.markOk(alias)
-      return { ok: true, durationMs: Date.now() - started }
+      return finish(true)
     } catch (error) {
       if (isConnectionFailure(error)) this.markError(alias, error)
-      return { ok: false, error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - started }
+      return finish(false, error instanceof Error ? error.message : String(error))
     }
   }
 

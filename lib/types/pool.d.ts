@@ -74,7 +74,21 @@ export declare class RemotePool {
     private markOk;
     /** Record a connection-level failure the status chip should show. */
     private markError;
-    /** Test a connection without disturbing the pool. */
+    /**
+     * Probe one connection and record the outcome for the status indicator.
+     *
+     * "Test" must PROVE the link, not report that a pooled Client object exists:
+     * the old version answered ok without any traffic, so a retry against a
+     * half-open link painted the host green until the next real request failed.
+     *
+     * It must also NOT disturb the pool: this is what host settings' "test" and
+     * the chip's retry run, and the host being tested is often the one the user is
+     * working on (a terminal open, a transfer running). So a live connection gets
+     * a real round trip on itself (a trivial bare command under the control
+     * deadline), and only a COLD alias dials. Tearing the connection down instead
+     * would end every channel on it, including the terminal that the user opened
+     * to debug the flaky host.
+     */
     test(alias: string): Promise<{
         ok: boolean;
         banner?: string;
