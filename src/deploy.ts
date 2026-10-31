@@ -9,8 +9,8 @@
  * probe-bundle marker (P0 behavior).
  */
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { dirname, join, posix, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { RemotePool } from './pool.ts'
 import { RemoteFiles } from './sftp.ts'
@@ -109,6 +109,49 @@ export interface HelperCacheEntry {
 
 const HEX64 = /^[0-9a-f]{64}$/
 
+/**
+ * Charset for a cached helper version.
+ *
+ * The version reaches a REMOTE shell line and remote directory names, so it is
+ * not "just metadata": the sidecar in the cache directory (or a vendored copy
+ * seeded into it) could otherwise smuggle `'`/`;` into the install script.
+ * `-` is allowed only after the first character so the value cannot look like a
+ * command-line option.
+ */
+const HELPER_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/
+
+/** Platforms `mapPlatform()` can produce; a cache entry must name one of them. */
+const HELPER_PLATFORMS = new Set(['linux-x64', 'linux-arm64', 'macos-x64', 'macos-arm64'])
+
+/** Wire protocol this plugin's `dsh-ssh` generation speaks (see MAINTENANCE §2.7). */
+export const EXPECTED_HELPER_PROTOCOL = 2
+
+/** Resolve one cached tarball, or `undefined` when the name escapes the cache dir. */
+function safeHelperTarball(dir: string, tarball: unknown): string | undefined {
+  if (typeof tarball !== 'string' || tarball === '' || tarball === '.' || tarball === '..') return undefined
+  // Same-directory plain file name only: both separators are rejected (on
+  // Windows `a\b` is a path separator too, not part of the name).
+  if (tarball.includes('/') || tarball.includes('\\')) return undefined
+  if (posix.basename(tarball) !== tarball) return undefined
+  const root = resolve(dir)
+  const full = resolve(root, tarball)
+  if (full !== join(root, tarball) || !full.startsWith(root + sep)) return undefined
+  try {
+    // lstat, not stat: a symlink in the cache dir must not turn the upload into
+    // "copy any file on this machine to the remote host".
+    return lstatSync(full).isFile() ? full : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Absolute path of one cached helper tarball; throws when it is not inside the cache. */
+export function helperTarballPath(helper: HelperCacheEntry, dir: string = helpersDir()): string {
+  const path = safeHelperTarball(dir, helper.tarball)
+  if (path === undefined) throw new Error(`invalid helper tarball path: ${helper.tarball}`)
+  return path
+}
+
 /** Scan the local helper cache; invalid/incomplete entries are skipped. */
 export function listCachedHelpers(dir: string = helpersDir()): HelperCacheEntry[] {
   let names: string[]
@@ -128,32 +171,78 @@ export function listCachedHelpers(dir: string = helpersDir()): HelperCacheEntry[
       const tarball = raw.tarball
       const tarballSha256 = raw.tarballSha256
       const binarySha256 = raw.binarySha256
-      if (typeof version !== 'string' || version === '') continue
-      if (typeof platform !== 'string' || platform === '') continue
-      if (typeof tarball !== 'string' || !existsSync(join(dir, tarball))) continue
+      const protocol = raw.protocol
+      if (typeof version !== 'string' || !HELPER_VERSION_RE.test(version)) continue
+      if (typeof platform !== 'string' || !HELPER_PLATFORMS.has(platform)) continue
+      if (safeHelperTarball(dir, tarball) === undefined) continue
       if (typeof tarballSha256 !== 'string' || !HEX64.test(tarballSha256)) continue
       if (typeof binarySha256 !== 'string' || !HEX64.test(binarySha256)) continue
+      if (typeof protocol !== 'number' || !Number.isInteger(protocol) || protocol <= 0) continue
       entries.push({
         kind: 'executable',
         version,
         platform,
-        tarball,
+        tarball: tarball as string,
         tarballSha256,
         binarySha256,
-        protocol: typeof raw.protocol === 'number' ? raw.protocol : 0,
+        protocol,
         nodeVersion: typeof raw.nodeVersion === 'string' ? raw.nodeVersion : '',
       })
     } catch {
       // Corrupt sidecar: skip.
     }
   }
-  entries.sort((a, b) => (a.version < b.version ? 1 : a.version > b.version ? -1 : 0))
+  entries.sort(compareHelperVersionsDesc)
   return entries
 }
 
-/** Pick a cached build for a platform (exact version pin or newest). */
-export function pickCached(platform: string, version?: string): HelperCacheEntry | undefined {
-  const matches = listCachedHelpers().filter(h => h.platform === platform)
+/**
+ * SemVer-ish comparison for cached helper versions.
+ *
+ * A plain string compare picked `0.9.0` over `0.10.0` (multi-digit segments sort
+ * wrong: `9` > `10`) and the pipeline then pushed an OLD helper as "ok". Numeric
+ * segments compare as numbers, everything else lexicographically; a shorter
+ * version loses to its own extension (`0.2` < `0.2.1`) and a numeric segment wins
+ * over a pre-release one (`0.2.1` > `0.2.1-alpha.2`).
+ */
+export function compareHelperVersions(left: string, right: string): number {
+  const split = (value: string): string[] => value.split(/[.+-]/)
+  const a = split(left)
+  const b = split(right)
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const x = a[index]
+    const y = b[index]
+    // One side ran out of segments: its extra segments decide whether the other
+    // side is a release (`1.2.3` > `1.2.3-rc.1`) or a deeper version (`1.2` < `1.2.1`).
+    if (x === undefined) return y !== undefined && /^\d+$/.test(y) ? -1 : 1
+    if (y === undefined) return x !== undefined && /^\d+$/.test(x) ? 1 : -1
+    const nx = /^\d+$/.test(x) ? Number(x) : undefined
+    const ny = /^\d+$/.test(y) ? Number(y) : undefined
+    if (nx !== undefined && ny !== undefined) {
+      if (nx !== ny) return nx < ny ? -1 : 1
+      continue
+    }
+    if (nx !== undefined) return -1
+    if (ny !== undefined) return 1
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/** Newest first (Array.prototype.sort comparator). */
+function compareHelperVersionsDesc(a: HelperCacheEntry, b: HelperCacheEntry): number {
+  return compareHelperVersions(b.version, a.version)
+}
+
+/**
+ * Pick a cached build for a platform (exact version pin or newest).
+ *
+ * `expectedProtocol` (default: this plugin's wire protocol) is part of the
+ * choice: a cached build whose protocol does not match would install fine and
+ * then fail the runtime handshake, so it is not a candidate at all.
+ */
+export function pickCached(platform: string, version?: string, expectedProtocol: number = EXPECTED_HELPER_PROTOCOL): HelperCacheEntry | undefined {
+  const matches = listCachedHelpers().filter(h => h.platform === platform && h.protocol === expectedProtocol)
   if (version !== undefined && version !== '') return matches.find(h => h.version === version)
   return matches[0]
 }
@@ -402,6 +491,51 @@ async function pushProbeBundle(
   }
 }
 
+/** Paths of one helper install attempt (absolute, probe-derived + whitelisted version). */
+export interface HelperInstallPaths {
+  root: string
+  verDir: string
+  tmpFile: string
+}
+
+/**
+ * Remote shell steps installing one cached helper.
+ *
+ * Invariant: the currently installed version is never deleted before the new one
+ * is fully extracted — the old dir is renamed to `.old` and removed only after
+ * the swap, and a crash between "old moved away" and "new moved in" is repaired
+ * by the recovery step (restore `.old` when the live dir is missing). Every path
+ * goes through `shRoot`; the tarball name embedded in the sha256 line is quoted
+ * too (the caller's version already passed `HELPER_VERSION_RE`, so it cannot
+ * break out of the shell any more).
+ *
+ * Pure string work (no fs/pool) so a gate can pin the ORDER without a remote.
+ */
+export function helperInstallSteps(helper: HelperCacheEntry, paths: HelperInstallPaths): string[] {
+  const { root, verDir, tmpFile } = paths
+  return [
+    `cd ${shRoot(root)}`,
+    `echo ${shRoot(`${helper.tarballSha256}  ${posix.basename(tmpFile)}`)} | sha256sum -c --status -`,
+    // A previous attempt may have died between "old moved away" and "new moved in".
+    `if [ ! -d ${shRoot(verDir)} ] && [ -d ${shRoot(verDir + '.old')} ]; then mv ${shRoot(verDir + '.old')} ${shRoot(verDir)}; fi`,
+    `rm -rf ${shRoot(verDir + '.next')}`,
+    `mkdir -p ${shRoot(verDir + '.next')}`,
+    `tar -xzf ${shRoot(tmpFile)} -C ${shRoot(verDir + '.next')} --strip-components=1`,
+    `rm -f ${shRoot(tmpFile)}`,
+    // Swap: old version survives as `.old` until the new one is in place.
+    `rm -rf ${shRoot(verDir + '.old')}`,
+    `if [ -d ${shRoot(verDir)} ]; then mv ${shRoot(verDir)} ${shRoot(verDir + '.old')}; fi`,
+    `mv ${shRoot(verDir + '.next')} ${shRoot(verDir)}`,
+    `rm -rf ${shRoot(verDir + '.old')}`,
+    `echo "RV_DIGEST=$(sha256sum ${shRoot(verDir + '/dsh-ssh-helper')} | cut -d' ' -f1)"`,
+  ]
+}
+
+/** One POSIX shell line: steps joined so any failure stops the sequence. */
+export function helperInstallScript(helper: HelperCacheEntry, paths: HelperInstallPaths): string {
+  return helperInstallSteps(helper, paths).join(' && ')
+}
+
 /** P1 path: push a cached helper tarball, verify, extract, manifest. */
 async function pushHelper(
   pool: RemotePool,
@@ -427,34 +561,31 @@ async function pushHelper(
     return { alias, probe: probed, action: 'skipped-same', previous, installed: previous, detail }
   }
   const root = `${home}/.dsh-helpers`
-  const verDir = `${root}/dsh-ssh-helper-${helper.version}-${helper.platform}`
-  const tmpFile = `${root}/.tmp-${helper.version}-${Date.now()}.tar.gz`
+  const manifestPath = `${root}/manifest.json`
+  const manifestNext = `${root}/manifest.json.next`
+  const paths: HelperInstallPaths = {
+    root,
+    verDir: `${root}/dsh-ssh-helper-${helper.version}-${helper.platform}`,
+    tmpFile: `${root}/.tmp-${helper.version}-${Date.now()}.tar.gz`,
+  }
   try {
     const files = new RemoteFiles(pool)
     await files.mkdir(alias, root)
     // 1. Upload (host streams the local tarball over SFTP; the browser never touches bytes).
-    await pool.putFile(alias, join(helpersDir(), helper.tarball), tmpFile)
-    // 2. Verify + extract atomically-ish (fresh dir, then swap by rename).
-    const install = [
-      `cd ${shRoot(root)}`,
-      `echo '${helper.tarballSha256}  ${tmpFile.split('/').pop() as string}' | sha256sum -c --status -`,
-      `rm -rf ${shRoot(verDir + '.new')} ${shRoot(verDir)}`,
-      `mkdir -p ${shRoot(verDir + '.new')}`,
-      `tar -xzf ${shRoot(tmpFile)} -C ${shRoot(verDir + '.new')} --strip-components=1`,
-      `rm -f ${shRoot(tmpFile)}`,
-      `mv ${shRoot(verDir + '.new')} ${shRoot(verDir)}`,
-      `echo "RV_DIGEST=$(sha256sum ${shRoot(verDir + '/dsh-ssh-helper')} | cut -d' ' -f1)"`,
-    ].join(' && ')
-    const installed = await pool.exec(alias, install, { timeoutMs: 180_000 })
-    if (!installed.success) {
-      throw new Error(`remote install failed [exit code: ${installed.exitCode}]: ${installed.stderr || installed.stdout || installed.error || 'unknown'}`)
+    await pool.putFile(alias, helperTarballPath(helper), paths.tmpFile)
+    // 2. Verify + extract + swap with the old version kept until the new one is in.
+    const installedRun = await pool.exec(alias, helperInstallScript(helper, paths), { timeoutMs: 180_000 })
+    if (!installedRun.success) {
+      throw new Error(`remote install failed [exit code: ${installedRun.exitCode}]: ${installedRun.stderr || installedRun.stdout || installedRun.error || 'unknown'}`)
     }
-    const digestMatch = /^RV_DIGEST=([0-9a-fA-F]{64})$/m.exec(installed.stdout)
+    const digestMatch = /^RV_DIGEST=([0-9a-fA-F]{64})$/m.exec(installedRun.stdout)
     const digest = digestMatch !== null ? (digestMatch[1] as string).toLowerCase() : ''
     if (digest === '' || digest !== helper.binarySha256) {
       throw new Error(`binary digest mismatch after extract: got ${digest || '(unparsed)'} want ${helper.binarySha256}`)
     }
-    // 3. Write our manifest (official manifest.json ships inside verDir).
+    // 3. Write our manifest next to the live one, then rename it into place, so a
+    //    crashed push cannot leave a half-written manifest.json (official
+    //    manifest.json ships inside verDir).
     const manifest: RemoteManifest = {
       version: 1,
       artifact,
@@ -462,19 +593,32 @@ async function pushHelper(
       helper: helperRef,
       installedAt: Date.now(),
     }
-    await files.write(alias, `${root}/manifest.json`, JSON.stringify(manifest, null, 2) + '\n')
+    await files.write(alias, manifestNext, JSON.stringify(manifest, null, 2) + '\n')
+    const renamed = await pool.exec(alias, `mv ${shRoot(manifestNext)} ${shRoot(manifestPath)}`, { timeoutMs: 15_000 })
+    if (!renamed.success) {
+      throw new Error(`manifest rename failed [exit code: ${renamed.exitCode}]: ${renamed.stderr || renamed.error || 'unknown'}`)
+    }
     const detail = `pushed ${artifact} (${helper.platform}, bin ${helper.binarySha256.slice(0, 12)}…) in ${Date.now() - started} ms`
     store.setDeploy(alias, { status: 'ok', artifact, manifestHash: hash, home, helper: helperRef, detail, at: Date.now() })
     return { alias, probe: probed, action: 'pushed', previous, installed: manifest, detail }
   } catch (error) {
     const detail = `push failed: ${error instanceof Error ? error.message : String(error)}`
     store.setDeploy(alias, failedState(store, alias, artifact, detail))
-    await pool.exec(alias, `rm -f ${shRoot(tmpFile)}; rm -rf ${shRoot(verDir + '.new')}`, { timeoutMs: 15_000 }).catch(() => undefined)
+    // Keep the live helper dir and any `.old` backup: a failed push must not
+    // leave the host without the version it already had.
+    const cleanup = `rm -f ${shRoot(paths.tmpFile)}; rm -rf ${shRoot(paths.verDir + '.next')}; rm -f ${shRoot(manifestNext)}`
+    await pool.exec(alias, cleanup, { timeoutMs: 15_000 }).catch(() => undefined)
     return { alias, probe: probed, action: 'failed', previous, installed: null, detail }
   }
 }
 
-/** Single-quote a remote path for sh (paths here are probe-derived + fixed names). */
+/**
+ * Single-quote a remote path for sh.
+ *
+ * Paths are probe-derived, but the version/platform segments come from a cache
+ * sidecar: they pass `HELPER_VERSION_RE`/`HELPER_PLATFORMS` before ever reaching
+ * this function, so the quoting here is the second layer, not the only one.
+ */
 function shRoot(path: string): string {
   if (path.includes('\0')) throw new Error('invalid path')
   return `'${path.replace(/'/g, `'\\''`)}'`

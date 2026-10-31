@@ -8,6 +8,7 @@ import { posix } from 'node:path'
 import type { OpenMode, SFTPWrapper, Stats } from 'ssh2'
 import type { RemotePool } from './pool.ts'
 import type { RemoteFileEntry, RemoteRead } from './protocol.ts'
+import { DeadlineError } from './timeouts.ts'
 
 /** Single-read cap (matches the fs-ssh 8 MiB window). */
 export const READ_CAP = 8 * 1024 * 1024
@@ -115,6 +116,22 @@ export const MULTI_CHANNEL_MIN_BYTES = 4 * 1024 * 1024
  */
 const MEMO_CAP = 512
 
+/**
+ * How old an orphaned `.part-*` side file must be before a sweep may remove it.
+ *
+ * A failed save/upload removes its own side file, but when the failure IS the
+ * dead connection that `unlink` cannot run — so the file stays in the remote
+ * directory with nobody to own it. The next successful write into THAT directory
+ * sweeps it. The age gate is what keeps the sweep from deleting another Host
+ * process's in-flight upload (Desktop and Web can each run a Host against the
+ * same remote); six hours is far longer than any plausible single write.
+ */
+const PART_SWEEP_MIN_AGE_MS = 6 * 60 * 60 * 1000
+/** Side files one sweep removes at most, so a burst cannot become a long list. */
+const PART_SWEEP_MAX_PER_DIR = 50
+/** Side-file name shape shared by `write` and `upload` (`.part-<8 hex>`). */
+const PART_NAME_RE = /\.part-[0-9a-f]{8}$/
+
 /** SFTP status code for "no such file or directory" (ssh2 sets `error.code`). */
 const SFTP_NO_SUCH_FILE = 2
 /** Generic SFTP failure — what OpenSSH returns for most non-ENOENT errors. */
@@ -137,11 +154,13 @@ export function remotePath(path: string): string {
  *
  * The download's one-shot calls (`lstat`, `open`, `fstat`, an extra channel's
  * handle) have no progress signal, so this is the only thing between a stalled
- * server and a response — and two SFTP channels — pinned forever.
+ * server and a response — and two SFTP channels — pinned forever. The rejection
+ * is a `DeadlineError`, not a plain error: a budget that ran out must not be
+ * reported to the status chip as a dead link (see `pool.noteOpFailure`).
  */
 function bounded<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms)
+    const timer = setTimeout(() => reject(new DeadlineError(message)), ms)
     timer.unref?.()
     promise.then(
       (value) => {
@@ -180,6 +199,13 @@ export class RemoteFiles {
   private readonly knownDirs = new Set<string>()
   /** Listings already reported as truncated; the log line stays one per path. */
   private readonly capWarned = new Set<string>()
+  /**
+   * Side files this process is still writing (`alias\0path`). A sweep skips them
+   * regardless of age — they are not orphans.
+   */
+  private readonly activePartials = new Set<string>()
+  /** alias -> directories whose side file could not be removed (sweep next write). */
+  private readonly orphanDirs = new Map<string, Set<string>>()
 
   constructor(private readonly pool: RemotePool) {}
 
@@ -295,6 +321,7 @@ export class RemoteFiles {
         const target = await resolveWriteTarget(sftp, path)
         const dir = posix.dirname(target.realPath)
         partial = `${target.realPath}.part-${randomBytes(4).toString('hex')}`
+        this.activePartials.add(dirKey(alias, partial))
         await this.withDirRetry(alias, dir, async () => {
           await this.ensureDir(sftp, alias, dir)
           // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
@@ -313,8 +340,9 @@ export class RemoteFiles {
           })
         }
         this.remember(this.knownDirs, dirKey(alias, posix.dirname(path)))
+        await this.sweepOrphanDirs(sftp, alias, dir)
       } catch (error) {
-        if (partial !== undefined) await unlinkAsync(sftp, partial).catch(() => undefined)
+        if (partial !== undefined) await this.discardPartial(sftp, alias, partial)
         // A failure after the swap started carries the real reason (a rename
         // status, a permission error). `explainSftpFailure` would relabel it "no
         // such file" because the target can legitimately be absent mid-swap —
@@ -323,6 +351,8 @@ export class RemoteFiles {
         // Wrapped OUTSIDE the retry: withDirRetry keys off `error.code`, so
         // translating any earlier would break its re-create-the-directory path.
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      } finally {
+        if (partial !== undefined) this.activePartials.delete(dirKey(alias, partial))
       }
       return { size: data.length }
     })
@@ -341,8 +371,9 @@ export class RemoteFiles {
    * renamed into place only once the body ended cleanly. Writing the real path
    * directly left a half file behind whenever the upload was cancelled, which
    * then looked like a complete file in the explorer (2026-10-20 user report).
-   * On any failure the side file is removed, so a cancelled upload leaves the
-   * remote folder exactly as it was.
+   * A cancelled upload removes its side file; when the CONNECTION is what failed
+   * the unlink cannot run, so the directory is recorded and the next successful
+   * write into it sweeps the orphan (see `sweepOrphanDirs`).
    *
    * @param alias - host alias.
    * @param file - absolute remote destination path.
@@ -369,17 +400,22 @@ export class RemoteFiles {
         await this.withDirRetry(alias, dir, async () => {
           await this.ensureDir(sftp, alias, dir)
         })
+        this.activePartials.add(dirKey(alias, partial))
         const size = await streamIntoFile(sftp, partial, source, maxBytes)
         // Move into place. SFTP v3 `rename` refuses to clobber, so an overwrite
         // removes the old file first — the same window a normal editor save has.
         if (overwrite) await unlinkAsync(sftp, path).catch(() => undefined)
         await renameAsync(sftp, partial, path)
         this.remember(this.knownDirs, dirKey(alias, dir))
+        await this.sweepOrphanDirs(sftp, alias, dir)
         return { size }
       } catch (error) {
-        // Never leave the side file: a cancelled upload must be invisible.
-        await unlinkAsync(sftp, partial).catch(() => undefined)
+        // Never leave the side file (and when the connection is what failed,
+        // record its directory so the next write there sweeps it).
+        await this.discardPartial(sftp, alias, partial)
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
+      } finally {
+        this.activePartials.delete(dirKey(alias, partial))
       }
     }, { timeoutMs: 0 })
   }
@@ -596,6 +632,72 @@ export class RemoteFiles {
       this.forgetDirs(alias, dir)
       return await op()
     }
+  }
+
+  /**
+   * Remove a side file, remembering its directory when that is impossible.
+   *
+   * The only failure that leaves a side file behind is the failure it was
+   * cleaning up after: with the connection dead, `unlink` cannot run either.
+   * Recording the directory lets the NEXT successful write into it sweep the
+   * orphan — otherwise it stays in the remote directory forever, looking like a
+   * file the user created.
+   */
+  private async discardPartial(sftp: SFTPWrapper, alias: string, partial: string): Promise<void> {
+    try {
+      await unlinkAsync(sftp, partial)
+    } catch {
+      this.markOrphanDir(alias, posix.dirname(partial))
+    }
+  }
+
+  private markOrphanDir(alias: string, dir: string): void {
+    const dirs = this.orphanDirs.get(alias) ?? new Set<string>()
+    if (dirs.size >= MEMO_CAP) return
+    dirs.add(dir)
+    this.orphanDirs.set(alias, dirs)
+  }
+
+  /**
+   * Remove `.part-*` files this process left behind in `dir` (age-gated).
+   *
+   * Runs after a SUCCESSFUL write/upload into a directory that recorded an
+   * orphan, so the healthy path pays nothing. Only names matching the exact
+   * side-file shape are touched, in-flight ones are skipped, and anything younger
+   * than `PART_SWEEP_MIN_AGE_MS` is left alone (it may belong to another Host
+   * process writing the same directory). A sweep failure is never the caller's
+   * problem: the record simply survives for the next write.
+   */
+  private async sweepOrphanDirs(sftp: SFTPWrapper, alias: string, dir: string): Promise<void> {
+    const dirs = this.orphanDirs.get(alias)
+    if (dirs === undefined || !dirs.has(dir)) return
+    let rows: ReaddirRow[]
+    try {
+      rows = await readdirAsync(sftp, dir)
+    } catch {
+      return
+    }
+    const cutoff = Date.now() - PART_SWEEP_MIN_AGE_MS
+    let swept = 0
+    let failed = false
+    for (const row of rows) {
+      if (!PART_NAME_RE.test(row.filename)) continue
+      const path = posix.join(dir, row.filename)
+      if (this.activePartials.has(dirKey(alias, path))) continue
+      if (row.attrs.mtime * 1000 > cutoff) continue
+      if (swept >= PART_SWEEP_MAX_PER_DIR) {
+        failed = true
+        break
+      }
+      try {
+        await unlinkAsync(sftp, path)
+        swept += 1
+      } catch {
+        failed = true
+      }
+    }
+    if (!failed) dirs.delete(dir)
+    if (dirs.size === 0) this.orphanDirs.delete(alias)
   }
 
   /** Add one key to a bounded set, evicting the oldest entry when full. */

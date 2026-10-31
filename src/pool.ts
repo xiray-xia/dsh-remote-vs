@@ -11,7 +11,14 @@ import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import type { RemoteStore } from './store.ts'
+import { DeadlineError } from './timeouts.ts'
 import type { RemoteConnectionStatus, RemoteExecResult, RemoteHostEntry } from './protocol.ts'
+
+/**
+ * The budget-out type lives in `timeouts.ts` (both halves need it); re-exported
+ * here because existing callers and the browse gate import it from the pool.
+ */
+export { DeadlineError }
 
 /** Idle time after which a pooled connection is closed. */
 const IDLE_MS = 30 * 60 * 1000
@@ -32,17 +39,39 @@ const READY_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw >= 1_000 ? raw : 45_000
 })()
 
+/**
+ * Extra wall clock on top of `READY_TIMEOUT_MS` for the dial's own watchdog.
+ *
+ * `readyTimeout` only covers "the socket stays open and the handshake stalls":
+ * ssh2 clears it as soon as the socket closes, and it only re-reports a close as
+ * an `error` when the SSH banner never arrived (client.js `onDone`). The shape
+ * left over is "no event at all", which used to leave the dial promise pending
+ * forever and the caller holding a channel slot. Override with
+ * DSH_REMOTE_VS_DIAL_GUARD_MS (milliseconds, >= 0); the dial gate keeps its case
+ * fast that way.
+ */
+const DIAL_GUARD_MARGIN_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_DIAL_GUARD_MS)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 5_000
+})()
+
 /** Per-stream output cap (stdout/stderr each); overflow truncates with a marker. */
 const OUTPUT_CAP = 2 * 1024 * 1024
 
 /**
- * Wall-clock cap for one SFTP callback body. SSH gives no request timeout of
- * its own, so a server that never answers would hold the session (and the
- * pooled connection's hold count) open forever — the leak that eventually
- * exhausts the server's channel budget. The timeout rejects so the caller's
- * `finally` still ends the session and releases the connection.
+ * Wall-clock cap for one SFTP callback body (and for opening the session). SSH
+ * gives no request timeout of its own, so a server that never answers would hold
+ * the session (and the pooled connection's hold count) open forever — the leak
+ * that eventually exhausts the server's channel budget. The timeout rejects so
+ * the caller's `finally` still ends the session and releases the connection.
+ *
+ * Override with DSH_REMOTE_VS_SFTP_TIMEOUT_MS (milliseconds, >= 100) so the
+ * session-lifecycle gate can exercise the deadline without waiting a minute.
  */
-const SFTP_OP_TIMEOUT_MS = 60_000
+const SFTP_OP_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_SFTP_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 100 ? raw : 60_000
+})()
 
 /**
  * No-progress budget for a bulk upload. Deliberately an *idle* timeout rather
@@ -304,6 +333,22 @@ export class RemotePool {
   private markError(alias: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error ?? '')
     this.health.set(alias, { state: 'error', errorAt: Date.now(), error: message })
+  }
+
+  /**
+   * Record one operation's failure, EXCEPT when the budget simply ran out.
+   *
+   * A deadline means "this request did not answer in time", not "the link is
+   * down": the connection can be perfectly healthy and merely slow (a huge
+   * directory, an 8 MiB read on a thin link, a cold filesystem). Painting the
+   * chip red used to flip the editor to read-only and block saving — a false
+   * alarm with a real cost. Real transport failures still arrive as transport
+   * errors (`close`, `No response from server`, a channel open failure), and
+   * those keep marking; the operation itself still fails either way.
+   */
+  private noteOpFailure(alias: string, error: unknown): void {
+    if (error instanceof DeadlineError) return
+    if (isConnectionFailure(error)) this.markError(alias, error)
   }
 
   /**
@@ -674,7 +719,7 @@ export class RemotePool {
         }
       }
     } catch (error) {
-      if (isConnectionFailure(error)) this.markError(alias, error)
+      this.noteOpFailure(alias, error)
       throw error
     } finally {
       this.release(alias)
@@ -761,7 +806,7 @@ export class RemotePool {
       this.markOk(alias)
       return result
     } catch (error) {
-      if (isConnectionFailure(error)) this.markError(alias, error)
+      this.noteOpFailure(alias, error)
       throw error
     } finally {
       closed = true
@@ -807,7 +852,8 @@ export class RemotePool {
       // A channel/subsystem OPEN failure used to happen before this method's own
       // catch (the lease sat outside the try), so the chip stayed healthy while
       // every listing failed — exactly what MaxSessions exhaustion looks like.
-      if (isConnectionFailure(error)) this.markError(alias, error)
+      // A budget that ran out while OPENING is still a budget, not a dead link.
+      this.noteOpFailure(alias, error)
       throw error
     }
     const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
@@ -821,12 +867,12 @@ export class RemotePool {
       // A request that never answered stays queued inside ssh2, and this session
       // was already handed to other browse operations. Mark it stale: the next
       // lease retires it (leaseBrowse), and operations sharing it fail fast
-      // instead of waiting out their own deadlines.
+      // instead of waiting out their own deadlines. Retiring the session is
+      // orthogonal to the link's health: a slow listing is not a dead link.
       if (error instanceof DeadlineError) {
         lease.state.stale = true
-        this.markError(alias, error)
-      } else if (isConnectionFailure(error)) {
-        this.markError(alias, error)
+      } else {
+        this.noteOpFailure(alias, error)
       }
       throw error
     } finally {
@@ -891,18 +937,44 @@ export class RemotePool {
    * ssh2 has no channel-open timeout: a server that never answers leaves this
    * promise pending forever, which pins the connection's hold count and blocks
    * idle re-arming (the "SSH looks dead" symptom) while the HTTP request hangs.
+   *
+   * The deadline is spelled out here instead of wrapped around the promise
+   * because the ANSWER can arrive after it: `conn.sftp`'s callback is the only
+   * place that can still see the session, and a late one would otherwise leak a
+   * server-side channel that no slot or hold accounts for (the caller has long
+   * returned its own and moved on).
    */
   private openSession(conn: Client): Promise<SFTPWrapper> {
-    return withDeadline(
-      new Promise<SFTPWrapper>((resolve, reject) => {
-        conn.sftp((error, session) => {
-          if (error !== undefined && error !== null) reject(error)
-          else resolve(session)
-        })
-      }),
-      SFTP_OP_TIMEOUT_MS,
-      `SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`,
-    )
+    return new Promise<SFTPWrapper>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        reject(new DeadlineError(`SFTP session open timed out after ${SFTP_OP_TIMEOUT_MS / 1000}s`))
+      }, SFTP_OP_TIMEOUT_MS)
+      timer.unref?.()
+      const finish = (error: unknown, session?: SFTPWrapper): void => {
+        if (settled) {
+          // Deadline first, answer later: the session is ours alone, so close it.
+          try {
+            session?.end()
+          } catch {
+            // Already gone.
+          }
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        if (error !== undefined && error !== null) reject(error)
+        else resolve(session as SFTPWrapper)
+      }
+      try {
+        conn.sftp((error, session) => finish(error, session))
+      } catch (error) {
+        // ssh2 can throw synchronously (e.g. on a dead connection).
+        finish(error)
+      }
+    })
   }
 
   /**
@@ -1243,14 +1315,28 @@ export class RemotePool {
     return entry.connecting
   }
 
+  /**
+   * The ssh2 client factory.
+   *
+   * A seam, not a preference: `dial` is the only place that has to react to
+   * "connect emitted close but never error", and a fake client is the only way a
+   * self-check can produce that shape without a real server. Production never
+   * overrides it.
+   */
+  private makeClient(): Client {
+    return new Client()
+  }
+
   private dial(alias: string): Promise<Client> {
     const host: RemoteHostEntry = this.store.require(alias)
     return new Promise<Client>((resolve, reject) => {
-      const conn = new Client()
+      const conn = this.makeClient()
       let settled = false
+      let guard: ReturnType<typeof setTimeout> | undefined
       const fail = (error: Error): void => {
         if (settled) return
         settled = true
+        if (guard !== undefined) clearTimeout(guard)
         try {
           conn.end()
         } catch {
@@ -1261,9 +1347,25 @@ export class RemotePool {
       conn.on('ready', () => {
         if (settled) return
         settled = true
+        if (guard !== undefined) clearTimeout(guard)
         resolve(conn)
       })
       conn.on('error', (error: Error) => fail(error))
+      /**
+       * ssh2 turns a socket close into an `error` only when the SSH banner never
+       * arrived (client.js `onDone`: `wasConnected && !sawHeader`). A clean FIN
+       * after the banner — a server restart or a middlebox dropping the flow
+       * during KEX/auth — emits `end`/`close` and nothing else, which used to
+       * leave this promise pending forever while the caller held a channel slot.
+       */
+      conn.on('close', () => fail(new Error('connection closed during SSH handshake')))
+      // Last resort: the library reports nothing at all (neither ready, nor
+      // error, nor close). `readyTimeout` cannot cover it because ssh2 clears
+      // that timer as soon as the socket closes without emitting an error.
+      guard = setTimeout(() => {
+        fail(new Error(`SSH handshake did not settle within ${(READY_TIMEOUT_MS + DIAL_GUARD_MARGIN_MS) / 1000}s`))
+      }, READY_TIMEOUT_MS + DIAL_GUARD_MARGIN_MS)
+      guard.unref?.()
       conn.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
         // Password entries answer a single hidden prompt (the standard
         // password challenge shape) with the stored password — many servers
@@ -1408,15 +1510,6 @@ function warnDetached(alias: string): void {
   // eslint-disable-next-line no-console
   console.warn(`[dsh-remote-vs] exec timed out on ${alias}: the channel is closed but the remote command may still be running (no killable process group)`)
 }
-
-/**
- * An operation that ran out of its wall-clock budget.
- *
- * Tagged on purpose: callers have to tell "the remote never answered" from a real
- * remote failure (a missing path must not cost the session), and matching on the
- * message text would silently stop working the moment the template changed.
- */
-export class DeadlineError extends Error {}
 
 /**
  * Reject when `promise` has not settled within `ms`, so a stalled remote

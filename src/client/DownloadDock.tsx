@@ -20,12 +20,14 @@ const STATUS_KEY: Record<DownloadTask['status'], string> = {
   done: 'downloads.done',
   failed: 'downloads.failed',
   cancelled: 'downloads.cancelled',
+  handedOff: 'downloads.handedOff',
 }
 
 /** One line of detail under the bar (bytes, fallback note, or the failure). */
 function detailText(task: DownloadTask, t: (key: string) => string): string {
   if (task.status === 'failed') return task.error ?? t('downloads.failed')
   if (task.status === 'cancelled') return t('downloads.cancelled')
+  if (task.status === 'handedOff') return t('downloads.handedOffDetail')
   if (task.status === 'done') {
     return task.via === 'browserDefault' ? t('downloads.browserDefault') : t('downloads.done')
   }

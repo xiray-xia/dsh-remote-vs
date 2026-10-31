@@ -79,6 +79,13 @@ export declare class RemoteFiles {
     private readonly knownDirs;
     /** Listings already reported as truncated; the log line stays one per path. */
     private readonly capWarned;
+    /**
+     * Side files this process is still writing (`alias\0path`). A sweep skips them
+     * regardless of age — they are not orphans.
+     */
+    private readonly activePartials;
+    /** alias -> directories whose side file could not be removed (sweep next write). */
+    private readonly orphanDirs;
     constructor(pool: RemotePool);
     list(alias: string, dir: string): Promise<RemoteFileEntry[]>;
     stat(alias: string, file: string): Promise<RemoteFileEntry>;
@@ -124,8 +131,9 @@ export declare class RemoteFiles {
      * renamed into place only once the body ended cleanly. Writing the real path
      * directly left a half file behind whenever the upload was cancelled, which
      * then looked like a complete file in the explorer (2026-10-20 user report).
-     * On any failure the side file is removed, so a cancelled upload leaves the
-     * remote folder exactly as it was.
+     * A cancelled upload removes its side file; when the CONNECTION is what failed
+     * the unlink cannot run, so the directory is recorded and the next successful
+     * write into it sweeps the orphan (see `sweepOrphanDirs`).
      *
      * @param alias - host alias.
      * @param file - absolute remote destination path.
@@ -181,6 +189,28 @@ export declare class RemoteFiles {
      * the directory walk.
      */
     private withDirRetry;
+    /**
+     * Remove a side file, remembering its directory when that is impossible.
+     *
+     * The only failure that leaves a side file behind is the failure it was
+     * cleaning up after: with the connection dead, `unlink` cannot run either.
+     * Recording the directory lets the NEXT successful write into it sweep the
+     * orphan — otherwise it stays in the remote directory forever, looking like a
+     * file the user created.
+     */
+    private discardPartial;
+    private markOrphanDir;
+    /**
+     * Remove `.part-*` files this process left behind in `dir` (age-gated).
+     *
+     * Runs after a SUCCESSFUL write/upload into a directory that recorded an
+     * orphan, so the healthy path pays nothing. Only names matching the exact
+     * side-file shape are touched, in-flight ones are skipped, and anything younger
+     * than `PART_SWEEP_MIN_AGE_MS` is left alone (it may belong to another Host
+     * process writing the same directory). A sweep failure is never the caller's
+     * problem: the record simply survives for the next write.
+     */
+    private sweepOrphanDirs;
     /** Add one key to a bounded set, evicting the oldest entry when full. */
     private remember;
     /** Forget `dir`, its parents and everything remembered under it. */

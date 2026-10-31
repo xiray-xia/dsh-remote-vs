@@ -31,11 +31,12 @@
  */
 /** How a caller relates to a read that is already in flight. */
 export type ReadMode = 'join' | 'fresh';
+/** The start order of the newest read for `key`, while it is in flight. */
+export declare function readStartId(key: string): number | undefined;
 export declare class ReadQueue {
     private readonly onChange?;
     /** In-flight reads by key (insertion order is irrelevant here). */
     private readonly flights;
-    private nextId;
     /**
      * @param onChange - called whenever a read starts or settles, so the owner can
      *   derive a "busy" flag from `inflightKeys()` without polling.

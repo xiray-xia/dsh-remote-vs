@@ -20,6 +20,29 @@ export function directoryArchiveName(dir: string): string {
 }
 
 /**
+ * Normalize one remote path into the exact string the tar command will use.
+ *
+ * The normalization has to live HERE, not only in the caller: `files.stat()`
+ * normalizes internally (`remotePath()`), so a raw `/..` passed the "is it a
+ * directory" check and still reached the builder un-normalized — `-C '/' './..'`
+ * then archived the whole remote root, which is exactly what the guard is
+ * supposed to refuse. Guard and command therefore have to be derived from the
+ * SAME value; a character-class check on the raw string cannot do it.
+ *
+ * `/a/b/..` → `/a`: climbing down to a real directory is a legitimate target,
+ * only the root itself (and anything relative) is refused.
+ */
+function archivePath(raw: string): string {
+  const path = posix.normalize(String(raw).replace(/\\/g, '/')).replace(/\/+$/, '')
+  if (path === '' || path === '/') throw new Error('refusing to archive the remote root')
+  if (!path.startsWith('/')) throw new Error('remote path must be absolute')
+  // Defense in depth: normalize() resolves every `..` in an absolute path, so
+  // this only fires on a shape it did not understand — never accept such a path.
+  if (path.split('/').includes('..')) throw new Error('path must not contain ..')
+  return path
+}
+
+/**
  * One POSIX shell command that writes the directory's gzip tar to stdout.
  *
  * The member name is prefixed with `./` so a directory whose name starts with
@@ -28,9 +51,7 @@ export function directoryArchiveName(dir: string): string {
  * quotes and `$()` in a real path cannot escape into the command.
  */
 export function directoryArchiveCommand(dir: string): string {
-  const path = String(dir).replace(/\\/g, '/').replace(/\/+$/, '')
-  if (path === '' || path === '/') throw new Error('refusing to archive the remote root')
-  if (!path.startsWith('/')) throw new Error('remote path must be absolute')
+  const path = archivePath(dir)
   const parent = posix.dirname(path)
   const name = posix.basename(path)
   return `tar -czf - -C ${shQuote(parent)} ${shQuote(`./${name}`)}`
@@ -51,9 +72,7 @@ export function selectionArchiveCommand(paths: readonly string[]): string {
   if (paths.length > MAX_SELECTION_DOWNLOAD) throw new Error(`too many entries: ${paths.length} (max ${MAX_SELECTION_DOWNLOAD})`)
   let command = 'tar -czf -'
   for (const raw of paths) {
-    const path = String(raw).replace(/\\/g, '/').replace(/\/+$/, '')
-    if (path === '' || path === '/') throw new Error('refusing to archive the remote root')
-    if (!path.startsWith('/')) throw new Error('remote path must be absolute')
+    const path = archivePath(raw)
     command += ` -C ${shQuote(posix.dirname(path))} ${shQuote(`./${posix.basename(path)}`)}`
   }
   return command

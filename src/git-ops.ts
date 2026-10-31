@@ -58,11 +58,18 @@ function capped(command: string, bytes: number = GIT_CAP): string {
  * So: run git with stdout going straight to a file (no SIGPIPE), keep its
  * status in a variable, then emit the capped bytes and exit with that status.
  *
+ * `cleanup` runs after the capped bytes/stderr are forwarded and after the
+ * mktemp directory is removed, but before `exit`. A caller-owned temp file
+ * (e.g. the patch being applied) is therefore deleted on success AND failure
+ * without bringing a second `exit` into the wrapper — an embedded `exit` skips
+ * the `rm -rf "$d"` above and leaks one remote temp directory per call.
+ *
  * stderr is deliberately left alone: git's own diagnosis (‘! [rejected]’,
  * ‘hook declined’) has to reach the caller, which is the whole point.
  */
-function statusOk(command: string, bytes: number = GIT_CAP): string {
-  return `d=$(mktemp -d); ${command} > "$d/out" 2>"$d/err"; st=$?; head -c ${bytes} "$d/out"; cat "$d/err" >&2; rm -rf "$d"; exit $st`
+function statusOk(command: string, bytes: number = GIT_CAP, cleanup?: string): string {
+  const tail = cleanup === undefined ? '' : `; ${cleanup}`
+  return `d=$(mktemp -d); ${command} > "$d/out" 2>"$d/err"; st=$?; head -c ${bytes} "$d/out"; cat "$d/err" >&2; rm -rf "$d"${tail}; exit $st`
 }
 
 // ------------------------------------------------------------- assertions
@@ -484,10 +491,11 @@ export function applyPatchCommand(workdir: string, patchPath: string, mode: 'sta
   const file = shQuote(assertRemoteDir(patchPath))
   const args = APPLY_ARGS[mode]
   // `git apply` is the whole point of this call, so its exit status is the
-  // result: a plain `; rm -f` would hand back rm's 0 and report a rejected
-  // hunk as staged. The status is latched into a variable before the cleanup
-  // runs, because any command in between would overwrite `$?`.
-  return statusOk(`${git(workdir)} apply ${args} ${file}; st=$?; rm -f ${file}; exit $st`)
+  // result (a plain `; rm -f` would hand back rm's 0 and report a rejected hunk
+  // as staged). The patch file is deleted by `statusOk`'s cleanup tail: running
+  // the removal inside the command with its own `exit` skipped the wrapper's
+  // temp-dir cleanup and leaked one remote directory per hunk operation.
+  return statusOk(`${git(workdir)} apply ${args} ${file}`, GIT_CAP, `rm -f ${file}`)
 }
 
 // ------------------------------------------------------------- parsers

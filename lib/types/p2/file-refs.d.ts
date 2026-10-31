@@ -23,6 +23,8 @@ export declare const REMOTE_FILE_SEARCH_MAX_RESULTS = 20;
 export declare const REMOTE_FILE_SEARCH_MAX_ENTRIES = 50000;
 /** Mirrored stock exclusion list (order kept for diffability). */
 export declare const REMOTE_FILE_SEARCH_EXCLUDED_DIRECTORIES: readonly string[];
+/** Why the cached index is a bounded prefix instead of the whole tree. */
+export type RemoteIndexCap = 'entries' | 'bytes' | 'timeout';
 export interface RemoteFileSearchDeps {
     /** Remote fs view (worlds.fsFor) for scoped live listings. */
     fs: FileSystem;
@@ -32,10 +34,17 @@ export interface RemoteFileSearchDeps {
     remoteRoot: string;
     /** Optional warn sink (router wires ctx.logger). */
     warn?: (message: string) => void;
+    /** Override the post-cap close wait (tests only; production keeps the default). */
+    doneTimeoutMs?: number;
 }
 export declare class RemoteFileSearch {
-    private readonly deps;
     private readonly excluded;
+    /**
+     * Explicit field assignment instead of a constructor parameter property: the
+     * local gates load this module through Node's type-stripping runner (same as
+     * `changes/recorder.ts`), which rejects parameter properties.
+     */
+    private readonly deps;
     private settled;
     private pending;
     private pendingAbort;
@@ -44,7 +53,17 @@ export declare class RemoteFileSearch {
     private disposed;
     /** Monotonic invalidation counter; a scan started below it is stale. */
     private invalidations;
+    /** Why the cached index is bounded, or undefined when it is complete. */
+    private cappedIndex;
     constructor(deps: RemoteFileSearchDeps);
+    /**
+     * Why the current index is a bounded prefix, or `undefined` for a complete one.
+     *
+     * The `@` surface itself returns candidates only (its contract is the stock
+     * local list), so this is the honest place to expose "you are looking at a
+     * prefix": host logs get the warning, and a future consumer can surface it.
+     */
+    get indexCap(): RemoteIndexCap | undefined;
     /**
      * Drop the cached index (tool activity); the next bare query rebuilds.
      *
@@ -67,7 +86,25 @@ export declare class RemoteFileSearch {
     private listDirectory;
     /** Cached full listing; concurrent callers share one in-flight build. */
     private indexFor;
-    /** One remote `rg --files` run, head-capped, sorted for determinism. */
+    /**
+     * One remote `rg --files` run, head-capped, sorted for determinism.
+     *
+     * A cap is a BOUNDED ANSWER, not a failure: whatever was read before the cap is
+     * still the prefix of the listing, and it used to be thrown away because the
+     * process's own SIGTERM (we killed it) looked like a non-zero exit. On a
+     * monorepo past 50k files that made the bare `@` query answer "nothing to
+     * reference" for a repo full of files. Now the prefix is served and
+     * {@link RemoteFileSearch.indexCap} / the warn sink say it is a prefix.
+     */
     private buildIndex;
+    /**
+     * Wait for the ended scan to close, but never forever.
+     *
+     * `handle.done` settles from the transport's close event; a half-dead channel
+     * can withhold it for the life of the process. Every outcome is reported as a
+     * fact — a rejection stays a rejection so the caller can still treat it as a
+     * failure when nothing else explains the scan.
+     */
+    private waitForDone;
     private warn;
 }

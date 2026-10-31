@@ -8,7 +8,7 @@
  * a download already streaming must keep running to completion.
  */
 /** One download's lifecycle state. */
-export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled';
+export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled' | 'handedOff';
 /** One task as the dock renders it. */
 export interface DownloadTask {
     id: string;

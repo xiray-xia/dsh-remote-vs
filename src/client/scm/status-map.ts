@@ -181,7 +181,9 @@ export function stagedStateOf(detail: GitStatusDetail, path: string): boolean {
  *     under "changes", so the record stays in the model);
  *   - unstaging a staged RENAME leaves HEAD's path deleted in the INDEX — the
  *     old path becomes `D ` and the new one untracked (measured, not assumed);
- *   - staging a conflict resolves it into the index.
+ *   - staging a conflict resolves it into the index (`D `/`A `/`M ` by conflict
+ *     pair, never a `U` half — see `localStageEntry`, it used to keep `U` and
+ *     the row then never left the conflict section);
  *
  * Pure, so the panel's instant feedback is assertable without a host: the
  * caller decides WHEN to apply it (and when to apply the inverse).
@@ -216,6 +218,25 @@ function localStageEntry(entry: GitPathStatus, staged: boolean): GitPathStatus[]
   const { path, x, y, origPath } = entry
   const keep = origPath === undefined ? {} : { origPath }
   if (staged) {
+    /**
+     * A MERGE CONFLICT: `git add` RESOLVES it into the index, so the record
+     * must leave the conflict section. Keeping the `U` half here (the old
+     * projection did: it read `x` and reused the letter) meant the row the user
+     * had just staged stayed under 冲突, `bucketStatus().staged` stayed EMPTY and
+     * the commit button — disabled while `staged.length === 0` — never came
+     * back, with no toast and no error. Only an unrelated full status read
+     * repaired it, and staging a conflict does not trigger one by design.
+     *
+     * What git reports afterwards is an ordinary index half: `D ` for a pair
+     * that is deleted on both sides, `A ` when HEAD has no such path (both-added
+     * / added-by-us), `M ` otherwise. The probe that follows the click
+     * (`stagedStateOf` → `isStagedStatus`) agrees with all three, so this is a
+     * projection the verification can confirm rather than contradict.
+     */
+    if (isConflict(x, y)) {
+      const letter = x === 'D' && y === 'D' ? 'D' : (x === 'A' || y === 'A' ? 'A' : 'M')
+      return [{ path, x: letter, y: ' ', ...keep }]
+    }
     // The index half takes the most descriptive letter it can keep: what is
     // already staged, else what the worktree showed, else a plain add.
     const letter = x !== ' ' && x !== '?' ? x : (y !== ' ' && y !== '?' ? y : 'M')

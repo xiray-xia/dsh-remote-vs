@@ -18,6 +18,20 @@
  */
 import type { RemoteTimeouts } from './protocol.ts'
 
+/**
+ * An operation that ran out of its wall-clock budget.
+ *
+ * Tagged on purpose: callers have to tell "the remote never answered" from a real
+ * remote failure (a missing path must not cost the session), and matching on the
+ * message text would silently stop working the moment the template changed.
+ *
+ * It lives in this module because "a budget ran out" is a timeout fact, not a
+ * pool or an SFTP fact: both halves need the same type to keep the distinction
+ * (the Host decides not to paint the link red, and the client must not downgrade
+ * the editor to read-only for it).
+ */
+export class DeadlineError extends Error {}
+
 /** Smallest accepted timeout: below this, local work would start failing. */
 export const MIN_TIMEOUT_MS = 1_000
 

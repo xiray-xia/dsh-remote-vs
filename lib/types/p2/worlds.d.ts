@@ -151,6 +151,17 @@ export declare class RemoteWorlds {
     homeFor(alias: string): Promise<string>;
     /** Best-effort remote mkdir -p (for paths the fs seam cannot create). */
     mkdirRemote(alias: string, dir: string): Promise<void>;
+    /**
+     * TTL-sweep one host's spill root (retention, best effort).
+     *
+     * Deliberately narrow: the command is built by `spill-retention.ts` (absolute
+     * path under that host's `$HOME`, `session-*` children only, depth 1), so this
+     * method cannot be talked into deleting an arbitrary directory. Callers treat a
+     * rejection as a warning, never as an operation failure.
+     */
+    sweepSpillRoot(alias: string, home: string, ttlDays: number): Promise<void>;
+    /** Remove one session's spill directory when it is older than the TTL (best effort). */
+    sweepSpillDir(alias: string, dir: string, ttlDays: number): Promise<void>;
     /** Drop one host's RPC + fs view + proc runtime (call after host update/delete). */
     dropHost(alias: string): Promise<void>;
     dispose(): Promise<void>;

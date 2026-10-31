@@ -6,7 +6,23 @@ interface Pair {
     oldNum: number | null;
     newNum: number | null;
 }
-/** Parse the unified diff body into old/new line pairs (git's pairing). */
+/**
+ * Parse the unified diff body into old/new line pairs (git's pairing).
+ *
+ * CONTEXT IS THE WHOLE POINT: a deleted SQL/Lua/Haskell comment line (`-- note`)
+ * arrives as `--- note`, and an inserted C line `++ i;` arrives as `+++ i;` —
+ * so a flat "skip anything starting with `--- ` / `+++ `" rule silently eats
+ * real content lines. That dropped the line from the pairing, stopped the line
+ * counters from advancing, and every row after it shifted: the deleted comment
+ * was painted as a MODIFIED line, the rest of the file was flagged changed and
+ * the `+/−` totals were wrong (measured on the shipped module before this fix).
+ *
+ * So the scan is not flat: it walks the hunk structure `parseUnifiedDiff`
+ * already produced (`git-ops.ts`, the same context-aware parser the commit pane
+ * trusts), where a line is content exactly when a hunk is open. File-block
+ * headers can only appear BEFORE a hunk starts, which is why the ambiguity
+ * disappears instead of being guessed at.
+ */
 export declare function parsePairs(diff: string): Pair[];
 export interface DiffInput {
     /** The unified diff text (`git diff ... -- <path>`). */

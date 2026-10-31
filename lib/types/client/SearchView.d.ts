@@ -11,4 +11,32 @@
  * tree without the two views knowing about each other.
  */
 import { type ReactNode } from 'react';
+/**
+ * Whether a scope still belongs to the workspace root it was entered under.
+ *
+ * The scope is an ABSOLUTE remote directory, so a workspace switch leaves it
+ * pointing at a tree the new host may not have: the next search would run
+ * `find`/`grep` in the OLD workspace's path against the NEW alias (wrong or
+ * empty results, and an error that names no cause). Callers reset the scope when
+ * this answers false.
+ */
+export declare function scopeBelongsToRoot(scope: string, root: string): boolean;
+/**
+ * Which "truncated"/"lines clipped" banners may be shown RIGHT NOW.
+ *
+ * Both flags describe one answered search, so a banner left over from a cleared
+ * query, from the other mode, or from the previous workspace is a claim about a
+ * result the panel is no longer showing. Pure so the gate can pin the rules.
+ */
+export declare function visibleSearchBanners(input: {
+    mode: 'name' | 'content';
+    ran: boolean;
+    nameTruncated: boolean;
+    contentTruncated: boolean;
+    linesClipped: boolean;
+}): {
+    nameTruncated: boolean;
+    contentTruncated: boolean;
+    linesClipped: boolean;
+};
 export declare function SearchView(): ReactNode;

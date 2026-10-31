@@ -17,12 +17,43 @@
 import { REMOTE_API, selectionDownloadName } from '../protocol.ts'
 
 /** What one download attempt ended as. */
-export type DownloadOutcome = 'saved' | 'downloaded'
+export type DownloadOutcome =
+  /** Bytes went through the save picker into the user's chosen file. */
+  | 'saved-picker'
+  /** Bytes were fully received and then handed to the browser to save. */
+  | 'saved-browser'
+  /**
+   * The URL was handed to the browser, which now owns the transfer: its bytes,
+   * its failures and its cancel. The panel must NOT report completion.
+   */
+  | 'handedOff'
 
 /** One progress sample: `total` is absent for a streamed archive (chunked). */
 export interface DownloadProgress {
   loaded: number
   total?: number
+}
+
+/**
+ * Largest body the fallback path buffers before handing the URL to the browser.
+ *
+ * The save picker streams straight to disk, but a browser without the File
+ * System Access API can only be given a URL. Owning the transfer for small and
+ * medium files is what lets the panel see a Host error (a 502 JSON used to be
+ * saved as a file), report real progress and cancel; a 64 MiB ceiling keeps a
+ * multi-GB artifact from being assembled in the tab's memory.
+ */
+export const FALLBACK_BUFFER_MAX_BYTES = 64 * 1024 * 1024
+
+/**
+ * What the fallback should do with a body of `declaredTotal` bytes.
+ *
+ * `handoff` means the browser must own the transfer: too large to assemble in
+ * memory, and no failure/progress/cancel can be reported for it. Exported pure
+ * so the gate can pin the boundary without allocating 64 MiB.
+ */
+export function fallbackPlan(declaredTotal: number | undefined): 'buffer' | 'handoff' {
+  return declaredTotal !== undefined && declaredTotal > FALLBACK_BUFFER_MAX_BYTES ? 'handoff' : 'buffer'
 }
 
 /** Hooks the runner uses for the progress panel and its cancel button. */
@@ -108,6 +139,114 @@ function abortError(): Error {
   return error
 }
 
+/** Hand a fully received body to the browser's own "save file" path. */
+export function saveBytesViaBrowser(bytes: readonly Uint8Array[], fileName: string): void {
+  const blob = new Blob([...bytes] as unknown as BlobPart[])
+  const url = URL.createObjectURL(blob)
+  triggerDownload(url, fileName)
+  // The click has already started the read; revoking later keeps slower shells
+  // (and the Electron download hook) able to finish it.
+  const revoke = (): void => {
+    try {
+      URL.revokeObjectURL(url)
+    } catch {
+      // Already revoked.
+    }
+  }
+  const timer = setTimeout(revoke, 60_000)
+  timer.unref?.()
+}
+
+/**
+ * Fallback for browsers without the save picker (Firefox, some Electron shells).
+ *
+ * The old shape clicked an anchor and immediately reported COMPLETE, so the
+ * panel claimed a saved file before a byte had landed, a Host error response
+ * (502 JSON) was saved as a file, and the cancel button did nothing. This path
+ * owns the transfer whenever the body is small enough to buffer:
+ *
+ * - `fetch` first, so a non-2xx Host answer is a FAILED download, not a file;
+ * - the body is read chunk by chunk (progress + AbortSignal), capped at
+ *   {@link FALLBACK_BUFFER_MAX_BYTES};
+ * - only a complete body is handed to the browser (`saved-browser`);
+ * - a body known to be larger (or an unknown-length archive that grows past the
+ *   cap) is handed to the browser as a URL (`handedOff`) — the panel then says
+ *   the browser owns it instead of claiming a completion it cannot verify.
+ */
+async function saveViaFallback(href: string, fileName: string, options: SaveOptions): Promise<DownloadOutcome> {
+  const signal = options.signal
+  // Read through a closure: a direct signal?.aborted === true check above would
+  // narrow the optional chain and make every later comparison look impossible.
+  const cancelled = (): boolean => signal?.aborted === true
+  if (cancelled()) throw abortError()
+  const canFetch = typeof fetch === 'function'
+  const canSaveBytes = canFetch && typeof URL !== 'undefined'
+    && typeof URL.createObjectURL === 'function' && typeof Blob !== 'undefined'
+  if (!canSaveBytes) {
+    triggerDownload(href, fileName)
+    return 'handedOff'
+  }
+  let response: Response
+  try {
+    response = await fetch(href, signal === undefined ? undefined : { signal })
+  } catch (error) {
+    if (cancelled()) throw abortError()
+    throw error
+  }
+  if (!response.ok || response.body === null) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(detail.trim() === '' ? `HTTP ${response.status}` : detail.trim())
+  }
+  const lengthHeader = response.headers.get('content-length')
+  const parsedLength = lengthHeader === null ? Number.NaN : Number(lengthHeader)
+  const declared = Number.isFinite(parsedLength) && parsedLength >= 0 ? parsedLength : undefined
+  if (fallbackPlan(declared) === 'handoff') {
+    // Too large to assemble in memory: the browser streams it to disk itself.
+    try {
+      await response.body.cancel()
+    } catch {
+      // Already gone.
+    }
+    triggerDownload(href, fileName)
+    return 'handedOff'
+  }
+  const chunks: Uint8Array[] = []
+  let loaded = 0
+  const reader = response.body.getReader()
+  try {
+    options.onProgress?.({ loaded, ...(declared === undefined ? {} : { total: declared }) })
+    for (;;) {
+      if (cancelled()) throw abortError()
+      const { done, value } = await reader.read()
+      if (done) break
+      loaded += value.byteLength
+      if (loaded > FALLBACK_BUFFER_MAX_BYTES) {
+        // Unknown-length body (a chunked tar archive) crossed the cap: abandon
+        // this read and hand the URL over — a fresh request, no partial file.
+        try {
+          await reader.cancel()
+        } catch {
+          // Already gone.
+        }
+        triggerDownload(href, fileName)
+        return 'handedOff'
+      }
+      chunks.push(value)
+      options.onProgress?.({ loaded, ...(declared === undefined ? {} : { total: declared }) })
+    }
+  } catch (error) {
+    try {
+      await reader.cancel()
+    } catch {
+      // Already gone.
+    }
+    if (cancelled()) throw abortError()
+    throw error
+  }
+  saveBytesViaBrowser(chunks, fileName)
+  return 'saved-browser'
+}
+
 /** Delete the just-created target after a failed transfer (best effort). */
 async function discard(handle: SaveFileHandle): Promise<void> {
   try {
@@ -123,18 +262,17 @@ async function discard(handle: SaveFileHandle): Promise<void> {
  *
  * The picker runs while the click's transient activation is still valid, so it
  * must come before the network work. A picker that refuses the call (expired
- * activation, policy) falls back to the browser download flow instead of
- * failing the download outright.
+ * activation, policy) falls back to {@link saveViaFallback} instead of failing
+ * the download outright.
  *
- * @returns `'saved'` for the picked destination, `'downloaded'` for the
- *   browser-default fallback.
+ * @returns `'saved-picker'` for the picked destination, `'saved-browser'` when
+ *   the fallback received every byte and handed them to the browser, and
+ *   `'handedOff'` when the browser owns an unverified transfer.
  */
 export async function saveRemoteUrl(href: string, fileName: string, options: SaveOptions = {}): Promise<DownloadOutcome> {
   const picker = (globalThis as unknown as SaveFilePickerApi).showSaveFilePicker
   if (typeof picker !== 'function') {
-    if (options.signal?.aborted === true) throw abortError()
-    triggerDownload(href, fileName)
-    return 'downloaded'
+    return saveViaFallback(href, fileName, options)
   }
   let handle: SaveFileHandle
   try {
@@ -142,9 +280,7 @@ export async function saveRemoteUrl(href: string, fileName: string, options: Sav
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') throw error
     if (error instanceof Error && (error.name === 'SecurityError' || error.name === 'NotAllowedError')) {
-      if (options.signal?.aborted === true) throw abortError()
-      triggerDownload(href, fileName)
-      return 'downloaded'
+      return saveViaFallback(href, fileName, options)
     }
     throw error
   }
@@ -192,7 +328,7 @@ export async function saveRemoteUrl(href: string, fileName: string, options: Sav
     await discard(handle)
     throw error
   }
-  return 'saved'
+  return 'saved-picker'
 }
 
 /** Save one remote file (fresh name from its POSIX basename). */

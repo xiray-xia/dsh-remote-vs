@@ -80,6 +80,44 @@ function relativeTo(root: string, full: string): string {
   return full
 }
 
+/**
+ * Whether a scope still belongs to the workspace root it was entered under.
+ *
+ * The scope is an ABSOLUTE remote directory, so a workspace switch leaves it
+ * pointing at a tree the new host may not have: the next search would run
+ * `find`/`grep` in the OLD workspace's path against the NEW alias (wrong or
+ * empty results, and an error that names no cause). Callers reset the scope when
+ * this answers false.
+ */
+export function scopeBelongsToRoot(scope: string, root: string): boolean {
+  if (scope === '') return true
+  const base = root.replace(/\/+$/, '')
+  if (base === '') return false
+  return scope === base || scope.startsWith(`${base}/`)
+}
+
+/**
+ * Which "truncated"/"lines clipped" banners may be shown RIGHT NOW.
+ *
+ * Both flags describe one answered search, so a banner left over from a cleared
+ * query, from the other mode, or from the previous workspace is a claim about a
+ * result the panel is no longer showing. Pure so the gate can pin the rules.
+ */
+export function visibleSearchBanners(input: {
+  mode: 'name' | 'content'
+  ran: boolean
+  nameTruncated: boolean
+  contentTruncated: boolean
+  linesClipped: boolean
+}): { nameTruncated: boolean; contentTruncated: boolean; linesClipped: boolean } {
+  const answeredContent = input.mode === 'content' && input.ran
+  return {
+    nameTruncated: input.mode === 'name' && input.ran && input.nameTruncated,
+    contentTruncated: answeredContent && input.contentTruncated,
+    linesClipped: answeredContent && input.linesClipped,
+  }
+}
+
 export function SearchView(): ReactNode {
   const store = useExplorer()
   const { t, alias, root, repoRoot } = store
@@ -144,11 +182,26 @@ export function SearchView(): ReactNode {
       setContentHits([])
       setRan(false)
       setError(undefined)
+      // The truncation banners describe the answer that just went away; left
+      // set, they would hang over an empty panel and read as a claim about the
+      // cleared query. `visibleSearchBanners` is the other half of this guard
+      // (it also keeps the content flags out of the name mode).
+      setNameTruncated(false)
+      setContentTruncated(false)
+      setLinesClipped(false)
       return
     }
     const ticket = ++seq.current
     setBusy(true)
     setError(undefined)
+    // A banner must never outlive the answer it describes: clear the ones this
+    // run is about to refresh, so switching modes/queries cannot show the
+    // previous answer's "truncated" while the new one is still on the wire.
+    if (activeMode === 'name') setNameTruncated(false)
+    else {
+      setContentTruncated(false)
+      setLinesClipped(false)
+    }
     try {
       if (activeMode === 'name') {
         const result = await searchFiles(alias, dir, trimmed)
@@ -214,6 +267,20 @@ export function SearchView(): ReactNode {
     setQuery(request.query)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request?.id])
+
+  /**
+   * A workspace switch invalidates an absolute scope.
+   *
+   * The scope is an absolute remote path from the previous workspace; running
+   * `find`/`grep` with it against the NEW alias searches a tree that host may
+   * not have (or a different one at the same spelling). Reset to the workspace
+   * root instead of sending the stale path. The scope setter and this effect
+   * cannot fight: the request effect above runs first, and a scope that belongs
+   * to the new root is left alone.
+   */
+  useEffect(() => {
+    if (scope !== '' && !scopeBelongsToRoot(scope, root)) setScope('')
+  }, [scope, root, alias])
 
   /**
    * A hit ALWAYS opens the file.
@@ -311,6 +378,9 @@ export function SearchView(): ReactNode {
   )
 
   const count = mode === 'name' ? nameHits.length : contentHits.length
+  // One rule for "may this banner be on screen": answered, in this mode, and
+  // the flag belongs to the answer that is actually visible.
+  const banners = visibleSearchBanners({ mode, ran, nameTruncated, contentTruncated, linesClipped })
 
   return (
     <div className="rvs-pane grow">
@@ -384,8 +454,8 @@ export function SearchView(): ReactNode {
       )}
 
       {error !== undefined && <div className="rvs-banner error">{error}</div>}
-      {contentTruncated && <div className="rvs-banner warn">{t('search.truncated')}</div>}
-      {linesClipped && <div className="rvs-banner warn">{t('search.linesClipped')}</div>}
+      {banners.contentTruncated && <div className="rvs-banner warn">{t('search.truncated')}</div>}
+      {banners.linesClipped && <div className="rvs-banner warn">{t('search.linesClipped')}</div>}
 
       <div className="rvs-scroll">
         {!ran && query.trim() === '' && (
@@ -411,7 +481,7 @@ export function SearchView(): ReactNode {
                 {hit.dir !== '' && <span className="rvs-hit-dir">{hit.dir}</span>}
               </button>
             ))}
-            {nameTruncated && <div className="rvs-empty">{t('search.truncated')}</div>}
+            {banners.nameTruncated && <div className="rvs-empty">{t('search.truncated')}</div>}
           </>
         )}
 

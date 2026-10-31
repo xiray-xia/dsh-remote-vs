@@ -12,6 +12,15 @@ export declare class RemoteApiError extends Error {
      * callers (toast quieting, offline banners) keep treating it as transport.
      */
     transport?: boolean;
+    /**
+     * The operation ran out of its budget; the link itself was not proven bad.
+     *
+     * Set from the Host's `code: 'deadline'`. It keeps classification honest: one
+     * slow request (a huge directory, an 8 MiB read on a thin link) must not flip
+     * the chip to "connection error" or downgrade the editor to read-only, while
+     * the operation still fails for the user with its readable reason.
+     */
+    deadline?: boolean;
     constructor(status: number, message: string);
 }
 /** Query for one remote terminal socket. */

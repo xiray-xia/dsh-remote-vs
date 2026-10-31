@@ -50,9 +50,14 @@ export interface ConnectionView {
 /**
  * Whether `error` (or its message) is a transport-level failure.
  *
- * The flag is honoured first: a repeat failure's message is REWRITTEN to a
- * localized sentence before it is thrown (see `api.call`), and downstream
- * guards (toast quieting, the offline banner) must still see a link error.
+ * The flags are honoured first: a repeat failure's message is REWRITTEN to a
+ * localized sentence before it is thrown (see `api.call`), and downstream guards
+ * (toast quieting, the offline banner) must still see a link error.
+ *
+ * `deadline` wins over the text: a budget that ran out is an operation result,
+ * not a link failure. Its message contains "timed out", so the text rule alone
+ * would classify it as transport — and that is exactly what used to turn one
+ * slow listing into a red chip and a read-only editor.
  */
 export declare function isConnectionFailure(error: unknown): boolean;
 /** Point the view at the workspace the user is looking at. */
@@ -88,5 +93,19 @@ export interface ConnectionTrace {
 export declare function isConnectionRecovery(previous: ConnectionTrace | undefined, alias: string, state: string | undefined): boolean;
 /** Current view of the active alias (the hook is the UI path; this is for gates). */
 export declare function currentConnection(): ConnectionView | undefined;
+/**
+ * The cached health of ONE alias (`undefined` = never observed).
+ *
+ * `currentConnection()` answers for the alias the user is LOOKING at; an action
+ * that carries its own alias must ask by that alias instead. The undo path is
+ * the case in point: its coordinates come from `undoContext()` (the change
+ * panel), which can point at a different workspace than the visible one, and
+ * reading the visible alias' state there would block (or allow) the wrong host.
+ *
+ * A cached `error` is exactly what the save path already refuses on
+ * (`EditorPane` offline), and an unknown alias means "no evidence" — callers
+ * must treat `undefined` as "not proven down", never as healthy.
+ */
+export declare function connectionStateOf(alias: string): ConnectionState | undefined;
 /** Subscribe to the active alias's connection view (undefined when none). */
 export declare function useConnectionStatus(): ConnectionView | undefined;

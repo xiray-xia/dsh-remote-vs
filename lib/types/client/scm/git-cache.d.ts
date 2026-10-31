@@ -70,8 +70,16 @@ export declare function readGitSnapshot(key: string): GitSnapshot | undefined;
  * An answer OLDER than the one already cached is dropped. Two reads of one
  * workspace can overlap when the repo picker changes the directory mid-read (the
  * settled directory is a second key, see the store's `readGit`), and the older
- * walk may finish last — letting it win would hand the user a change list that
+ * walk may finish LAST — letting it win would hand the user a change list that
  * predates the one already shown.
+ *
+ * "Older" is decided by ISSUE order, not by finish order: the read queue stamps
+ * each started read and `readStartId` reports it here while the read runs. The
+ * previous implementation compared `at` (the finish time) and therefore could
+ * never reject the case it documented — the older walk finishing last always
+ * carries the LATER timestamp, so it won. Both the pure gate case and a real
+ * store-driven case now exercise the issue-order path (see
+ * `scripts/check-git-cache.mjs`).
  */
 export declare function writeGitSnapshot(key: string, snapshot: GitSnapshot): void;
 /** Drop every snapshot whose workspace left the binding table. */
@@ -89,5 +97,5 @@ export declare function retainGitSnapshots(bindingIds: ReadonlySet<string>): voi
 export declare function patchCachedGitStatus(key: string, repoRoot: string | undefined, status: GitStatusDetail): void;
 /** Same write-through for the expanded untracked directories. */
 export declare function patchCachedUntrackedDirs(key: string, repoRoot: string | undefined, dirs: DirExpansions): void;
-/** Test hook: forget every snapshot (the cache gate drives this module alone). */
+/** Test hook: forget every snapshot and its ordering state (the cache gate drives this module alone). */
 export declare function clearGitSnapshots(): void;

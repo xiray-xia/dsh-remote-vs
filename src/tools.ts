@@ -9,6 +9,7 @@ import type { RemotePool } from './pool.ts'
 import { RemoteFiles } from './sftp.ts'
 import type { RemoteStore } from './store.ts'
 import type { RemoteExecResult, RemoteHostSummary } from './protocol.ts'
+import { clampExecTimeout, MAX_TIMEOUT_MS } from './timeouts.ts'
 
 function text(value: string): ContentBlock[] {
   return [{ type: 'text', text: value }]
@@ -169,7 +170,7 @@ export function remoteExecTool(deps: RemoteToolsDeps): ReturnType<typeof defineT
     parameters: {
       alias: { type: 'string', description: 'Host alias from remote_hosts.' },
       command: { type: 'string', description: 'Shell command to run on the remote host.' },
-      timeoutMs: { type: 'number', description: 'Timeout in ms (default 60000, max 600000).' },
+      timeoutMs: { type: 'number', description: `Timeout in ms (default 60000, max ${MAX_TIMEOUT_MS}).` },
     },
     output: {
       schema: {
@@ -188,9 +189,9 @@ export function remoteExecTool(deps: RemoteToolsDeps): ReturnType<typeof defineT
       render: (_args, value: AgentExecOut) => text(renderExec({ ...value, exitCode: value.exitCode ?? null })),
     },
     async execute(args) {
-      const timeoutMs = typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs)
-        ? Math.min(Math.max(Math.floor(args.timeoutMs), 1000), 600_000)
-        : undefined
+      // One clamp for every exec surface: the HTTP routes use the same helper,
+      // so the agent tool cannot drift below/above the Host's own limit.
+      const timeoutMs = clampExecTimeout(args.timeoutMs)
       const result = await deps.pool.exec(
         args.alias as string,
         args.command as string,

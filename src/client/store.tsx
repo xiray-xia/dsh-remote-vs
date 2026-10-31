@@ -48,6 +48,7 @@ import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
 import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, isLiveEditorFor, markLiveEditorSaved } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
+import { connectionStateOf, isConnectionFailure } from './connection.ts'
 import { confirmDialog, isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 
 /** One editor tab (code file, preview or diff). */
@@ -87,6 +88,15 @@ export interface EditorTab {
   untracked: boolean
   /** Set for a commit drill-down: the diff compares `ref^` with `ref`. */
   ref?: string
+  /**
+   * 重命名差异的旧路径（commit diff 专用）。
+   *
+   * `openCommitFile` 的首次加载把它一起交给 `loadCommitFileDiff`（两个路径一起
+   * `git show -M` 才能把 rename 配对），但 `reloadTab` 是另一个调用点：不存进 tab，
+   * 重载（工具栏 ⟳ / 断线恢复的批量 reload）就只会拿新路径去问 git，rename 立刻
+   * 退化成「整篇新增」。
+   */
+  origPath?: string
   /** 1-based line to reveal after load (a content-search hit). */
   line?: number
   /**
@@ -2030,6 +2040,7 @@ export function openCommitFile(hash: string, rel: string, origPath?: string): vo
     staged: true,
     untracked: false,
     ref: hash,
+    ...(origPath === undefined ? {} : { origPath }),
     diff: undefined,
     model: undefined,
     view: 'split',
@@ -2072,21 +2083,77 @@ export function updateTab(id: string, next: Partial<EditorTab>): void {
   patchTab(id, next)
 }
 
-/** Write one tab back to the remote host. @returns true when the write landed. */
-export async function saveTab(id: string, content: string): Promise<boolean> {
+/**
+ * One tab's save slot: at most one write in flight plus ONE pending content.
+ *
+ * Writes to the same remote path must never overlap. `RemoteFiles.write` is a
+ * side file + `unlink` + `rename` (the atomic-save shape), so two writers race on
+ * the RENAME: whichever lands last wins regardless of which the user pressed
+ * last, and the store's baseline is then set by the other promise. The file can
+ * end up holding the OLDER bytes while the UI says the newer ones were saved.
+ *
+ * Depth ONE on purpose: keyboard auto-repeat on Ctrl+S (holding it on a slow
+ * link) would otherwise queue one full-document string per repeat (8 MiB files
+ * make that an actual memory problem, not a theoretical one).
+ */
+interface SaveSlot {
+  running: boolean
+  /** The newest content waiting; a later request REPLACES it (last press wins). */
+  pending: string | undefined
+  /** Callers waiting for the pending write; they get ITS outcome. */
+  waiters: ((ok: boolean) => void)[]
+}
+
+const saveSlots = new Map<string, SaveSlot>()
+
+function saveSlotOf(id: string): SaveSlot {
+  const existing = saveSlots.get(id)
+  if (existing !== undefined) return existing
+  const created: SaveSlot = { running: false, pending: undefined, waiters: [] }
+  saveSlots.set(id, created)
+  return created
+}
+
+/** Drop a drained slot: the map is keyed by tab id and must not grow forever. */
+function releaseSaveSlot(id: string, slot: SaveSlot): void {
+  if (slot.running || slot.pending !== undefined || slot.waiters.length > 0) return
+  if (saveSlots.get(id) === slot) saveSlots.delete(id)
+}
+
+/**
+ * Where one tab's save would go, or undefined when it is not writable NOW.
+ *
+ * Re-derived at EXECUTION time as well as at request time: a queued save can
+ * outlive a workspace switch (the tab is gone), a reload that turns the tab
+ * `truncated`, or a tab closed mid-queue. A queued write must never land in a
+ * workspace that no longer shows the tab.
+ *
+ * The rule itself is S1's: a file tab, or a WORKING-TREE diff's after pane
+ * (`kind: 'diff'`, no `ref`, not the staged side). Commit diffs and the staged
+ * side are history.
+ */
+function saveTargetOf(id: string): { alias: string; fullPath: string; rel: string } | undefined {
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
-  if (workspace === undefined || tab === undefined || tab.binary || tab.truncated) return false
-  /**
-   * A working-tree diff's "after" pane is editable (see `DiffView.saveAfter`),
-   * and it edits the WORKING TREE file at `tab.fullPath` — so this path must
-   * accept `kind: 'diff'` too. It did not: every save from that pane returned
-   * false silently, the write never happened, `reloadTab` repainted the remote
-   * bytes and the user's edit was gone while the tab still looked saved.
-   * Commit diffs (`ref`) and the staged side are history: never writable.
-   */
+  if (workspace === undefined || tab === undefined) return undefined
   const writable = tab.kind === 'file' || (tab.kind === 'diff' && tab.ref === undefined && !tab.staged)
-  if (!writable) return false
+  if (!writable || tab.binary || tab.truncated) return undefined
+  return { alias: workspace.alias, fullPath: tab.fullPath, rel: tab.rel }
+}
+
+/**
+ * Write one tab back to the remote host. @returns true when the burst's LAST
+ * write landed.
+ *
+ * Requests for the SAME tab are serialized (see `SaveSlot`); a request that
+ * arrives while one is in flight becomes the single pending write, replacing any
+ * earlier pending content. Every caller of that burst — the one that started it
+ * and the coalesced-away ones — resolves with the outcome of the write that
+ * finally lands: the bytes they asked for are part of the newer buffer the
+ * editor held, so "your edit is on disk" stays true (and a burst whose last
+ * write failed reports false to all of them).
+ */
+export async function saveTab(id: string, content: string): Promise<boolean> {
   // Never fall back to the tab's loaded text. `tab.text` is only ever written
   // by a load/reload or by the surface handoff (`captureLiveBuffer`), never as
   // a fallback for a caller without a live buffer, so substituting it here
@@ -2095,12 +2162,56 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
   // without a live buffer must refuse to save instead (see EditorPane.saveActive).
   if (typeof content !== 'string') {
     toast(t('editor.needSource'), true)
-    return false
+    return Promise.resolve(false)
   }
-  const text = content
-  patchTab(id, { saving: true, text })
+  // Cheap refusal at REQUEST time: a truncated / binary / history tab answers
+  // "no" synchronously and issues no write at all (the gate depends on it).
+  if (saveTargetOf(id) === undefined) return Promise.resolve(false)
+  /**
+   * `text` is the request-time snapshot the success path compares against
+   * (`newer` below): it must be recorded when the user ASKED, not when the write
+   * finally runs — a handoff written in between would otherwise look like a
+   * regression and keep the dirty flag for no reason.
+   */
+  patchTab(id, { saving: true, text: content })
+  const slot = saveSlotOf(id)
+  if (slot.running) {
+    slot.pending = content
+    return new Promise<boolean>(resolve => { slot.waiters.push(resolve) })
+  }
+  return runSaveSlot(id, slot, content)
+}
+
+/** Drain one tab's queue: one write, then at most one pending, then settle all. */
+async function runSaveSlot(id: string, slot: SaveSlot, first: string): Promise<boolean> {
+  slot.running = true
+  let ok = true
+  let content: string | undefined = first
   try {
-    await api.fileOp.write(workspace.alias, tab.fullPath, text)
+    while (content !== undefined) {
+      ok = await performSave(id, content)
+      content = slot.pending
+      slot.pending = undefined
+    }
+  } finally {
+    // `saving` is a QUEUE flag: it must stay true across the two writes of one
+    // burst, or the status chip flickers "unsaved → saved → unsaved".
+    slot.running = false
+    patchTab(id, { saving: false })
+    const waiters = slot.waiters
+    slot.waiters = []
+    for (const resolve of waiters) resolve(ok)
+    releaseSaveSlot(id, slot)
+  }
+  return ok
+}
+
+/** One queued write. Everything it needs is re-read when it actually runs. */
+async function performSave(id: string, text: string): Promise<boolean> {
+  const target = saveTargetOf(id)
+  if (target === undefined) return false
+  try {
+    await api.fileOp.write(target.alias, target.fullPath, text)
     /**
      * The remote file now holds `text`, so that becomes the disk-side dirty
      * baseline (a later remount compares against it).
@@ -2114,7 +2225,9 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
      *    through `markLiveEditorSaved` below);
      *  - the tab was switched away from mid-write: its stored `text` is then the
      *    handoff copy of that newer buffer, so comparing it with what was
-     *    written detects the difference without an editor.
+     *    written detects the difference without an editor. A LATER queued save
+     *    also lands here: its request-time `text` is newer than this write, so
+     *    the flag stays until that one lands.
      *
      * Only a tab whose stored text IS the written text, with no mounted editor,
      * has nothing newer — there the flag is cleared directly. (Clearing it
@@ -2124,13 +2237,12 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
     const liveEditor = isLiveEditorFor(id)
     const current = state.tabs.find(item => item.id === id)
     const newer = current !== undefined && current.text !== text
-    patchTab(id, { saving: false, baseline: text, ...(liveEditor || newer ? {} : { dirty: false }) })
+    patchTab(id, { baseline: text, ...(liveEditor || newer ? {} : { dirty: false }) })
     markLiveEditorSaved(id, text)
-    toast(`${t('editor.saved')} · ${tab.rel}`, false)
+    toast(`${t('editor.saved')} · ${target.rel}`, false)
     await afterWrite()
     return true
   } catch (error) {
-    patchTab(id, { saving: false })
     toast(error instanceof Error ? error.message : String(error), true)
     return false
   }
@@ -2181,7 +2293,7 @@ export async function reloadTab(id: string): Promise<void> {
   if (root === undefined) return
   try {
     const payload = tab.ref !== undefined
-      ? await withDeadline(loadCommitFileDiff(workspace.alias, root, tab.ref, tab.rel), gitDeadlineMs(), t('editor.readTimeout'))
+      ? await withDeadline(loadCommitFileDiff(workspace.alias, root, tab.ref, tab.rel, tab.origPath), gitDeadlineMs(), t('editor.readTimeout'))
       : await withDeadline(loadDiff(workspace.alias, root, tab.rel, tab.staged, tab.untracked), gitDeadlineMs(), t('editor.readTimeout'))
     patchTab(id, {
       loading: false,
@@ -2412,6 +2524,18 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
     info(t('changes.undoNoContext'))
     return
   }
+  /**
+   * 撤销是一次远端写（`git apply -R`）。链路已经判定断开时，请求发出去也只有一个
+   * 结果：让 socket 文案冒出来、再被 `catch` 误标成「撤销冲突」。这里按**请求所属的
+   * alias** 预判（不是页面上可见的那个），与保存路径（`EditorPane.saveActive` 的
+   * offline 分支）用同一句「操作未发送」；`undefined` = 没有证据，不拦。
+   *
+   * 顺序是承重的：dirty 门在前（用远端补丁盖掉未保存编辑是最糟的结果），离线门在后。
+   */
+  if (connectionStateOf(context.alias) === 'error') {
+    info(t('connection.actionFailed'))
+    return
+  }
   const patch = tab.changeSet?.patches?.[mark.hunk ?? -1]
   if (patch === undefined || patch.trim() === '') {
     info(t('changes.undoMissing'))
@@ -2421,6 +2545,16 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
     // 'revert' = 远端 `git apply -R`；上下文不匹配它就抛错，这就是冲突护栏。
     await applyHunk(context.alias, context.root, patch, 'revert')
   } catch (error) {
+    /**
+     * 传输失败不是「补丁上下文变了」：报成冲突会让用户去改文件，而真正的原因是链路。
+     * `applyHunk` 的补丁临时文件写失败会以 transport 错误原样抛出（`actions.ts` 的
+     * write 在 try 之外），`api.call` 会给它打 `transport` 标记，所以这里的判据对
+     * 「首次失败（原始 socket 文案）」和「重复失败（已本地化）」都成立。
+     */
+    if (isConnectionFailure(error)) {
+      info(t('connection.actionFailed'))
+      return
+    }
     // 可把 git 的说法附在后面（"patch does not apply" 之类），但**不动**标记与文件。
     const detail = error instanceof Error ? error.message.trim() : String(error).trim()
     info(detail === '' ? t('changes.undoConflict') : `${t('changes.undoConflict')} · ${detail}`)

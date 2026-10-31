@@ -33,6 +33,13 @@ export const DYNAMIC_KEYS = [
   'downloads.running',
   'downloads.indeterminate',
   'downloads.sizeUnknown',
+  // Reached through the same STATUS_KEY lookup: a handed-off transfer is a
+  // status value too, not a literal `t()` call.
+  'downloads.handedOff',
+  // Reached through the noteKey table in TerminalView (socket lost vs shell
+  // exit), which stores the key and renders it later.
+  'term.disconnected',
+  'term.closed',
   // Labels chosen through connectionLabelKey in connection.ts (a state → key
   // mapping, so the call site is 	(connectionLabelKey(state))).
   'connection.ok',
@@ -127,6 +134,7 @@ const zh: Record<string, string> = {
   'term.selectHost': '选择主机后连接：',
   'term.reconnect': '重连',
   'term.closed': '连接已关闭。',
+  'term.disconnected': '连接已断开，可重新接回。',
   'term.new': '新建终端',
   'term.empty': '还没有终端 —— 选好主机后点右上角 + 新建一个。',
   'term.close': '关闭终端',
@@ -215,6 +223,8 @@ const zh: Record<string, string> = {
   'downloads.browserDefault': '已保存到浏览器默认下载目录',
   'downloads.indeterminate': '正在打包…',
   'downloads.sizeUnknown': '大小未知',
+  'downloads.handedOff': '已交给浏览器',
+  'downloads.handedOffDetail': '剩余下载由浏览器完成；此面板无法观测或取消。',
   'downloads.tooMany': '选择项过多（最多 100 项），请改为下载所在目录',
   'files.copied': '已复制',
   'files.moved': '已移动',
@@ -581,6 +591,7 @@ const en: Record<string, string> = {
   'term.selectHost': 'Pick a host, then connect:',
   'term.reconnect': 'Reconnect',
   'term.closed': 'Connection closed.',
+  'term.disconnected': 'Connection lost — reattach available.',
   'term.new': 'New terminal',
   'term.empty': 'No terminal yet — pick a host, then press + to open one.',
   'term.close': 'Close terminal',
@@ -669,6 +680,8 @@ const en: Record<string, string> = {
   'downloads.browserDefault': 'Saved to the browser download folder',
   'downloads.indeterminate': 'Packaging…',
   'downloads.sizeUnknown': 'size unknown',
+  'downloads.handedOff': 'Handed to browser',
+  'downloads.handedOffDetail': 'Your browser completes the download; this panel cannot observe or cancel it.',
   'downloads.tooMany': 'Too many entries (max 100); download the containing folder instead',
   'files.copied': 'Copied',
   'files.moved': 'Moved',

@@ -1,29 +1,25 @@
 /**
- * Where "revert this change" points.
+ * The coordinates the editor's "revert this change" action uses.
  *
- * The revert itself needs only `(alias, root, patch)`: `git apply -R` runs on the
- * host against the repository that owns the file, and its context check IS the
- * conflict guard — a hunk whose surroundings moved since the snapshot is
- * refused instead of overwriting whatever replaced it. Nothing about the
- * session is needed for that.
+ * This module is the SLOT the store reads (`undoContext()`); it no longer decides
+ * anything. The value is written by the change panel from the provenance of the
+ * marks on screen — see `undo-target.ts`, which validates that the marks' session,
+ * binding and root still describe the tab the user is looking at. When validation
+ * fails the slot holds `undefined`, and the store's undo path refuses
+ * (`changes.undoNoContext`) instead of guessing a repository.
  *
- * A small module-level record is the honest shape here: the affordance is
- * rendered by the editor (which knows a buffer, not a workspace), while the
- * coordinates come from the change panel (which knows the session). One value at
- * a time is enough because the panel only ever lists changes of the session on
- * screen.
+ * Historically the slot was "the last summary this panel saw", which could point
+ * a revert at another conversation's — or a sibling binding's — repository. The
+ * revert writes to the remote, so the coordinates now travel with the marks.
  */
+import type { ChangeOrigin } from './undo-target.ts'
 
-/** Coordinates one revert needs, plus the session they were read for. */
-export interface UndoContext {
-  sessionId: string
-  alias: string
-  root: string
-}
+/** Coordinates one revert needs. Kept as the store's contract name. */
+export type UndoContext = ChangeOrigin
 
 let current: UndoContext | undefined
 
-/** Point the affordance at one session's remote workspace. */
+/** Publish the validated provenance for the tab currently on screen (or nothing). */
 export function setUndoContext(context: UndoContext | undefined): void {
   current = context
 }

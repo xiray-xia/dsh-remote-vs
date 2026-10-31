@@ -47,6 +47,21 @@ export declare class RemoteStore {
     private stampOf;
     private loadDoc;
     private save;
+    /**
+     * Re-read, mutate, then write only while the file has not changed underneath.
+     *
+     * Every mutation here rewrites the WHOLE document, so a plain
+     * read-modify-write let the last writer win: desktop and `dsh web` share
+     * `$DSH_HOME/dsh-remote.json` by design, and one side's host edit could
+     * disappear without any error. Re-reading at the start plus a stamp re-check
+     * right before the write turns that into a replay on fresh content.
+     *
+     * `apply` must only touch `this.doc` and return a value (no I/O, no logging):
+     * a conflicting attempt is executed again against the reloaded document.
+     * The final rename window is still unguarded (a real lock needs blocking I/O);
+     * this narrows the lost-update window from a whole user edit to microseconds.
+     */
+    private mutate;
     list(): RemoteHostEntry[];
     get(alias: string): RemoteHostEntry | undefined;
     require(alias: string): RemoteHostEntry;

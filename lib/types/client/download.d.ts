@@ -14,12 +14,39 @@
  * unreadable path shows the Host's real error instead of an empty saved file.
  */
 /** What one download attempt ended as. */
-export type DownloadOutcome = 'saved' | 'downloaded';
+export type DownloadOutcome = 
+/** Bytes went through the save picker into the user's chosen file. */
+'saved-picker'
+/** Bytes were fully received and then handed to the browser to save. */
+ | 'saved-browser'
+/**
+ * The URL was handed to the browser, which now owns the transfer: its bytes,
+ * its failures and its cancel. The panel must NOT report completion.
+ */
+ | 'handedOff';
 /** One progress sample: `total` is absent for a streamed archive (chunked). */
 export interface DownloadProgress {
     loaded: number;
     total?: number;
 }
+/**
+ * Largest body the fallback path buffers before handing the URL to the browser.
+ *
+ * The save picker streams straight to disk, but a browser without the File
+ * System Access API can only be given a URL. Owning the transfer for small and
+ * medium files is what lets the panel see a Host error (a 502 JSON used to be
+ * saved as a file), report real progress and cancel; a 64 MiB ceiling keeps a
+ * multi-GB artifact from being assembled in the tab's memory.
+ */
+export declare const FALLBACK_BUFFER_MAX_BYTES: number;
+/**
+ * What the fallback should do with a body of `declaredTotal` bytes.
+ *
+ * `handoff` means the browser must own the transfer: too large to assemble in
+ * memory, and no failure/progress/cancel can be reported for it. Exported pure
+ * so the gate can pin the boundary without allocating 64 MiB.
+ */
+export declare function fallbackPlan(declaredTotal: number | undefined): 'buffer' | 'handoff';
 /** Hooks the runner uses for the progress panel and its cancel button. */
 export interface SaveOptions {
     onProgress?: (progress: DownloadProgress) => void;
@@ -49,16 +76,19 @@ export declare function downloadManyUrl(alias: string, paths: readonly string[])
  * the document level.
  */
 export declare function triggerDownload(href: string, fileName: string): void;
+/** Hand a fully received body to the browser's own "save file" path. */
+export declare function saveBytesViaBrowser(bytes: readonly Uint8Array[], fileName: string): void;
 /**
  * Save one streamed URL to a destination the user picks.
  *
  * The picker runs while the click's transient activation is still valid, so it
  * must come before the network work. A picker that refuses the call (expired
- * activation, policy) falls back to the browser download flow instead of
- * failing the download outright.
+ * activation, policy) falls back to {@link saveViaFallback} instead of failing
+ * the download outright.
  *
- * @returns `'saved'` for the picked destination, `'downloaded'` for the
- *   browser-default fallback.
+ * @returns `'saved-picker'` for the picked destination, `'saved-browser'` when
+ *   the fallback received every byte and handed them to the browser, and
+ *   `'handedOff'` when the browser owns an unverified transfer.
  */
 export declare function saveRemoteUrl(href: string, fileName: string, options?: SaveOptions): Promise<DownloadOutcome>;
 /** Save one remote file (fresh name from its POSIX basename). */

@@ -19,6 +19,7 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { FileReferenceCandidate } from '@deepseek-ai/dsh-file-reference'
 import type {
   SubprocessHandle,
+  SubprocessOutcome,
   SubprocessSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
 
@@ -36,6 +37,27 @@ export const REMOTE_FILE_SEARCH_EXCLUDED_DIRECTORIES: readonly string[] = [
 /** Byte ceiling for one rg listing transfer (50k lines worst case). */
 const RG_OUTPUT_MAX_BYTES = 16 * 1024 * 1024
 
+/**
+ * How long the ended scan may take to actually close before we stop waiting.
+ *
+ * The cap above terminates `rg` ourselves, and a cap is a RESULT, not a failure —
+ * but the process may be slow to die (or its ssh channel may never report close
+ * at all). Waiting forever there would leave the shared `pending` promise
+ * unsettled for the life of the Host, so every later bare query would join it and
+ * never answer. Two minutes is far beyond a healthy 5-entry/16MiB listing and only
+ * ever bites a half-dead transport.
+ */
+const DONE_TIMEOUT_MS = 120_000
+
+/** Why the cached index is a bounded prefix instead of the whole tree. */
+export type RemoteIndexCap = 'entries' | 'bytes' | 'timeout'
+
+/** What one `done` wait observed (a rejection is unknown, not an exit fact). */
+type DoneWait =
+  | { kind: 'outcome'; outcome: SubprocessOutcome | undefined }
+  | { kind: 'timeout' }
+  | { kind: 'failed'; error: unknown }
+
 export interface RemoteFileSearchDeps {
   /** Remote fs view (worlds.fsFor) for scoped live listings. */
   fs: FileSystem
@@ -45,10 +67,18 @@ export interface RemoteFileSearchDeps {
   remoteRoot: string
   /** Optional warn sink (router wires ctx.logger). */
   warn?: (message: string) => void
+  /** Override the post-cap close wait (tests only; production keeps the default). */
+  doneTimeoutMs?: number
 }
 
 export class RemoteFileSearch {
   private readonly excluded: ReadonlySet<string>
+  /**
+   * Explicit field assignment instead of a constructor parameter property: the
+   * local gates load this module through Node's type-stripping runner (same as
+   * `changes/recorder.ts`), which rejects parameter properties.
+   */
+  private readonly deps: RemoteFileSearchDeps
   private settled: FileReferenceCandidate[] | undefined
   private pending: Promise<FileReferenceCandidate[]> | undefined
   private pendingAbort: AbortController | undefined
@@ -57,9 +87,23 @@ export class RemoteFileSearch {
   private disposed = false
   /** Monotonic invalidation counter; a scan started below it is stale. */
   private invalidations = 0
+  /** Why the cached index is bounded, or undefined when it is complete. */
+  private cappedIndex: RemoteIndexCap | undefined
 
-  constructor(private readonly deps: RemoteFileSearchDeps) {
+  constructor(deps: RemoteFileSearchDeps) {
+    this.deps = deps
     this.excluded = new Set(REMOTE_FILE_SEARCH_EXCLUDED_DIRECTORIES)
+  }
+
+  /**
+   * Why the current index is a bounded prefix, or `undefined` for a complete one.
+   *
+   * The `@` surface itself returns candidates only (its contract is the stock
+   * local list), so this is the honest place to expose "you are looking at a
+   * prefix": host logs get the warning, and a future consumer can surface it.
+   */
+  get indexCap(): RemoteIndexCap | undefined {
+    return this.cappedIndex
   }
 
   /**
@@ -79,6 +123,8 @@ export class RemoteFileSearch {
   invalidate(): void {
     this.invalidations += 1
     this.settled = undefined
+    // The cap verdict belongs to the index being dropped.
+    this.cappedIndex = undefined
     if (this.pendingAbort !== undefined) {
       try {
         this.pendingAbort.abort(new Error('file search index invalidated'))
@@ -195,13 +241,24 @@ export class RemoteFileSearch {
     })
   }
 
-  /** One remote `rg --files` run, head-capped, sorted for determinism. */
+  /**
+   * One remote `rg --files` run, head-capped, sorted for determinism.
+   *
+   * A cap is a BOUNDED ANSWER, not a failure: whatever was read before the cap is
+   * still the prefix of the listing, and it used to be thrown away because the
+   * process's own SIGTERM (we killed it) looked like a non-zero exit. On a
+   * monorepo past 50k files that made the bare `@` query answer "nothing to
+   * reference" for a repo full of files. Now the prefix is served and
+   * {@link RemoteFileSearch.indexCap} / the warn sink say it is a prefix.
+   */
   private async buildIndex(signal: AbortSignal): Promise<FileReferenceCandidate[]> {
     const globs: string[] = []
     for (const name of this.excluded) {
       globs.push(`--glob=!**/${name}`, `--glob=!**/${name}/**`)
     }
     const argv = ['rg', '--no-config', '--files', '--no-ignore', '--hidden', ...globs, '--', '.']
+    // A fresh build decides the cap verdict from scratch.
+    this.cappedIndex = undefined
     let handle: SubprocessHandle
     try {
       handle = this.deps.spawn({
@@ -217,7 +274,7 @@ export class RemoteFileSearch {
     }
     const lines: string[] = []
     let bytes = 0
-    let truncated = false
+    let cappedBy: RemoteIndexCap | undefined
     try {
       const stdout = handle.stdout
       if (stdout === undefined) {
@@ -241,15 +298,19 @@ export class RemoteFileSearch {
               const clean = line.endsWith('\r') ? line.slice(0, -1) : line
               if (clean === '') continue
               bytes += Buffer.byteLength(clean, 'utf8') + 1
-              if (lines.length >= REMOTE_FILE_SEARCH_MAX_ENTRIES || bytes > RG_OUTPUT_MAX_BYTES) {
-                truncated = true
+              if (lines.length >= REMOTE_FILE_SEARCH_MAX_ENTRIES) {
+                cappedBy = 'entries'
+                break
+              }
+              if (bytes > RG_OUTPUT_MAX_BYTES) {
+                cappedBy = 'bytes'
                 break
               }
               lines.push(clean)
             }
-            if (truncated) break
+            if (cappedBy !== undefined) break
           }
-          if (!truncated && carry !== '') {
+          if (cappedBy === undefined && carry !== '') {
             if (lines.length < REMOTE_FILE_SEARCH_MAX_ENTRIES && bytes <= RG_OUTPUT_MAX_BYTES) {
               lines.push(carry.endsWith('\r') ? carry.slice(0, -1) : carry)
             }
@@ -257,12 +318,22 @@ export class RemoteFileSearch {
         } finally {
           signal.removeEventListener('abort', onAbort)
         }
+        // A real cancellation is still a rejection; the cap is decided below.
         signal.throwIfAborted()
         handle.terminate()
       }
-      const outcome = await handle.done.catch(() => undefined)
-      if (outcome !== undefined && outcome.exitCode !== 0 && outcome.exitCode !== 1) {
-        this.warn(`remote file index rg exited ${outcome.exitCode ?? outcome.signal}`)
+      const waited = await this.waitForDone(handle)
+      if (waited.kind === 'timeout') {
+        // The channel never closed. The prefix is still the best answer there is.
+        cappedBy ??= 'timeout'
+      } else if (waited.kind === 'failed') {
+        if (cappedBy === undefined) {
+          this.warn(`remote file index failed: ${messageOf(waited.error)}`)
+          return []
+        }
+      } else if (cappedBy === undefined && waited.outcome !== undefined
+        && waited.outcome.exitCode !== 0 && waited.outcome.exitCode !== 1) {
+        this.warn(`remote file index rg exited ${waited.outcome.exitCode ?? waited.outcome.signal}`)
         return []
       }
     } catch (error) {
@@ -274,6 +345,10 @@ export class RemoteFileSearch {
       if (signal.aborted) throw error
       this.warn(`remote file index failed: ${messageOf(error)}`)
       return []
+    }
+    if (cappedBy !== undefined) {
+      this.cappedIndex = cappedBy
+      this.warn(`remote file index capped by ${cappedBy}; serving the prefix read so far`)
     }
     // Normalize to stock index shape: strip ./, drop excluded segments
     // (covers the root-inside-excluded glob edge), sort, derive dirs.
@@ -299,6 +374,33 @@ export class RemoteFileSearch {
     ]
     indexed.sort((a, b) => compareText(a.path, b.path))
     return indexed
+  }
+
+  /**
+   * Wait for the ended scan to close, but never forever.
+   *
+   * `handle.done` settles from the transport's close event; a half-dead channel
+   * can withhold it for the life of the process. Every outcome is reported as a
+   * fact — a rejection stays a rejection so the caller can still treat it as a
+   * failure when nothing else explains the scan.
+   */
+  private async waitForDone(handle: SubprocessHandle): Promise<DoneWait> {
+    const ms = this.deps.doneTimeoutMs ?? DONE_TIMEOUT_MS
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settled = handle.done.then(
+      (outcome): DoneWait => ({ kind: 'outcome', outcome }),
+      (error: unknown): DoneWait => ({ kind: 'failed', error }),
+    )
+    try {
+      return await Promise.race([
+        settled,
+        new Promise<DoneWait>(resolve => {
+          timer = setTimeout(() => resolve({ kind: 'timeout' }), ms)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
 
   private warn(message: string): void {

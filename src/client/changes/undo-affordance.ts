@@ -89,6 +89,21 @@ function markAtLine(state: EditorState, line: number): ChangeMark | undefined {
   return anchor
 }
 
+/**
+ * 只读编辑器里不提供撤销（断线降级 / 超上限截断）。
+ *
+ * 撤销按钮点下去是一次远端写（`git apply -R`），所以只读时它必须消失：否则屏幕上
+ * 「只读（不能保存）」与「可写的撤销」并存，且请求只会在远端失败。判据读编辑器自己的
+ * `readOnly` facet —— 与 `CodeEditor` 的 readOnly Compartment 是同一个事实，不需要再传
+ * 一个 prop（第二个真相源迟早会漂）。
+ *
+ * 导出是为了让门禁能钉住这个判定（渲染 CodeMirror 的 DOM 级证明成本高，而这里的
+ * 语义只有"只读 ⇒ 不提供"一句话）。
+ */
+export function undoBlockedByReadOnly(view: { state: { readOnly: boolean } }): boolean {
+  return view.state.readOnly
+}
+
 /** 指针所在的 `.cm-line`（不属于编辑器内容时为 null）。 */
 function lineElementAt(view: EditorView, event: MouseEvent): Element | null {
   const node = event.target instanceof Node ? event.target : null
@@ -190,6 +205,16 @@ class UndoAffordanceView {
   /** 鼠标在编辑器内容里移动：命中一处改动就（重新）开始悬停计时。 */
   handleMove(event: MouseEvent): void {
     this.cancelLeave()
+    /**
+     * 只读的编辑器没有可执行的撤销：断线降级（`connection.state === error`）与超上限
+     * 截断都通过 CodeMirror 的 `readOnly` 生效，而这条动作是一次**远端写**
+     * （`git apply -R`）。判据直接读编辑器自己的 state，与只读 Compartment 是同一个
+     * 事实，不需要再传一个 prop（第二个真相源迟早会漂）。顺带覆盖将来任何只读面。
+     */
+    if (undoBlockedByReadOnly(this.view)) {
+      this.reset()
+      return
+    }
     // 拖着选区走过改动行不算悬停：那时用户在做选择，不该冒出按钮抢点击。
     if (event.buttons !== 0) {
       this.reset()
@@ -230,6 +255,14 @@ class UndoAffordanceView {
     this.timer = undefined
     const hover = this.hovered
     if (hover === undefined) return
+    /**
+     * 悬停计时这段时间里链路可能已经断了（只读 Compartment 被 reconfigure）：
+     * 到点再确认一次，否则按钮会出现在一个已经不能写的编辑器里。
+     */
+    if (undoBlockedByReadOnly(this.view)) {
+      this.reset()
+      return
+    }
     if (markAtLine(this.view.state, hover.line) !== hover.mark) {
       this.reset()
       return

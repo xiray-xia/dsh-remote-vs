@@ -23,6 +23,19 @@ function expandHome(path: string): string {
   return path
 }
 
+/**
+ * Parse one configured port (number, or a decimal string from older stores).
+ *
+ * `undefined` means absent (caller defaults to 22); `NaN`/out-of-range returns
+ * `undefined` too, and callers turn that into an explicit skip — silently
+ * importing an invalid port as 22 would connect to the wrong sshd (or none).
+ */
+function validPort(value: string | number): number | undefined {
+  const port = typeof value === 'number' ? value : /^\d+$/.test(value) ? Number(value) : Number.NaN
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  return port
+}
+
 /** Parse OpenSSH client config text into host payloads. */
 export function parseSshConfig(text: string): ParsedImport {
   const payloads: HostPayload[] = []
@@ -46,31 +59,58 @@ export function parseSshConfig(text: string): ParsedImport {
     } else if (key === 'match') {
       current = undefined
       skipped.push({ alias: '(match)', reason: 'Match conditional blocks are not imported' })
+    } else if (key === 'include') {
+      // Not expanded: multi-file configs live in separate files, and a silent
+      // omission used to look like "the config only had a few hosts".
+      skipped.push({ alias: '(include)', reason: `Include ${value} is not expanded — import that file separately` })
     } else if (current !== undefined && !current.fields.has(key)) {
       current.fields.set(key, value)
     }
   }
   for (const block of blocks) {
-    const alias = block.patterns[0] as string
-    if (alias === undefined || alias.includes('*') || alias.includes('?') || alias.includes('!')) {
-      skipped.push({ alias: block.patterns.join(' ') || '(empty)', reason: 'wildcard patterns are not imported' })
+    // A `Host a b` line declares TWO names with the same fields: import each
+    // concrete pattern instead of silently dropping everything after the first.
+    const concrete = block.patterns.filter(pattern => pattern !== '' && !/[*?!]/.test(pattern))
+    const special = block.patterns.filter(pattern => pattern !== '' && /[*?!]/.test(pattern))
+    if (special.length > 0) {
+      skipped.push({ alias: special.join(' '), reason: 'wildcard/negation patterns are not imported' })
+    }
+    if (concrete.length === 0) {
+      if (special.length === 0) skipped.push({ alias: '(empty)', reason: 'Host line has no pattern' })
       continue
     }
     if (block.fields.has('proxyjump') || block.fields.has('proxycommand')) {
-      skipped.push({ alias, reason: 'proxyJump/proxyCommand needs P1 (direct hosts only in P0)' })
+      for (const alias of concrete) skipped.push({ alias, reason: 'proxyJump/proxyCommand needs P1 (direct hosts only in P0)' })
       continue
     }
+    const rawPort = block.fields.get('port')
+    const port = rawPort === undefined ? 22 : validPort(rawPort)
     const identityFile = block.fields.get('identityfile')?.split(/\s+/)[0]
-    payloads.push({
-      alias,
-      host: block.fields.get('hostname') ?? alias,
-      port: block.fields.get('port') !== undefined ? Number(block.fields.get('port')) : 22,
-      user: block.fields.get('user') ?? '',
-      auth: identityFile !== undefined
-        ? { kind: 'key', keyPath: expandHome(identityFile) }
-        : { kind: 'password', password: '' },
-      tags: ['imported:ssh-config'],
-    })
+    const user = block.fields.get('user') ?? ''
+    for (const alias of concrete) {
+      if (port === undefined) {
+        skipped.push({ alias, reason: `invalid Port '${rawPort ?? ''}' (expected 1-65535)` })
+        continue
+      }
+      if (user === '') {
+        skipped.push({ alias, reason: 'no User in ssh_config — set the login user after import' })
+        continue
+      }
+      if (identityFile === undefined) {
+        // The old code produced an empty-password payload, which the store then
+        // rejected with a misleading "auth.password must be non-empty".
+        skipped.push({ alias, reason: 'no IdentityFile in ssh_config — add the key or password after import' })
+        continue
+      }
+      payloads.push({
+        alias,
+        host: block.fields.get('hostname') ?? alias,
+        port,
+        user,
+        auth: { kind: 'key', keyPath: expandHome(identityFile) },
+        tags: ['imported:ssh-config'],
+      })
+    }
   }
   return { payloads, skipped }
 }
@@ -98,29 +138,48 @@ export function migrateDshSsh(home: string = dshHome()): ParsedImport {
     const alias = typeof raw.alias === 'string' ? raw.alias : '(unknown)'
     const auth = (raw.auth ?? {}) as Record<string, unknown>
     const kind = auth.kind
-    const proxyJump = (raw.proxyJump ?? []) as unknown[]
+    const proxyJump = raw.proxyJump
     const proxyCommand = raw.proxyCommand
+    const hasProxy = (Array.isArray(proxyJump) && proxyJump.length > 0)
+      || (typeof proxyJump === 'string' && proxyJump !== '')
+      || (typeof proxyCommand === 'string' && proxyCommand !== '')
     if (kind !== 'key' && kind !== 'password') {
       skipped.push({ alias, reason: `auth kind '${String(kind)}' needs P1 (key/password only in P0)` })
       continue
     }
-    if (proxyJump.length > 0 || (typeof proxyCommand === 'string' && proxyCommand !== '')) {
+    if (hasProxy) {
       skipped.push({ alias, reason: 'proxyJump/proxyCommand needs P1 (direct hosts only in P0)' })
       continue
     }
-    if (kind === 'key' && typeof auth.keyPath !== 'string') {
+    if (kind === 'key' && (typeof auth.keyPath !== 'string' || auth.keyPath.trim() === '')) {
       skipped.push({ alias, reason: 'key auth without keyPath' })
       continue
     }
-    if (kind === 'password' && typeof auth.password !== 'string') {
+    if (kind === 'password' && (typeof auth.password !== 'string' || auth.password === '')) {
       skipped.push({ alias, reason: 'password auth without stored password (enter it manually)' })
+      continue
+    }
+    const host = typeof raw.host === 'string' ? raw.host : ''
+    const user = typeof raw.user === 'string' ? raw.user : ''
+    const rawPort = raw.port
+    const port = rawPort === undefined ? 22 : validPort(rawPort as string | number)
+    if (host === '') {
+      skipped.push({ alias, reason: 'no host address — enter it manually after import' })
+      continue
+    }
+    if (user === '') {
+      skipped.push({ alias, reason: 'no login user — enter it manually after import' })
+      continue
+    }
+    if (port === undefined) {
+      skipped.push({ alias, reason: `invalid port '${String(rawPort)}' (expected 1-65535)` })
       continue
     }
     payloads.push({
       alias,
-      host: typeof raw.host === 'string' ? raw.host : '',
-      port: typeof raw.port === 'number' ? raw.port : 22,
-      user: typeof raw.user === 'string' ? raw.user : '',
+      host,
+      port,
+      user,
       auth: kind === 'key'
         ? {
             kind: 'key',

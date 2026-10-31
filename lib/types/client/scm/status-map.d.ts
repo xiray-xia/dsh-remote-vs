@@ -87,7 +87,9 @@ export declare function stagedStateOf(detail: GitStatusDetail, path: string): bo
  *     under "changes", so the record stays in the model);
  *   - unstaging a staged RENAME leaves HEAD's path deleted in the INDEX — the
  *     old path becomes `D ` and the new one untracked (measured, not assumed);
- *   - staging a conflict resolves it into the index.
+ *   - staging a conflict resolves it into the index (`D `/`A `/`M ` by conflict
+ *     pair, never a `U` half — see `localStageEntry`, it used to keep `U` and
+ *     the row then never left the conflict section);
  *
  * Pure, so the panel's instant feedback is assertable without a host: the
  * caller decides WHEN to apply it (and when to apply the inverse).

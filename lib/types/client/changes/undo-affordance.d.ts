@@ -40,6 +40,22 @@ export interface UndoAffordanceOptions {
     hoverTime?: number;
 }
 /**
+ * 只读编辑器里不提供撤销（断线降级 / 超上限截断）。
+ *
+ * 撤销按钮点下去是一次远端写（`git apply -R`），所以只读时它必须消失：否则屏幕上
+ * 「只读（不能保存）」与「可写的撤销」并存，且请求只会在远端失败。判据读编辑器自己的
+ * `readOnly` facet —— 与 `CodeEditor` 的 readOnly Compartment 是同一个事实，不需要再传
+ * 一个 prop（第二个真相源迟早会漂）。
+ *
+ * 导出是为了让门禁能钉住这个判定（渲染 CodeMirror 的 DOM 级证明成本高，而这里的
+ * 语义只有"只读 ⇒ 不提供"一句话）。
+ */
+export declare function undoBlockedByReadOnly(view: {
+    state: {
+        readOnly: boolean;
+    };
+}): boolean;
+/**
  * 装上「悬浮撤销」。
  *
  * 没有 `onUndo`（调用方没接这个动作）时返回空扩展：不是"装上了但点了没反应"，而是

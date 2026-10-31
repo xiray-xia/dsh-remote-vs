@@ -49,10 +49,30 @@ export interface HelperCacheEntry {
     protocol: number;
     nodeVersion: string;
 }
+/** Wire protocol this plugin's `dsh-ssh` generation speaks (see MAINTENANCE §2.7). */
+export declare const EXPECTED_HELPER_PROTOCOL = 2;
+/** Absolute path of one cached helper tarball; throws when it is not inside the cache. */
+export declare function helperTarballPath(helper: HelperCacheEntry, dir?: string): string;
 /** Scan the local helper cache; invalid/incomplete entries are skipped. */
 export declare function listCachedHelpers(dir?: string): HelperCacheEntry[];
-/** Pick a cached build for a platform (exact version pin or newest). */
-export declare function pickCached(platform: string, version?: string): HelperCacheEntry | undefined;
+/**
+ * SemVer-ish comparison for cached helper versions.
+ *
+ * A plain string compare picked `0.9.0` over `0.10.0` (multi-digit segments sort
+ * wrong: `9` > `10`) and the pipeline then pushed an OLD helper as "ok". Numeric
+ * segments compare as numbers, everything else lexicographically; a shorter
+ * version loses to its own extension (`0.2` < `0.2.1`) and a numeric segment wins
+ * over a pre-release one (`0.2.1` > `0.2.1-alpha.2`).
+ */
+export declare function compareHelperVersions(left: string, right: string): number;
+/**
+ * Pick a cached build for a platform (exact version pin or newest).
+ *
+ * `expectedProtocol` (default: this plugin's wire protocol) is part of the
+ * choice: a cached build whose protocol does not match would install fine and
+ * then fail the runtime handshake, so it is not a candidate at all.
+ */
+export declare function pickCached(platform: string, version?: string, expectedProtocol?: number): HelperCacheEntry | undefined;
 /** Honest availability of the helper channels. */
 export declare function helperAvailability(): HelperAvailability[];
 export declare function isHelperAvailable(kind: HelperKind): boolean;
@@ -92,3 +112,25 @@ export interface PushOptions {
  * fallback) -> compare -> skip or push -> write back.
  */
 export declare function pushPipeline(pool: RemotePool, store: RemoteStore, alias: string, opts?: PushOptions): Promise<PushReport>;
+/** Paths of one helper install attempt (absolute, probe-derived + whitelisted version). */
+export interface HelperInstallPaths {
+    root: string;
+    verDir: string;
+    tmpFile: string;
+}
+/**
+ * Remote shell steps installing one cached helper.
+ *
+ * Invariant: the currently installed version is never deleted before the new one
+ * is fully extracted — the old dir is renamed to `.old` and removed only after
+ * the swap, and a crash between "old moved away" and "new moved in" is repaired
+ * by the recovery step (restore `.old` when the live dir is missing). Every path
+ * goes through `shRoot`; the tarball name embedded in the sha256 line is quoted
+ * too (the caller's version already passed `HELPER_VERSION_RE`, so it cannot
+ * break out of the shell any more).
+ *
+ * Pure string work (no fs/pool) so a gate can pin the ORDER without a remote.
+ */
+export declare function helperInstallSteps(helper: HelperCacheEntry, paths: HelperInstallPaths): string[];
+/** One POSIX shell line: steps joined so any failure stops the sequence. */
+export declare function helperInstallScript(helper: HelperCacheEntry, paths: HelperInstallPaths): string;

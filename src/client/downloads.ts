@@ -12,7 +12,7 @@ import { api } from './api.ts'
 import { saveRemoteDir, saveRemoteFile, saveRemoteMany, type DownloadOutcome } from './download.ts'
 
 /** One download's lifecycle state. */
-export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled'
+export type DownloadStatus = 'running' | 'done' | 'failed' | 'cancelled' | 'handedOff'
 
 /** One task as the dock renders it. */
 export interface DownloadTask {
@@ -101,10 +101,17 @@ const launch = (id: string, controller: AbortController, run: (options: RunnerOp
           })
         },
       })
+      if (outcome === 'handedOff') {
+        // The browser owns this transfer now: no bytes have landed through the
+        // runner and no failure can be observed here. Reporting it as "done"
+        // was the defect — the row says the browser saves it, not that it saved.
+        patch(id, { status: 'handedOff', finishedAt: Date.now(), via: 'browserDefault' })
+        return
+      }
       patch(id, {
         status: 'done',
         finishedAt: Date.now(),
-        via: outcome === 'downloaded' ? 'browserDefault' : 'picker',
+        via: outcome === 'saved-browser' ? 'browserDefault' : 'picker',
       })
     } catch (error) {
       const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')

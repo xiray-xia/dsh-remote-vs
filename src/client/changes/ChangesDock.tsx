@@ -35,6 +35,7 @@ import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
 import { setUndoContext } from './undo-context.ts'
+import { forgetChangeOrigin, publishableUndoOrigin, rememberChangeOrigin } from './undo-target.ts'
 import { FileIcon } from '../vsc/kit.tsx'
 import './changes.css'
 
@@ -149,14 +150,29 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     }
   }, [load])
 
-  // Keep the revert affordance pointed at the workspace this panel lists. It is
-  // written on every summary so a rebound workspace cannot leave a stale root
-  // behind, and cleared on unmount so an affordance in another session's editor
-  // can never act on this one.
+  /**
+   * Publish the revert coordinates for the tab the user is LOOKING AT.
+   *
+   * The marks belong to one tab and one binding; the revert is the only user
+   * action that writes to the remote, so the slot must never be "whatever this
+   * panel last saw". `publishableUndoOrigin` re-checks the marks' session against
+   * this panel's session, the binding identity (alias alone is not one: two
+   * bindings can share a host alias) and the path against the recorded ledger
+   * root, and answers `undefined` when anything fails — the store's undo path
+   * then refuses instead of guessing.
+   *
+   * Runs on every store snapshot (tabs included) and on active-tab changes, so a
+   * tab switch republishes before a click can reach the button.
+   */
   useEffect(() => {
-    if (sessionId === undefined || summary === null || summary.root === '') return
-    setUndoContext({ sessionId, alias: summary.alias, root: summary.root })
-  }, [sessionId, summary])
+    const tab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
+    setUndoContext(publishableUndoOrigin({
+      tabId: explorer.activeTabId,
+      tabPath: tab?.fullPath,
+      panelSessionId: sessionId,
+      bindings: remoteOpenBindings().bindings,
+    }))
+  }, [sessionId, explorer.activeTabId, explorer.tabs, explorer.workspaces])
 
   useEffect(() => () => { setUndoContext(undefined) }, [])
 
@@ -251,7 +267,18 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       openRemoteFileInBinding(binding.id, file.path, set.hunks[0] === undefined ? {} : { line: set.hunks[0] })
       // The tab id is deterministic (store.openFile builds it the same way), so
       // the marks can be attached without waiting for the file read to settle.
-      applyChangeSet(`file:${binding.alias}:${file.path}`, set)
+      const tabId = `file:${binding.alias}:${file.path}`
+      applyChangeSet(tabId, set)
+      // Remember WHERE these marks came from, once: the revert coordinates are
+      // read back from here (`publishableUndoOrigin`) instead of from the last
+      // summary this panel happened to render. No real hunk = no revert target,
+      // so a binary/failed diff forgets the previous provenance instead of
+      // leaving an older one around.
+      if (diff !== null && diff.kind === 'text' && diff.hunks.length > 0) {
+        rememberChangeOrigin(tabId, { sessionId, bindingId: binding.id, alias: binding.alias, root: summary.root })
+      } else {
+        forgetChangeOrigin(tabId)
+      }
     } catch (problem) {
       if (alive.current) explorer.info(`${t('changes.diffFailed')}: ${problem instanceof Error ? problem.message : String(problem)}`)
     } finally {

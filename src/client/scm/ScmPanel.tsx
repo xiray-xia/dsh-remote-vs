@@ -32,6 +32,7 @@ import { ExecPanel, type ExecPanelState } from './ExecPanel.tsx'
 import type { ChangeEntry } from './status-map.ts'
 import { rowVerb } from './status-map.ts'
 import { ReadQueue } from './read-queue.ts'
+import { setVisibleStageRepository } from './stage-queue.ts'
 import { readScmExtras, repoCacheKey, writeScmExtras, type ScmExtrasSnapshot } from './panel-cache.ts'
 import { RepoPicker } from './RepoPicker.tsx'
 import {
@@ -144,6 +145,24 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const menu = useContextMenu()
 
   const fold = (id: string): void => setFolded(prev => ({ ...prev, [id]: prev[id] !== true }))
+
+  /**
+   * Tell the stage coordinator which repository this panel is showing.
+   *
+   * A stage click applies locally at once and is verified ~250 ms later (plus the
+   * write's own round trip). If the user switches repository inside that window,
+   * the correction names paths relative to the OLD root; `stage-queue.ts` drops
+   * such results instead of applying them to the wrong rows — but it can only do
+   * that if it knows what is on screen now, which is what this reports.
+   *
+   * Declared here (not in the coordinator) because the panel is the only surface
+   * that knows the visible repository; the store keeps its own selection state
+   * and must not grow a second source of truth for this guard.
+   */
+  useEffect(() => {
+    setVisibleStageRepository(repoRoot === undefined ? undefined : { alias, root: repoRoot })
+    return () => { setVisibleStageRepository(undefined) }
+  }, [alias, repoRoot])
 
   useEffect(() => {
     try {

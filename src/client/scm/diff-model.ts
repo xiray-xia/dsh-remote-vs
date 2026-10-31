@@ -28,46 +28,42 @@ function splitLines(text: string): string[] {
   return lines
 }
 
-/** Parse the unified diff body into old/new line pairs (git's pairing). */
+/**
+ * Parse the unified diff body into old/new line pairs (git's pairing).
+ *
+ * CONTEXT IS THE WHOLE POINT: a deleted SQL/Lua/Haskell comment line (`-- note`)
+ * arrives as `--- note`, and an inserted C line `++ i;` arrives as `+++ i;` —
+ * so a flat "skip anything starting with `--- ` / `+++ `" rule silently eats
+ * real content lines. That dropped the line from the pairing, stopped the line
+ * counters from advancing, and every row after it shifted: the deleted comment
+ * was painted as a MODIFIED line, the rest of the file was flagged changed and
+ * the `+/−` totals were wrong (measured on the shipped module before this fix).
+ *
+ * So the scan is not flat: it walks the hunk structure `parseUnifiedDiff`
+ * already produced (`git-ops.ts`, the same context-aware parser the commit pane
+ * trusts), where a line is content exactly when a hunk is open. File-block
+ * headers can only appear BEFORE a hunk starts, which is why the ambiguity
+ * disappears instead of being guessed at.
+ */
 export function parsePairs(diff: string): Pair[] {
   const pairs: Pair[] = []
-  let oldLine = 0
-  let newLine = 0
-  for (const line of diff.split('\n')) {
-    if (
-      line.startsWith('diff ')
-      || line.startsWith('index ')
-      || line.startsWith('--- ')
-      || line.startsWith('+++ ')
-      || line.startsWith('new file mode')
-      || line.startsWith('deleted file mode')
-      || line.startsWith('old mode')
-      || line.startsWith('new mode')
-      || line.startsWith('similarity index')
-      || line.startsWith('rename from')
-      || line.startsWith('rename to')
-      || line.startsWith('copy from')
-      || line.startsWith('copy to')
-      || line.startsWith('\\')
-    ) continue
-    if (line.startsWith('@@')) {
-      const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-      if (match !== null) {
-        oldLine = Number(match[1])
-        newLine = Number(match[2])
+  for (const file of parseUnifiedDiff(diff)) {
+    for (const hunk of file.hunks) {
+      let oldLine = hunk.oldStart
+      let newLine = hunk.newStart
+      for (const line of hunk.lines) {
+        // `\ No newline at end of file` carries no line of its own.
+        if (line.startsWith('\\')) continue
+        if (line.startsWith('+')) {
+          pairs.push({ old: '', new: line.slice(1), oldNum: null, newNum: newLine++ })
+          continue
+        }
+        if (line.startsWith('-')) {
+          pairs.push({ old: line.slice(1), new: '', oldNum: oldLine++, newNum: null })
+          continue
+        }
+        pairs.push({ old: line.slice(1), new: line.slice(1), oldNum: oldLine++, newNum: newLine++ })
       }
-      continue
-    }
-    if (line.startsWith('+')) {
-      pairs.push({ old: '', new: line.slice(1), oldNum: null, newNum: newLine++ })
-      continue
-    }
-    if (line.startsWith('-')) {
-      pairs.push({ old: line.slice(1), new: '', oldNum: oldLine++, newNum: null })
-      continue
-    }
-    if (line.startsWith(' ')) {
-      pairs.push({ old: line.slice(1), new: line.slice(1), oldNum: oldLine++, newNum: newLine++ })
     }
   }
   return pairs

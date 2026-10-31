@@ -23,6 +23,7 @@ import { aliasRoot } from '../paths.ts'
 import type { RemoteHostEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RpcConnection } from './helper-rpc.ts'
 import { SshProcRuntime } from './ssh-proc.ts'
+import { spillDirSweepCommand, spillSweepCommand } from './spill-retention.ts'
 import { legacyWorkspaceTitle, workspaceTitle } from '../workspace-title.ts'
 
 export type RoutingMode = 'off' | 'shadow' | 'enforce'
@@ -443,6 +444,29 @@ export class RemoteWorlds {
     const result = await this.deps.pool.exec(alias, `mkdir -p ${quoted} && chmod 700 ${quoted}`, { timeoutMs: 15000 })
     if (!result.success) {
       throw new Error(`remote mkdir failed: ${result.stderr || result.error || `exit ${result.exitCode}`}`)
+    }
+  }
+
+  /**
+   * TTL-sweep one host's spill root (retention, best effort).
+   *
+   * Deliberately narrow: the command is built by `spill-retention.ts` (absolute
+   * path under that host's `$HOME`, `session-*` children only, depth 1), so this
+   * method cannot be talked into deleting an arbitrary directory. Callers treat a
+   * rejection as a warning, never as an operation failure.
+   */
+  async sweepSpillRoot(alias: string, home: string, ttlDays: number): Promise<void> {
+    const result = await this.deps.pool.exec(alias, spillSweepCommand(home, ttlDays), { timeoutMs: 20000 })
+    if (!result.success) {
+      throw new Error(`remote spill sweep failed: ${result.stderr || result.error || `exit ${result.exitCode}`}`)
+    }
+  }
+
+  /** Remove one session's spill directory when it is older than the TTL (best effort). */
+  async sweepSpillDir(alias: string, dir: string, ttlDays: number): Promise<void> {
+    const result = await this.deps.pool.exec(alias, spillDirSweepCommand(dir, ttlDays), { timeoutMs: 20000 })
+    if (!result.success) {
+      throw new Error(`remote spill dir sweep failed: ${result.stderr || result.error || `exit ${result.exitCode}`}`)
     }
   }
 

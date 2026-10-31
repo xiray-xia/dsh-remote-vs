@@ -10,7 +10,7 @@
  * previous explorer, and `insertRemoteReference` still writes into the
  * on-screen session's composer draft.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
 import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
@@ -88,6 +88,115 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
 
 function dirKey(alias: string, dir: string): string {
   return `${alias}:${dir}`
+}
+
+/** True when `path` is `prefix` itself or a descendant of it. */
+export function pathUnder(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`)
+}
+
+/**
+ * Where a copy/cut/move of `sourcePath` into `intoDir` lands.
+ *
+ * `fs-ops`' commands copy/move the entry KEEPING its basename, so the new path
+ * is `intoDir/<basename>`; the explorer needs it to re-key its path indexes.
+ */
+export function destinationOfMove(intoDir: string, sourcePath: string): string {
+  const trimmed = sourcePath.replace(/\/+$/, '')
+  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1)
+  return `${intoDir.replace(/\/+$/, '')}/${base}`
+}
+
+/**
+ * Drop every path that is (or lives under) a removed path from a path-keyed set.
+ *
+ * `expanded` / `selected` / `anchor` are absolute-path indexes. Renaming re-keys
+ * them (see `rekeyPaths`), but deleting or moving a subtree used to leave the
+ * old paths behind: the root refresh effect then re-listed directories that no
+ * longer exist on every revision bump (one failed SFTP request and one error
+ * toast each), and `trimListings` protected those dead keys from eviction.
+ */
+export function withoutPaths(set: Set<string>, removed: readonly string[]): Set<string> {
+  if (removed.length === 0) return set
+  const next = new Set<string>()
+  let changed = false
+  for (const path of set) {
+    if (removed.some(root => pathUnder(path, root))) {
+      changed = true
+      continue
+    }
+    next.add(path)
+  }
+  return changed ? next : set
+}
+
+/** Re-key a path-keyed set after a rename/move of `from` to `to`. */
+export function rekeyPaths(set: Set<string>, from: string, to: string): Set<string> {
+  const next = new Set<string>()
+  let changed = false
+  for (const path of set) {
+    if (pathUnder(path, from)) {
+      next.add(`${to}${path.slice(from.length)}`)
+      changed = true
+    } else {
+      next.add(path)
+    }
+  }
+  return changed ? next : set
+}
+
+/**
+ * Drop cached listings for removed paths.
+ *
+ * Same reason as `withoutPaths`, for the listing cache: a dead key would keep a
+ * whole directory's rows in memory forever (plus a requested-but-failing list
+ * on every refresh), while `trimListings` still counts it against the 50-entry
+ * budget of LIVE directories.
+ */
+export function withoutListingPaths(
+  listings: Record<string, RemoteFileEntry[]>,
+  alias: string,
+  removed: readonly string[],
+): Record<string, RemoteFileEntry[]> {
+  if (removed.length === 0) return listings
+  const prefix = dirKey(alias, '')
+  const next: Record<string, RemoteFileEntry[]> = {}
+  let changed = false
+  for (const [key, rows] of Object.entries(listings)) {
+    const path = key.startsWith(prefix) ? key.slice(prefix.length) : key
+    if (removed.some(root => pathUnder(path, root))) {
+      changed = true
+      continue
+    }
+    next[key] = rows
+  }
+  return changed ? next : listings
+}
+
+/** Re-key cached listings after a rename/move (memo keys are `alias:path`). */
+export function rekeyListings(
+  listings: Record<string, RemoteFileEntry[]>,
+  alias: string,
+  from: string,
+  to: string,
+): Record<string, RemoteFileEntry[]> {
+  const prefix = dirKey(alias, '')
+  const next: Record<string, RemoteFileEntry[]> = {}
+  let changed = false
+  for (const [key, rows] of Object.entries(listings)) {
+    if (!key.startsWith(prefix)) {
+      next[key] = rows
+      continue
+    }
+    const path = key.slice(prefix.length)
+    if (pathUnder(path, from)) {
+      next[dirKey(alias, `${to}${path.slice(from.length)}`)] = rows
+      changed = true
+    } else {
+      next[key] = rows
+    }
+  }
+  return changed ? next : listings
 }
 
 /**
@@ -199,6 +308,198 @@ function trimListings(
   }
   return next ?? prev
 }
+
+/**
+ * One rendered line of the flattened tree.
+ *
+ * The tree is rendered as a FLAT pre-order list (not nested components): the
+ * rows of a large directory then each own one memoized component whose props are
+ * primitives, so a selection change, an upload progress tick or an unrelated
+ * store publish only re-renders the rows that actually changed. Nesting the
+ * recursion in JSX made every row a child of its parent row, which defeated
+ * `memo` (the children element was new on every render).
+ */
+export type ExplorerRow =
+  | { kind: 'entry'; entry: RemoteFileEntry; depth: number }
+  | { kind: 'create'; dir: string; createKind: 'file' | 'folder'; depth: number }
+  /** An expanded directory whose listing is not available yet (loading/offline). */
+  | { kind: 'pending'; dir: string; depth: number; reason: 'loading' | 'offline' }
+
+/**
+ * What double-clicking a row should open.
+ *
+ * `undefined` for a directory: `store.openFile()` has no type guard of its own,
+ * so handing it a directory path produced an editor tab whose Host read answers
+ * `not a file: … is a directory` — and the click also switched the surface to
+ * the editor. The guard lives here (and is applied in the row action) so every
+ * caller inherits it; the pre-refactor renderer had the same check inline.
+ */
+export function rowOpenTarget(entry: RemoteFileEntry): string | undefined {
+  return entry.isDir ? undefined : entry.path
+}
+
+/**
+ * Flatten the loaded part of the tree into pre-order rows.
+ *
+ * Pure: the gate drives it with a synthetic `rowsOf`/`isExpanded` pair. The
+ * depth of a directory's entries is its own depth + 1 (same indentation the
+ * recursive renderer used), and the inline "new file/folder" row is emitted
+ * before that directory's children.
+ *
+ * `placeholderOf` makes an expanded directory with no listing yet emit a
+ * `pending` row. Before the flat rewrite the recursive renderer did this for
+ * EVERY directory; after it only the root had a placeholder, so expanding a
+ * cold (or offline) directory showed nothing until the listing landed.
+ */
+export function buildVisibleRows(input: {
+  root: string
+  rowsOf: (dir: string) => RemoteFileEntry[] | undefined
+  isExpanded: (path: string) => boolean
+  creating?: { dir: string; kind: 'file' | 'folder' }
+  placeholderOf?: (dir: string) => 'loading' | 'offline' | undefined
+}): ExplorerRow[] {
+  if (input.root === '') return []
+  const out: ExplorerRow[] = []
+  const walk = (dir: string, depth: number): void => {
+    const creating = input.creating
+    if (creating?.dir === dir) out.push({ kind: 'create', dir, createKind: creating.kind, depth })
+    for (const entry of input.rowsOf(dir) ?? []) {
+      out.push({ kind: 'entry', entry, depth })
+      if (!entry.isDir || !input.isExpanded(entry.path)) continue
+      const children = input.rowsOf(entry.path)
+      if (children === undefined) {
+        const reason = input.placeholderOf?.(entry.path)
+        if (reason !== undefined) out.push({ kind: 'pending', dir: entry.path, depth: depth + 1, reason })
+        continue
+      }
+      walk(entry.path, depth + 1)
+    }
+  }
+  walk(input.root, 0)
+  return out
+}
+
+/** Handlers one row needs, held in a ref so a memoized row never re-renders for them. */
+export interface ExplorerRowActions {
+  select: (entry: RemoteFileEntry, event: React.MouseEvent) => void
+  openFile: (entry: RemoteFileEntry) => void
+  hoverDir: (path: string | undefined) => void
+  openMenu: (event: React.MouseEvent, entry: RemoteFileEntry) => void
+  contextMenu: (event: React.MouseEvent, entry: RemoteFileEntry) => void
+  startDrag: (entry: RemoteFileEntry) => void
+  dragOver: (entry: RemoteFileEntry, event: React.DragEvent) => void
+  dragLeave: (entry: RemoteFileEntry) => void
+  dropOn: (entry: RemoteFileEntry, event: React.DragEvent) => void
+  commitRename: (entry: RemoteFileEntry, name: string) => void
+  cancelRename: () => void
+  reference: (entry: RemoteFileEntry) => void
+}
+
+interface ExplorerRowProps {
+  entry: RemoteFileEntry
+  depth: number
+  status: string | undefined
+  ignored: boolean
+  isSelected: boolean
+  isOpen: boolean
+  isCut: boolean
+  isDropTarget: boolean
+  isRenaming: boolean
+  chatEnabled: boolean
+  /** Precomputed so `t` (whose identity may change with a store publish) is not a prop. */
+  referenceTitle: string
+  symlinkTitle: string
+  actions: MutableRefObject<ExplorerRowActions>
+}
+
+/**
+ * One tree row.
+ *
+ * Memoized on primitive props: the parent re-renders on every store publish and
+ * on each upload-progress tick, and without this every one of those re-rendered
+ * the whole expanded tree (a 20 000-entry directory means 20 000 rows).
+ */
+export const ExplorerRowView = memo(function ExplorerRowView(props: ExplorerRowProps): ReactNode {
+  const { entry, depth, status, ignored, isSelected, isOpen, isCut, isDropTarget, isRenaming, chatEnabled, actions } = props
+  const { openMenu } = actions.current
+  return (
+    <div
+      className={[
+        'rvs-node',
+        isSelected ? 'selected' : '',
+        isCut ? 'cut' : '',
+        isDropTarget ? 'drop-target' : '',
+      ].filter(Boolean).join(' ')}
+      style={{ paddingLeft: 8 + depth * 14 }}
+      title={entry.path}
+      // Read by the document-level capture drop listeners, which live
+      // outside React's tree and cannot see component state.
+      data-rvs-path={entry.path}
+      data-rvs-dir={entry.isDir ? '1' : '0'}
+      draggable
+      onClick={(e) => actions.current.select(entry, e)}
+      onDoubleClick={() => actions.current.openFile(entry)}
+      // Hover-intent prefetch: a directory the pointer rests on gets its
+      // listing warmed, so the click that follows paints instead of
+      // waiting one round trip. Leave/collapse cancels the pending one.
+      onMouseEnter={() => { if (entry.isDir) actions.current.hoverDir(entry.path) }}
+      onMouseLeave={() => actions.current.hoverDir(undefined)}
+      // Right-click opens on POINTERDOWN — the first event of the
+      // gesture — so the menu is already mounted before any later
+      // event of the same click (a platform may replay mousedown, and
+      // a background git refresh may scroll) can close it. The
+      // contextmenu fallback covers surfaces that only send that
+      // (touch long-press).
+      onPointerDown={(e) => { if (e.button === 2) openMenu(e, entry) }}
+      onContextMenu={(e) => { actions.current.contextMenu(e, entry) }}
+      onDragStart={(e) => {
+        actions.current.startDrag(entry)
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', entry.path)
+      }}
+      onDragOver={(e) => { actions.current.dragOver(entry, e) }}
+      onDragLeave={() => { actions.current.dragLeave(entry) }}
+      onDrop={(e) => { actions.current.dropOn(entry, e) }}
+    >
+      <span className="rvs-node-icon">
+        {entry.isDir
+          ? <FolderIcon path={entry.path} open={isOpen} size={15} />
+          : <FileIcon path={entry.path} size={15} />}
+      </span>
+      {isRenaming
+        ? (
+          <RenameInput
+            initial={entry.name}
+            onCommit={(value) => { actions.current.commitRename(entry, value) }}
+            onCancel={() => actions.current.cancelRename()}
+          />
+        )
+        : (
+          <span className={`rvs-node-name ${status !== undefined ? `rvs-git-${gitStatusClass(status)}` : ''}`} style={ignored && status === undefined ? { opacity: .5 } : undefined}>
+            {entry.name}
+          </span>
+        )}
+      {status !== undefined && (
+        <span className={`rvs-git-letter rvs-letter-${gitStatusClass(status)}`}>{gitLetter(status)}</span>
+      )}
+      {entry.isSymlink && <span className="rvs-hit-dir" title={props.symlinkTitle}>↩</span>}
+      <span className="rvs-node-actions">
+        <button
+          type="button"
+          className="rvs-hbtn"
+          title={props.referenceTitle}
+          disabled={!chatEnabled}
+          onClick={(e) => {
+            e.stopPropagation()
+            actions.current.reference(entry)
+          }}
+        >
+          @
+        </button>
+      </span>
+    </div>
+  )
+})
 
 export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () => void; visible: boolean }): ReactNode {
   const store = useExplorer()
@@ -474,14 +775,31 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     }
   }, [])
 
-  const rowsOf = useCallback((dir: string): RemoteFileEntry[] | undefined => {
-    const rows = listings[dirKey(alias, dir)]
-    if (rows === undefined) return undefined
-    const visible = props.showHidden ? rows : rows.filter(entry => !entry.name.startsWith('.'))
-    return [...visible].sort((a, b) => {
-      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-      return a.name.localeCompare(b.name)
-    })
+  /**
+   * One directory's visible, sorted rows, cached for the life of one
+   * `listings`/`showHidden`/`alias` combination.
+   *
+   * Sorting/filtering on every request was invisible for one directory and
+   * wasteful for a deep tree (the flattened list asks for every expanded
+   * directory on each rebuild); the cache also gives `buildVisibleRows` a stable
+   * row-array identity, which is what lets the memoized rows be reused.
+   */
+  const rowsOf = useMemo(() => {
+    const cache = new Map<string, RemoteFileEntry[] | undefined>()
+    return (dir: string): RemoteFileEntry[] | undefined => {
+      if (cache.has(dir)) return cache.get(dir)
+      const rows = listings[dirKey(alias, dir)]
+      let sorted: RemoteFileEntry[] | undefined
+      if (rows !== undefined) {
+        const visible = props.showHidden ? rows : rows.filter(entry => !entry.name.startsWith('.'))
+        sorted = [...visible].sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+      }
+      cache.set(dir, sorted)
+      return sorted
+    }
   }, [listings, alias, props.showHidden])
 
   /** Flatten the loaded part of the tree in pre-order (shift-select spans it). */
@@ -587,6 +905,44 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     for (const dir of dirs) await loadDir(dir, true)
   }, [loadDir])
 
+  /**
+   * Drop one removed subtree from every path-keyed index.
+   *
+   * Wired into delete (all successful removals) and into cut-paste/drag-move
+   * (the sources left their old paths). Without it the removed directories stay
+   * in `expanded`, so the revision-bump refresh re-lists them over SFTP on every
+   * later write (business error → toast each time), and their listing keys are
+   * kept alive by `trimListings`' open-directory exemption forever.
+   */
+  const forgetPaths = useCallback((removed: readonly string[]): void => {
+    if (removed.length === 0) return
+    const gone = (path: string): boolean => removed.some(root => pathUnder(path, root))
+    setExpanded(prev => withoutPaths(prev, removed))
+    setSelected(prev => withoutPaths(prev, removed))
+    setAnchor(prev => (prev !== undefined && gone(prev) ? undefined : prev))
+    setListings(prev => withoutListingPaths(prev, alias, removed))
+    setRenaming(prev => (prev !== undefined && gone(prev) ? undefined : prev))
+    setCreating(prev => (prev !== undefined && gone(prev.dir) ? undefined : prev))
+    setDropTarget(prev => (prev !== undefined && gone(prev) ? undefined : prev))
+    setClipboard(prev => {
+      if (prev === undefined) return prev
+      const paths = prev.paths.filter(path => !gone(path))
+      if (paths.length === prev.paths.length) return prev
+      return paths.length === 0 ? undefined : { ...prev, paths }
+    })
+  }, [alias])
+
+  /** Re-key every path-keyed index after a rename/move of `from` to `to`. */
+  const movePathIndex = useCallback((from: string, to: string): void => {
+    const moved = (path: string): string => (pathUnder(path, from) ? `${to}${path.slice(from.length)}` : path)
+    setExpanded(prev => rekeyPaths(prev, from, to))
+    setSelected(prev => rekeyPaths(prev, from, to))
+    setAnchor(prev => (prev === undefined ? undefined : moved(prev)))
+    setListings(prev => rekeyListings(prev, alias, from, to))
+    setRenaming(prev => (prev === undefined ? undefined : moved(prev)))
+    setCreating(prev => (prev === undefined ? undefined : { ...prev, dir: moved(prev.dir) }))
+  }, [alias])
+
   const doCreate = async (name: string): Promise<void> => {
     const state = creating
     setCreating(undefined)
@@ -631,24 +987,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       // directory used to collapse (the new path was never in `expanded`), keep
       // its selection pointing at a path that no longer exists, and strand a
       // stale listing under the old key forever.
-      const from = entry.path
-      const movePath = (path: string): string =>
-        path === from || path.startsWith(`${from}/`) ? `${target}${path.slice(from.length)}` : path
-      setExpanded(prev => new Set([...prev].map(movePath)))
-      setSelected(prev => new Set([...prev].map(movePath)))
-      setAnchor(prev => (prev === undefined ? undefined : movePath(prev)))
-      setListings(prev => {
-        const next: Record<string, RemoteFileEntry[]> = {}
-        for (const [key, value] of Object.entries(prev)) {
-          const prefix = dirKey(alias, '')
-          if (!key.startsWith(prefix)) {
-            next[key] = value
-            continue
-          }
-          next[dirKey(alias, movePath(key.slice(prefix.length)))] = value
-        }
-        return next
-      })
+      movePathIndex(entry.path, target)
       await refreshDirs([baseDirFor()])
       await store.afterWrite()
       toast(`${t('files.renamed')} ${target}`)
@@ -672,15 +1011,23 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (!ok) return
     setBusy(true)
     const failed: string[] = []
+    /** Entries that really disappeared on the remote — their subtree is pruned. */
+    const removed: string[] = []
     for (const entry of entries) {
       try {
         await api.fileOp.rm(alias, entry.path, entry.isDir)
+        removed.push(entry.path)
       } catch (error) {
         failed.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     setBusy(false)
-    setSelected(new Set())
+    // Drop the removed subtrees from `expanded`/`selected`/`listings` BEFORE any
+    // refresh: `store.afterWrite()` bumps the revision, and the root effect
+    // re-lists every expanded directory — the deleted ones would each answer
+    // with a business error and a toast, on every write for the rest of the
+    // session.
+    forgetPaths(removed)
     await refreshDirs([...new Set(entries.map(entry => entry.path.split('/').slice(0, -1).join('/') || '/'))])
     await store.afterWrite()
     if (failed.length > 0) toast(failed.join('\n'), true)
@@ -692,6 +1039,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (clip === undefined || clip.paths.length === 0) return
     setBusy(true)
     const failed: string[] = []
+    /** Cut sources that really moved: their path-indexed state follows them. */
+    const moved: Array<{ from: string; to: string }> = []
     for (const source of clip.paths) {
       if (source === intoDir || intoDir.startsWith(`${source}/`)) {
         failed.push(`${source}: ${t('files.pasteIntoSelf')}`)
@@ -705,11 +1054,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       try {
         const result = await api.exec(alias, command, 60_000)
         if (!result.success) failed.push(`${baseName(source)}: ${result.stderr.trim() || t('files.pasteFailed')}`)
+        else if (clip.mode === 'cut') moved.push({ from: source, to: destinationOfMove(intoDir, source) })
       } catch (error) {
         failed.push(`${baseName(source)}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     setBusy(false)
+    // A moved source no longer exists at its old path: re-key (rather than drop)
+    // its expanded/selected/listing state, exactly like a rename.
+    for (const source of moved) movePathIndex(source.from, source.to)
     if (clip.mode === 'cut') setClipboard(undefined)
     await refreshDirs([intoDir, baseDirFor()])
     await store.afterWrite()
@@ -725,6 +1078,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (sources.length === 0) return
     setBusy(true)
     const failed: string[] = []
+    const moved: Array<{ from: string; to: string }> = []
     for (const source of sources) {
       if (source === intoDir || intoDir.startsWith(`${source}/`)) {
         failed.push(`${baseName(source)}: ${t('files.moveIntoSelf')}`)
@@ -734,11 +1088,13 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       try {
         const result = await api.exec(alias, moveToCommand(source, intoDir), 60_000)
         if (!result.success) failed.push(`${baseName(source)}: ${result.stderr.trim() || t('files.pasteFailed')}`)
+        else moved.push({ from: source, to: destinationOfMove(intoDir, source) })
       } catch (error) {
         failed.push(`${baseName(source)}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     setBusy(false)
+    for (const source of moved) movePathIndex(source.from, source.to)
     await refreshDirs([intoDir, baseDirFor()])
     await store.afterWrite()
     if (failed.length > 0) toast(failed.join('\n'), true)
@@ -1256,6 +1612,100 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     return entry.isDir ? marks.ignoredDirs.has(rel) : marks.ignored.has(rel)
   }, [repoRoot, marks])
 
+  /** The right-click menu's `contextmenu` fallback (touch long-press only). */
+  const onRowContextMenu = (e: React.MouseEvent, entry: RemoteFileEntry): void => {
+    e.preventDefault()
+    if (menu.menu === undefined) openMenu(e, entry)
+  }
+
+  /**
+   * Live row handlers, read through a ref.
+   *
+   * The rows are `memo`ized on primitive props; handing them a new callback
+   * object every render would invalidate every row on every parent render,
+   * which is exactly the cost this file is trying to avoid.
+   */
+  const rowActions = useRef<ExplorerRowActions>({
+    select: () => undefined,
+    openFile: () => undefined,
+    hoverDir: () => undefined,
+    openMenu: () => undefined,
+    contextMenu: () => undefined,
+    startDrag: () => undefined,
+    dragOver: () => undefined,
+    dragLeave: () => undefined,
+    dropOn: () => undefined,
+    commitRename: () => undefined,
+    cancelRename: () => undefined,
+    reference: () => undefined,
+  })
+  rowActions.current = {
+    select: selectRow,
+    openFile: (entry) => {
+      // The row passes the WHOLE entry: a directory must not reach
+      // `store.openFile` (it has no type guard, so the Host would answer
+      // "not a file" and the editor surface would be switched for nothing).
+      const target = rowOpenTarget(entry)
+      if (target !== undefined) store.openFile(target)
+    },
+    hoverDir,
+    openMenu,
+    contextMenu: onRowContextMenu,
+    startDrag: (entry) => {
+      dragPaths.current = selected.has(entry.path) ? [...selected] : [entry.path]
+    },
+    dragOver: (entry, e) => {
+      // An OS file drag targets this row's DIRECTORY: a drop on a file row
+      // means "put it beside that file" (what the user means when they aim at a
+      // file in the list).
+      if (isFileDrag(e.dataTransfer)) {
+        e.preventDefault()
+        e.stopPropagation()
+        setDropTarget(entry.path)
+        setDropHint(entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/'))
+        return
+      }
+      if (!entry.isDir) return
+      const source = dragPaths.current[0]
+      if (source === undefined) return
+      if (entry.path === source || entry.path.startsWith(`${source}/`)) return
+      e.preventDefault()
+      setDropTarget(entry.path)
+    },
+    dragLeave: (entry) => { setDropTarget(current => (current === entry.path ? undefined : current)) },
+    dropOn: (entry, e) => {
+      if (isFileDrag(e.dataTransfer)) {
+        const into = entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/')
+        handleDrop(into, e)
+        return
+      }
+      if (entry.isDir) void doDrop(entry.path, e)
+    },
+    commitRename: (entry, name) => { void doRename(entry, name) },
+    cancelRename: () => setRenaming(undefined),
+    reference: (entry) => {
+      if (chatTarget.sessionId === undefined) return
+      insertRemoteReference(ctx, chatTarget.sessionId, repoRoot ?? root, entry.path, entry.isDir)
+    },
+  }
+
+  /**
+   * The loaded tree as a flat pre-order list.
+   *
+   * Rebuilt only when the shape of the tree can have changed (a listing, an
+   * expansion, the create row, a binding) — not on selection, upload progress or
+   * a store publish. The memoized rows then skip the re-render themselves.
+   */
+  const visibleRows = useMemo(() => buildVisibleRows({
+    root,
+    rowsOf,
+    isExpanded: path => expanded.has(path),
+    ...(creating === undefined ? {} : { creating }),
+    // A cold/or offline directory that was just expanded must say so IN PLACE
+    // (the root's own placeholder below only covers the workspace root).
+    placeholderOf: (dir) => (offline ? 'offline' : loading.has(dirKey(alias, dir)) ? 'loading' : undefined),
+  }), [root, rowsOf, expanded, creating, offline, loading, alias])
+
   const renderDir = (dir: string, depth: number): ReactNode => {
     const rows = rowsOf(dir)
     const key = dirKey(alias, dir)
@@ -1268,132 +1718,54 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     if (rows === undefined && loading.has(key)) {
       return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('common.loading')}</div>
     }
+    // Per-render constants, not per-row ones: the strings and the clipboard set
+    // are identical for every row, and computing them inside the map is real
+    // work when the tree has tens of thousands of rows.
+    const referenceTitle = chatEnabled ? t('files.referenceFile') : t('files.refDisabled')
+    const symlinkTitle = t('files.symlink')
+    const cutPaths = clipboard !== undefined && clipboard.mode === 'cut' ? new Set(clipboard.paths) : undefined
     return (
       <>
-        {creating?.dir === dir && (
-          <CreateRow
-            depth={depth}
-            kind={creating.kind}
-            onCommit={(value) => { void doCreate(value) }}
-            onCancel={() => setCreating(undefined)}
-            fileIcon={<FileIcon path="name.ts" size={15} />}
-            folderIcon={<FolderIcon path="name" open={false} size={15} />}
-            t={t}
-          />
-        )}
-        {(rows ?? []).map((entry) => {
-          const isOpen = expanded.has(entry.path)
-          const status = statusFor(entry)
-          const ignored = ignoredFor(entry)
-          const isSelected = selected.has(entry.path)
-          const clip = clipboard !== undefined && clipboard.mode === 'cut' && clipboard.paths.includes(entry.path)
-          return (
-            <div key={entry.path}>
-              <div
-                className={[
-                  'rvs-node',
-                  isSelected ? 'selected' : '',
-                  clip ? 'cut' : '',
-                  dropTarget === entry.path ? 'drop-target' : '',
-                ].filter(Boolean).join(' ')}
-                style={{ paddingLeft: 8 + depth * 14 }}
-                title={entry.path}
-                // Read by the document-level capture drop listeners, which live
-                // outside React's tree and cannot see component state.
-                data-rvs-path={entry.path}
-                data-rvs-dir={entry.isDir ? '1' : '0'}
-                draggable
-                onClick={(e) => selectRow(entry, e)}
-                onDoubleClick={() => { if (!entry.isDir) store.openFile(entry.path) }}
-                // Hover-intent prefetch: a directory the pointer rests on gets its
-                // listing warmed, so the click that follows paints instead of
-                // waiting one round trip. Leave/collapse cancels the pending one.
-                onMouseEnter={() => { if (entry.isDir) hoverDir(entry.path) }}
-                onMouseLeave={() => hoverDir(undefined)}
-                // Right-click opens on POINTERDOWN — the first event of the
-                // gesture — so the menu is already mounted before any later
-                // event of the same click (a platform may replay mousedown, and
-                // a background git refresh may scroll) can close it. The
-                // contextmenu fallback covers surfaces that only send that
-                // (touch long-press).
-                onPointerDown={(e) => { if (e.button === 2) openMenu(e, entry) }}
-                onContextMenu={(e) => {
-                  e.preventDefault()
-                  if (menu.menu === undefined) openMenu(e, entry)
-                }}
-                onDragStart={(e) => {
-                  dragPaths.current = selected.has(entry.path) ? [...selected] : [entry.path]
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', entry.path)
-                }}
-                onDragOver={(e) => {
-                  // An OS file drag targets this row's DIRECTORY: a drop on a
-                  // file row means "put it beside that file" (what the user
-                  // means when they aim at a file in the list).
-                  if (isFileDrag(e.dataTransfer)) {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    setDropTarget(entry.path)
-                    setDropHint(entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/'))
-                    return
-                  }
-                  if (!entry.isDir) return
-                  const source = dragPaths.current[0]
-                  if (source === undefined) return
-                  if (entry.path === source || entry.path.startsWith(`${source}/`)) return
-                  e.preventDefault()
-                  setDropTarget(entry.path)
-                }}
-                onDragLeave={() => { setDropTarget(current => (current === entry.path ? undefined : current)) }}
-                onDrop={(e) => {
-                  if (isFileDrag(e.dataTransfer)) {
-                    const into = entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/')
-                    handleDrop(into, e)
-                    return
-                  }
-                  if (entry.isDir) void doDrop(entry.path, e)
-                }}
-              >
-                <span className="rvs-node-icon">
-                  {entry.isDir
-                    ? <FolderIcon path={entry.path} open={isOpen} size={15} />
-                    : <FileIcon path={entry.path} size={15} />}
-                </span>
-                {renaming === entry.path
-                  ? (
-                    <RenameInput
-                      initial={entry.name}
-                      onCommit={(value) => { void doRename(entry, value) }}
-                      onCancel={() => setRenaming(undefined)}
-                    />
-                  )
-                  : (
-                    <span className={`rvs-node-name ${status !== undefined ? `rvs-git-${gitStatusClass(status)}` : ''}`} style={ignored && status === undefined ? { opacity: .5 } : undefined}>
-                      {entry.name}
-                    </span>
-                  )}
-                {status !== undefined && (
-                  <span className={`rvs-git-letter rvs-letter-${gitStatusClass(status)}`}>{gitLetter(status)}</span>
-                )}
-                {entry.isSymlink && <span className="rvs-hit-dir" title={t('files.symlink')}>↩</span>}
-                <span className="rvs-node-actions">
-                  <button
-                    type="button"
-                    className="rvs-hbtn"
-                    title={chatEnabled ? t('files.referenceFile') : t('files.refDisabled')}
-                    disabled={!chatEnabled}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      if (chatTarget.sessionId === undefined) return
-                      insertRemoteReference(ctx, chatTarget.sessionId, repoRoot ?? root, entry.path, entry.isDir)
-                    }}
-                  >
-                    @
-                  </button>
-                </span>
+        {visibleRows.map(row => {
+          if (row.kind === 'create') {
+            return (
+              <CreateRow
+                key={`create:${row.dir}`}
+                depth={row.depth}
+                kind={row.createKind}
+                onCommit={(value) => { void doCreate(value) }}
+                onCancel={() => setCreating(undefined)}
+                fileIcon={<FileIcon path="name.ts" size={15} />}
+                folderIcon={<FolderIcon path="name" open={false} size={15} />}
+                t={t}
+              />
+            )
+          }
+          if (row.kind === 'pending') {
+            // Same copy/order as the root placeholder (offline before loading).
+            return (
+              <div key={`pending:${row.dir}`} className="rvs-empty" style={{ paddingLeft: 12 + row.depth * 14 }}>
+                {row.reason === 'offline' ? t('files.offline') : t('common.loading')}
               </div>
-              {entry.isDir && isOpen && renderDir(entry.path, depth + 1)}
-            </div>
+            )
+          }
+          return (
+            <ExplorerRowView
+              key={row.entry.path}
+              entry={row.entry}
+              depth={row.depth}
+              status={statusFor(row.entry)}
+              ignored={ignoredFor(row.entry)}
+              isSelected={selected.has(row.entry.path)}
+              isOpen={expanded.has(row.entry.path)}
+              isCut={cutPaths !== undefined && cutPaths.has(row.entry.path)}
+              isDropTarget={dropTarget === row.entry.path}
+              isRenaming={renaming === row.entry.path}
+              chatEnabled={chatEnabled}
+              referenceTitle={referenceTitle}
+              symlinkTitle={symlinkTitle}
+              actions={rowActions}
+            />
           )
         })}
       </>

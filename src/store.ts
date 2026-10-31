@@ -2,9 +2,9 @@
  * Durable store for dsh-remote-vs: hosts + workspace bindings in
  * $DSH_HOME/dsh-remote.json (0600, atomic tmp+rename writes).
  */
-import { existsSync, statSync, openSync, readFileSync, renameSync, writeSync, closeSync } from 'node:fs'
+import { existsSync, statSync, openSync, readFileSync, renameSync, writeSync, closeSync, fsyncSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { aliasRoot, keysDir, storePath } from './paths.ts'
 import type {
   RemoteDeployState,
@@ -43,6 +43,28 @@ function assertAlias(alias: unknown): asserts alias is string {
   if (typeof alias !== 'string' || !ALIAS_RE.test(alias)) {
     throw new Error('alias must match [A-Za-z0-9._-]{1,64} and start with an alphanumeric')
   }
+}
+
+/**
+ * Replays one read-modify-write before giving up. Two processes sharing
+ * `$DSH_HOME` (desktop + `dsh web`) can each land an edit between the other's
+ * read and write; a single retry almost always settles it, and the third attempt
+ * fails loud instead of silently dropping someone's change.
+ */
+const MUTATION_ATTEMPTS = 3
+
+/**
+ * Validate the SHAPE of an `auth` patch before it is merged.
+ *
+ * `update()` used to treat anything whose `kind` was not `'key'` as a password
+ * patch: `{kind:'garbage'}` silently kept the stored password (HTTP 200), and
+ * `auth: null` threw an engine TypeError. The merge below (and `normalize()`)
+ * must only ever see the two declared kinds, with a real object to read from.
+ */
+function assertAuthPatch(auth: unknown): asserts auth is HostPayload['auth'] {
+  if (typeof auth !== 'object' || auth === null) throw new Error('auth must be an object')
+  const kind = (auth as { kind?: unknown }).kind
+  if (kind !== 'key' && kind !== 'password') throw new Error('auth.kind must be key or password')
 }
 
 /** Payload accepted by create/update (secrets included, host-side only). */
@@ -139,15 +161,75 @@ export class RemoteStore {
     // one is picked up by that same re-read, which re-arms the fast path.
     this.stamp = undefined
     const payload = JSON.stringify(this.doc, null, 2)
+    const dir = dirname(this.file)
+    // A fresh $DSH_HOME may not exist yet: the first host/workspace write must
+    // not fail with ENOENT.
+    mkdirSync(dir, { recursive: true })
     const tmp = `${this.file}.${process.pid}.tmp`
     // 0600 from creation (Windows: best effort, mode is advisory there).
     const fd = openSync(tmp, 'w', 0o600)
     try {
       writeSync(fd, payload)
+      // Flush the bytes BEFORE the rename: a power loss/blue screen must not
+      // leave the store empty or half written (the next boot refuses to load
+      // that). Best effort — an OS refusing fsync must not fail the save.
+      try {
+        fsyncSync(fd)
+      } catch {
+        // Durability is improved, not guaranteed.
+      }
     } finally {
       closeSync(fd)
     }
     renameSync(tmp, this.file)
+    // Make the rename itself durable (POSIX directory fsync). Windows cannot
+    // open a directory for fsync, so it keeps the file-level flush above.
+    if (process.platform !== 'win32') {
+      let dirFd: number | undefined
+      try {
+        dirFd = openSync(dir, 'r')
+        fsyncSync(dirFd)
+      } catch {
+        // Best effort.
+      } finally {
+        if (dirFd !== undefined) {
+          try {
+            closeSync(dirFd)
+          } catch {
+            // Ignore.
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Re-read, mutate, then write only while the file has not changed underneath.
+   *
+   * Every mutation here rewrites the WHOLE document, so a plain
+   * read-modify-write let the last writer win: desktop and `dsh web` share
+   * `$DSH_HOME/dsh-remote.json` by design, and one side's host edit could
+   * disappear without any error. Re-reading at the start plus a stamp re-check
+   * right before the write turns that into a replay on fresh content.
+   *
+   * `apply` must only touch `this.doc` and return a value (no I/O, no logging):
+   * a conflicting attempt is executed again against the reloaded document.
+   * The final rename window is still unguarded (a real lock needs blocking I/O);
+   * this narrows the lost-update window from a whole user edit to microseconds.
+   */
+  private mutate<T>(apply: (doc: StoreDoc) => T): T {
+    for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
+      this.reload()
+      const base: FileStamp = this.stamp ?? null
+      const before = JSON.stringify(this.doc)
+      const result = apply(this.doc)
+      // Nothing changed (e.g. deleting an unknown alias): do not rewrite the file.
+      if (JSON.stringify(this.doc) === before) return result
+      if (!sameStamp(base, this.stampOf() ?? null)) continue
+      this.save()
+      return result
+    }
+    throw new Error(`${this.file}: another process keeps editing the store; retry the operation`)
   }
 
   // ------------------------------------------------------------- hosts
@@ -173,60 +255,69 @@ export class RemoteStore {
 
   create(payload: HostPayload): RemoteHostEntry {
     assertAlias(payload.alias)
-    if (this.get(payload.alias) !== undefined) throw new Error(`alias already exists: ${payload.alias}`)
-    const entry = this.normalize(payload, undefined)
-    this.doc.hosts.push(entry)
-    this.save()
-    return entry
+    return this.mutate(() => {
+      if (this.doc.hosts.some(host => host.alias === payload.alias)) {
+        throw new Error(`alias already exists: ${payload.alias}`)
+      }
+      const entry = this.normalize(payload, undefined)
+      this.doc.hosts.push(entry)
+      return entry
+    })
   }
 
   update(alias: string, patch: Partial<Omit<HostPayload, 'alias'>>): RemoteHostEntry {
-    const current = this.require(alias)
-    // Empty auth materials mean "keep the stored one" (the browser never
-    // echoes secrets back, so an untouched field arrives empty/omitted).
-    let auth = patch.auth ?? current.auth
-    if (patch.auth !== undefined) {
-      if (patch.auth.kind === 'key') {
-        const keyPath = (patch.auth.keyPath ?? '').trim()
-        auth = {
-          kind: 'key',
-          keyPath: keyPath !== ''
-            ? keyPath
-            : current.auth.kind === 'key'
-              ? (current.auth.keyPath as string)
-              : '',
-          ...(patch.auth.passphrase !== undefined
-            ? { passphrase: patch.auth.passphrase }
-            : current.auth.kind === 'key' && current.auth.passphrase !== undefined
-              ? { passphrase: current.auth.passphrase }
-              : {}),
-        }
-      } else {
-        const password = patch.auth.password ?? ''
-        auth = {
-          kind: 'password',
-          password: password !== ''
-            ? password
-            : current.auth.kind === 'password'
-              ? (current.auth.password as string)
-              : '',
+    // The HTTP route casts an arbitrary JSON body here, so the SHAPE has to be
+    // checked before the merge: otherwise an unknown `auth.kind` silently became
+    // a password patch (and `auth: null` threw an engine TypeError).
+    if (patch.auth !== undefined) assertAuthPatch(patch.auth)
+    return this.mutate(() => {
+      const index = this.doc.hosts.findIndex(h => h.alias === alias)
+      if (index < 0) throw new Error(`unknown host alias: ${alias}`)
+      const current = this.doc.hosts[index] as RemoteHostEntry
+      // Empty auth materials mean "keep the stored one" (the browser never
+      // echoes secrets back, so an untouched field arrives empty/omitted).
+      let auth = patch.auth ?? current.auth
+      if (patch.auth !== undefined) {
+        if (patch.auth.kind === 'key') {
+          const keyPath = (patch.auth.keyPath ?? '').trim()
+          auth = {
+            kind: 'key',
+            keyPath: keyPath !== ''
+              ? keyPath
+              : current.auth.kind === 'key'
+                ? (current.auth.keyPath as string)
+                : '',
+            ...(patch.auth.passphrase !== undefined
+              ? { passphrase: patch.auth.passphrase }
+              : current.auth.kind === 'key' && current.auth.passphrase !== undefined
+                ? { passphrase: current.auth.passphrase }
+                : {}),
+          }
+        } else {
+          const password = patch.auth.password ?? ''
+          auth = {
+            kind: 'password',
+            password: password !== ''
+              ? password
+              : current.auth.kind === 'password'
+                ? (current.auth.password as string)
+                : '',
+          }
         }
       }
-    }
-    const merged: HostPayload = {
-      alias,
-      host: patch.host ?? current.host,
-      port: patch.port ?? current.port,
-      user: patch.user ?? current.user,
-      auth,
-      description: patch.description ?? current.description,
-      tags: patch.tags ?? current.tags,
-    }
-    const next = this.normalize(merged, current)
-    const index = this.doc.hosts.findIndex(h => h.alias === alias)
-    this.doc.hosts[index] = next
-    this.save()
-    return next
+      const merged: HostPayload = {
+        alias,
+        host: patch.host ?? current.host,
+        port: patch.port ?? current.port,
+        user: patch.user ?? current.user,
+        auth,
+        description: patch.description ?? current.description,
+        tags: patch.tags ?? current.tags,
+      }
+      const next = this.normalize(merged, current)
+      this.doc.hosts[index] = next
+      return next
+    })
   }
 
   /**
@@ -241,17 +332,17 @@ export class RemoteStore {
    * binding is gone but its tombstone is missing.
    */
   remove(alias: string): boolean {
-    this.reload()
-    const hosts = this.doc.hosts.filter(h => h.alias !== alias)
-    // Unknown alias: do not mutate (and do not record tombstones for nothing).
-    if (hosts.length === this.doc.hosts.length) return false
-    this.doc.hosts = hosts
-    for (const binding of this.doc.workspaces) {
-      if (binding.alias === alias) this.recordTombstone(join(aliasRoot(), binding.id))
-    }
-    this.doc.workspaces = this.doc.workspaces.filter(w => w.alias !== alias)
-    this.save()
-    return true
+    return this.mutate(() => {
+      const hosts = this.doc.hosts.filter(h => h.alias !== alias)
+      // Unknown alias: do not mutate (and do not record tombstones for nothing).
+      if (hosts.length === this.doc.hosts.length) return false
+      this.doc.hosts = hosts
+      for (const binding of this.doc.workspaces) {
+        if (binding.alias === alias) this.recordTombstone(join(aliasRoot(), binding.id))
+      }
+      this.doc.workspaces = this.doc.workspaces.filter(w => w.alias !== alias)
+      return true
+    })
   }
 
   private normalize(payload: HostPayload, current: RemoteHostEntry | undefined): RemoteHostEntry {
@@ -322,10 +413,12 @@ export class RemoteStore {
   }
 
   setDeploy(alias: string, state: RemoteDeployState): void {
-    const entry = this.require(alias)
-    entry.deploy = state
-    entry.updatedAt = Date.now()
-    this.save()
+    this.mutate(() => {
+      const entry = this.doc.hosts.find(h => h.alias === alias)
+      if (entry === undefined) throw new Error(`unknown host alias: ${alias}`)
+      entry.deploy = state
+      entry.updatedAt = Date.now()
+    })
   }
 
   // -------------------------------------------------------- workspaces
@@ -337,32 +430,35 @@ export class RemoteStore {
 
   createWorkspace(payload: WorkspacePayload): RemoteWorkspaceBinding {
     if (typeof payload.name !== 'string' || payload.name.trim() === '') throw new Error('name must be a non-empty string')
-    this.require(payload.alias)
     if (typeof payload.remotePath !== 'string' || !payload.remotePath.startsWith('/')) {
       throw new Error('remotePath must be an absolute POSIX path')
     }
-    const binding: RemoteWorkspaceBinding = {
-      id: randomUUID().slice(0, 8),
-      name: payload.name.trim(),
-      alias: payload.alias,
-      remotePath: payload.remotePath,
-      createdAt: Date.now(),
-    }
-    this.doc.workspaces.push(binding)
-    this.save()
-    return binding
+    return this.mutate(() => {
+      if (!this.doc.hosts.some(host => host.alias === payload.alias)) {
+        throw new Error(`unknown host alias: ${payload.alias}`)
+      }
+      const binding: RemoteWorkspaceBinding = {
+        id: randomUUID().slice(0, 8),
+        name: payload.name.trim(),
+        alias: payload.alias,
+        remotePath: payload.remotePath,
+        createdAt: Date.now(),
+      }
+      this.doc.workspaces.push(binding)
+      return binding
+    })
   }
 
   removeWorkspace(id: string): boolean {
-    this.reload()
-    const victim = this.doc.workspaces.find(w => w.id === id)
-    if (victim === undefined) return false
-    // Tombstone the alias BEFORE dropping the binding (history stays readable,
-    // new tool calls fail closed instead of silently running locally).
-    this.addTombstone(join(aliasRoot(), id))
-    this.doc.workspaces = this.doc.workspaces.filter(w => w.id !== id)
-    this.save()
-    return true
+    return this.mutate(() => {
+      const victim = this.doc.workspaces.find(w => w.id === id)
+      if (victim === undefined) return false
+      // Tombstone the alias BEFORE dropping the binding (history stays readable,
+      // new tool calls fail closed instead of silently running locally).
+      this.recordTombstone(join(aliasRoot(), id))
+      this.doc.workspaces = this.doc.workspaces.filter(w => w.id !== id)
+      return true
+    })
   }
 
   /**
@@ -378,9 +474,9 @@ export class RemoteStore {
 
   /** Record a removed alias path (idempotent). */
   addTombstone(aliasPath: string): void {
-    if (this.doc.tombstones.includes(aliasPath)) return
-    this.recordTombstone(aliasPath)
-    this.save()
+    this.mutate(() => {
+      this.recordTombstone(aliasPath)
+    })
   }
 
   listTombstones(): string[] {

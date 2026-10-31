@@ -92,6 +92,26 @@ function sweepSpills(now: number): void {
 }
 
 /**
+ * Whether this process has already swept the Host spill dir.
+ *
+ * The sweep used to hang off `spillCreate` alone, so a Host that stopped
+ * producing over-cap output kept its old files forever. Arming it from the first
+ * remote spawn makes it independent of whether THIS run ever spills.
+ */
+let hostSweepArmed = false
+
+/** Arm the one-per-process Host spill sweep (cheap readdir; best effort). */
+function armHostSpillSweep(now: number): void {
+  if (hostSweepArmed) return
+  hostSweepArmed = true
+  try {
+    sweepSpills(now)
+  } catch {
+    // Retention must never break a spawn.
+  }
+}
+
+/**
  * One collected stream: tail window + offset readers + optional full-stream
  * spill file (Host disk). Mirrors the stock local runtime's contract
  * (dsh-subprocess SubprocessCollect): with `spill` configured, overflow
@@ -337,6 +357,8 @@ export class SshProcRuntime {
     if (spec.signal?.aborted === true) {
       throw new Error('spawn aborted before start')
     }
+    // First remote process of this Host process: sweep the Host spill dir once.
+    armHostSpillSweep(Date.now())
     const useSetsid = this.setsid ?? true
     return new SshProcHandle(this.pool, this.alias, spec, useSetsid, () => {
       this.setsid = false

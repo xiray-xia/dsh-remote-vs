@@ -98,6 +98,53 @@ function targetKey(target: ScmTarget): string {
 }
 
 /**
+ * The repository the PANEL is currently pointed at.
+ *
+ * Why this is module state instead of per-coordinator: one page shows one
+ * source-control panel, and the coordinator is created by the store while the
+ * panel that owns the visible repository is a component — the panel reports its
+ * repository here, the coordinator reads it when it writes a result back.
+ *
+ * The problem it answers: a stage click is applied to the local status model
+ * IMMEDIATELY and verified ~250 ms later (plus the write's own round trip, which
+ * on a large repository can be seconds). If the user switches workspace or picks
+ * another repository directory inside that window, the verification's rollback
+ * or mismatch correction used to run against whatever repository was on screen
+ * NOW — with paths that are relative to the OLD repository root. Two repositories
+ * that happen to share a relative path then had the row moved on the WRONG list,
+ * and the store's stage-override ledger (keyed by repository) was reset as a
+ * side effect. Paths only mean something inside their own repository, so a
+ * result whose repository is no longer the visible one is dropped.
+ *
+ * `undefined` means "no panel has reported yet" and keeps the historic
+ * behaviour (every result is applied): that is the state a headless caller or a
+ * local check starts in, and a stage click cannot happen before the panel that
+ * hosts it exists.
+ *
+ * `alias + root` IS the repository identity (the binding id is not needed: two
+ * bindings pointing at one repository must share these corrections, and two
+ * hosts with an identical root are told apart by the alias). The binding id is
+ * deliberately not part of the token because it is not available at issue time
+ * without a store change.
+ */
+let visibleRepository: ScmTarget | undefined
+
+/** Two targets name the same repository. */
+function sameRepository(left: ScmTarget, right: ScmTarget): boolean {
+  return left.alias === right.alias && left.root === right.root
+}
+
+/** Called by the source-control panel whenever its repository changes. */
+export function setVisibleStageRepository(target: ScmTarget | undefined): void {
+  visibleRepository = target === undefined ? undefined : { alias: target.alias, root: target.root }
+}
+
+/** The repository the coordinator may write local results back into. */
+export function visibleStageRepository(): ScmTarget | undefined {
+  return visibleRepository
+}
+
+/**
  * Coordinates optimistic stage/unstage with a debounced, path-limited check.
  *
  * One instance per client: the panel's clicks, the store's status model and the
@@ -178,7 +225,9 @@ export class StageCoordinator {
       const error = outcomes[index]
       if (error === undefined) return
       // The verb never landed: put the row back and let the caller report it.
-      this.sink.apply(job.paths, !job.staged)
+      // Only inside the repository the panel still shows — the rollback names
+      // OLD-repository paths, and applying it elsewhere moved an unrelated row.
+      if (this.stillVisible(job.target)) this.sink.apply(job.paths, !job.staged)
       job.reject(error)
     })
     const landed = batch.filter((_, index) => outcomes[index] === undefined)
@@ -192,6 +241,19 @@ export class StageCoordinator {
       this.clock.clear(this.timer)
       this.timer = undefined
     }
+  }
+
+  /**
+   * May a result about `target` be written into the panel's local model?
+   *
+   * `true` while no panel has reported a repository (headless callers, local
+   * checks) and while the reported repository IS `target`. `false` once the
+   * panel has moved to another repository: the paths in the result are relative
+   * to `target`'s root and would land on the wrong rows (see `visibleRepository`).
+   */
+  private stillVisible(target: ScmTarget): boolean {
+    const visible = visibleRepository
+    return visible === undefined || sameRepository(visible, target)
   }
 
   /** Queue one write behind the previous one for the same repository. */
@@ -239,6 +301,13 @@ export class StageCoordinator {
     }
 
     for (const group of groups.values()) {
+      // The user may have switched repository while this window's writes were in
+      // flight. The probe would still be answered (it is path-limited), but its
+      // answer describes a repository that is no longer on screen: correcting the
+      // visible model with those paths is the cross-repository corruption this
+      // guard exists for. Nothing is reported either — a toast naming the old
+      // repository's paths, under another repository's list, is noise.
+      if (!this.stillVisible(group.target)) continue
       let stdout = ''
       try {
         stdout = await this.port.probe(group.target, group.paths)
@@ -248,6 +317,8 @@ export class StageCoordinator {
         this.sink.report({ kind: 'unverified', paths: group.paths })
         continue
       }
+      // The probe itself can outlast a repository switch.
+      if (!this.stillVisible(group.target)) continue
       const detail = parseStatusDetail(stdout)
       const wrong: string[] = []
       for (const path of group.paths) {

@@ -133,6 +133,10 @@ const WATCHDOG_FIRED = 'watchdog-fired' as const
 /** One session's bookkeeping. */
 interface Ledger {
   sessionId: string
+  /** Session working directory this ledger is CURRENTLY bound to (see `ensure`). */
+  cwd: string
+  /** Remote route (binding) id the ledger is bound to; a different one = rebind. */
+  routeId: string
   alias: string
   root: string
   /** Content of every path that was ALREADY dirty when the session began. */
@@ -140,7 +144,13 @@ interface Ledger {
   baselineTaken: boolean
   /** Set once the untracked scan proves unusable for THIS root; stops retrying it. */
   untrackedGivenUp: boolean
-  /** Wall-clock ms this ledger appeared: the session's own start for mtime tests. */
+  /**
+   * Wall-clock ms when observation of the CURRENT root started.
+   *
+   * The baseline's "was this file here before?" test compares file mtimes against
+   * it, so it must move with the root (`resetObservation`) — a file that appeared
+   * before we started looking at this tree is pre-existing by definition.
+   */
   startedAt: number
   /** True once the first untracked result has been folded into the baseline. */
   absorbed: boolean
@@ -365,7 +375,16 @@ export class SessionChanges {
   rescan(sessionId: string): void {
     const ledger = this.ledgers.get(sessionId)
     if (ledger === undefined || ledger.disposed) return
+    // An explicit refresh means "try again": the write-off verdict describes the
+    // previous attempt, not the session, so the button must be able to clear it.
+    // Automatic polls (`touch`) deliberately keep it — retrying a minute-long
+    // walk on every 30s self-heal is exactly what the write-off prevents.
+    if (ledger.untrackedGivenUp) {
+      ledger.untrackedGivenUp = false
+      this.warn('manual refresh re-arms the untracked scan for this session')
+    }
     ledger.untrackedAt = 0
+    ledger.untrackedMs = undefined
     this.schedule(ledger)
   }
 
@@ -443,33 +462,71 @@ export class SessionChanges {
     ledger.truncated = undefined
     ledger.at = 0
     ledger.unavailable = undefined
+    // The mtime test in `absorbPreExisting` asks "did this file predate the
+    // observation of THIS tree?"; the previous root's clock would call files that
+    // appeared in the new one before the move "session work" (and list them with
+    // whole-file counts). Restart it with the rest of the observation.
+    ledger.startedAt = Date.now()
   }
 
   // ------------------------------------------------------------- internals
 
-  /** Resolve the routing target once per session, caching the ledger. */
+  /**
+   * Resolve (or rebind) the ledger for one session from its CURRENT cwd.
+   *
+   * The cwd is re-resolved on every turn boundary instead of once per session: a
+   * session can change its working directory mid-conversation (a workspace
+   * switch, `working-directory.set`), and a ledger pinned to the first binding
+   * then keeps answering "what did this session change" about a tree the session
+   * is no longer working in — and points file-open and undo at it.
+   *
+   * Rebinding happens IN PLACE rather than forget+create: the panel keeps its
+   * identity and `turn` counter (no null-summary flicker) and one
+   * `resetObservation()` drops every fact that belonged to the previous root, so
+   * the field list stays in that one method. C1's root-snapshot guards in
+   * `refresh`/`publish`/`kickUntracked`/`absorbPreExisting` are exactly what makes
+   * this safe while a scan of the old root is still in flight.
+   */
   private ensure(target: LedgerTarget): Ledger | undefined {
     if (target.cwd.trim() === '') return undefined
-    const existing = this.ledgers.get(target.sessionId)
-    if (existing !== undefined && !existing.disposed && existing.root !== '') return existing
     let route: WorldRoute
     try {
       route = this.deps.worlds.routeDir(target.cwd)
     } catch {
+      // Tombstoned spelling (a removed mapping): fail closed AND stop serving a
+      // list for a workspace that no longer exists. Keeping the old ledger was
+      // the old behaviour and it kept a dead session looking alive.
+      this.forget(target.sessionId)
       return undefined
     }
     if (route.kind !== 'remote') {
       // Local sessions are already covered by DSH's own recorder, and this
       // panel is a remote-workspace feature: keeping no ledger is what makes it
       // stay hidden there instead of showing a permanently empty box.
-      this.ledgers.delete(target.sessionId)
+      this.forget(target.sessionId)
       return undefined
     }
     const root = route.remotePath.length > 1 && route.remotePath.endsWith('/')
       ? route.remotePath.replace(/\/+$/, '')
       : route.remotePath
+    const existing = this.ledgers.get(target.sessionId)
+    if (existing !== undefined && !existing.disposed && existing.root !== '') {
+      existing.cwd = target.cwd
+      if (existing.routeId === route.id) return existing
+      // Same session, different binding: rebind in place.
+      this.warn(`session working directory moved to ${route.alias}:${root}; re-observing the new binding`)
+      existing.routeId = route.id
+      existing.alias = route.alias
+      existing.baseRoot = root
+      existing.subdir = ''
+      existing.root = root
+      this.resetObservation(existing)
+      return existing
+    }
     const ledger: Ledger = {
       sessionId: target.sessionId,
+      cwd: target.cwd,
+      routeId: route.id,
       alias: route.alias,
       root,
       baseline: undefined,
@@ -611,12 +668,15 @@ export class SessionChanges {
       // sides means the session never wrote to it.
       if ((binary || fileTruncated) && sameStat(beforeSide, afterSide)) continue
       const oversized = fileTruncated && !binary
-      // An untracked path with no old side is a file THIS session created and
-      // git still knows nothing about. Its reverse patch would be "delete the
-      // file", and that copy is the only one — the same applies when there is no
-      // old side at all because the read failed. Serve it for display only.
-      const untrackedCreation = entry.status === '?' && before === null
-      const undoable = !binary && !oversized && beforeSide !== undefined && !untrackedCreation
+      // No old side = whole-file creation, and the only reverse of its patch is
+      // deleting the file. git holds the content only for a TRACKED addition (the
+      // index has it); an untracked one exists nowhere else, and a "before side"
+      // that a failed read could not see is not evidence either. A reverse patch
+      // cannot express "un-add" anyway, so no creation is offered one — the hunk
+      // is still served for display (the client's undo path refuses an empty
+      // patch: `changes.undoMissing`).
+      const creation = before === null
+      const undoable = !binary && !oversized && beforeSide !== undefined && !creation
       const diff = binary || oversized ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
       const status = panelStatus(entry.status)
       const absolute = posixJoin(ledger.root, entry.path)

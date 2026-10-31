@@ -72,10 +72,35 @@ function withSettleDeadline<T>(read: () => Promise<T>, ms: number): () => Promis
   }
 }
 
+/**
+ * When each key's newest read STARTED, as a monotonic sequence.
+ *
+ * The snapshot cache needs this, and the queue is the only place that knows it:
+ * a completed read carries only its FINISH time, and "the older walk finished
+ * last" is exactly the case where finish order says the opposite of the truth
+ * (see `git-cache.ts` `writeGitSnapshot`). The id is assigned in `start()` —
+ * before the read is allowed to run — so two reads of one tree are ordered by
+ * when they were ISSUED, which is the order the panel cares about.
+ *
+ * One module-level counter for every queue instance: ids from `gitReads`,
+ * `extrasReads` and `logReads` are then comparable instead of each instance
+ * counting from 1 (a shared key would otherwise compare 2 against 2).
+ *
+ * Entries are removed when their flight retires, so a direct write that did not
+ * come from the queue falls back to the legacy wall-clock rule instead of
+ * inheriting an unrelated generation.
+ */
+const started = new Map<string, number>()
+let nextReadId = 0
+
+/** The start order of the newest read for `key`, while it is in flight. */
+export function readStartId(key: string): number | undefined {
+  return started.get(key)
+}
+
 export class ReadQueue {
   /** In-flight reads by key (insertion order is irrelevant here). */
   private readonly flights = new Map<string, Flight>()
-  private nextId = 0
 
   /**
    * @param onChange - called whenever a read starts or settles, so the owner can
@@ -131,7 +156,10 @@ export class ReadQueue {
 
   /** Register a flight and run `read`; a synchronous throw becomes a rejection. */
   private start<T>(key: string, read: () => Promise<T>, settleMs: number): Promise<T> {
-    const id = ++this.nextId
+    const id = ++nextReadId
+    // Recorded BEFORE the read is scheduled: a snapshot written by this read can
+    // then ask "which read produced me" and compare issue order (see `started`).
+    started.set(key, id)
     // A deferred callback keeps two guarantees: a synchronous throw from `read`
     // is reported as a rejection (callers all await), and the flight is
     // registered BEFORE the read runs, so a second call in the same tick joins
@@ -142,6 +170,9 @@ export class ReadQueue {
       .finally(() => {
         const current = this.flights.get(key)
         if (current !== undefined && current.id === id) this.flights.delete(key)
+        // Retire the generation with the flight: a later write that did NOT come
+        // from a queued read must not inherit this read's issue order.
+        if (started.get(key) === id) started.delete(key)
         this.onChange?.()
       })
     this.flights.set(key, { id, promise })

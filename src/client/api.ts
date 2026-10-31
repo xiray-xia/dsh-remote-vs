@@ -50,6 +50,15 @@ export class RemoteApiError extends Error {
    * callers (toast quieting, offline banners) keep treating it as transport.
    */
   transport?: boolean
+  /**
+   * The operation ran out of its budget; the link itself was not proven bad.
+   *
+   * Set from the Host's `code: 'deadline'`. It keeps classification honest: one
+   * slow request (a huge directory, an 8 MiB read on a thin link) must not flip
+   * the chip to "connection error" or downgrade the editor to read-only, while
+   * the operation still fails for the user with its readable reason.
+   */
+  deadline?: boolean
   constructor(
     readonly status: number,
     message: string,
@@ -70,19 +79,21 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     // Fall through to the status check with a generic message.
   }
   if (!res.ok) {
-    const message = typeof data === 'object' && data !== null && 'error' in data && typeof (data as { error: unknown }).error === 'string'
-      ? (data as { error: string }).error
-      : `request failed: HTTP ${res.status}`
-    if (isConnectionFailure(message)) {
-      const error = new RemoteApiError(res.status, message)
-      error.transport = true
+    const body = typeof data === 'object' && data !== null ? data as { error?: unknown; code?: unknown } : undefined
+    const message = typeof body?.error === 'string' ? body.error : `request failed: HTTP ${res.status}`
+    const failure = new RemoteApiError(res.status, message)
+    if (body?.code === 'deadline') failure.deadline = true
+    // Classify the ERROR (not its text): the deadline flag has to be seen here,
+    // or a slow request is mistaken for a dead link.
+    if (isConnectionFailure(failure)) {
+      failure.transport = true
       // Was the link already known to be down? The FIRST failure keeps its raw
       // diagnostic (that is how the user learns WHY); every later failure is a
       // repeat — the chip already explains it, so surfaces get one short
       // sentence instead of another ssh2 string. The raw text stays on the
       // console for anyone debugging the host.
       const repeat = currentConnection()?.state === 'error'
-      noteConnectionFailure(activeConnectionAlias(), error)
+      noteConnectionFailure(activeConnectionAlias(), failure)
       if (repeat) {
         console.debug('[dsh-remote-vs] transport error:', message)
         // Translated at throw time (not module load): the message follows the
@@ -91,9 +102,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
         localized.transport = true
         throw localized
       }
-      throw error
+      throw failure
     }
-    throw new RemoteApiError(res.status, message)
+    throw failure
   }
   return data as T
 }
@@ -106,7 +117,11 @@ function post<T>(path: string, body: unknown): Promise<T> {
 function throwIfGitFailed(r: RemoteExecResult, timeoutMs: number): void {
   if (r.success) return
   if (r.timedOut) {
-    throw new RemoteApiError(502, `git timed out after ${timeoutSeconds(timeoutMs)} (big/slow repo — retry, it may be warm now; raise gitTimeoutMs in the plugin settings)`)
+    const timedOut = new RemoteApiError(502, `git timed out after ${timeoutSeconds(timeoutMs)} (big/slow repo — retry, it may be warm now; raise gitTimeoutMs in the plugin settings)`)
+    // A command budget, not a link failure (the exec route reports a timeout as
+    // a result, never as a transport error).
+    timedOut.deadline = true
+    throw timedOut
   }
   const friendly = gitFailed(r.stderr)
   throw new RemoteApiError(502, friendly ?? (r.stderr.trim() || r.error || `git failed [exit code: ${r.exitCode}]`))

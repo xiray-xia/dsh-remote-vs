@@ -7,7 +7,7 @@
  * A tab is refresh-safe: the server session id is persisted, so reloading the
  * GUI reattaches to the still-running shell instead of spawning a new one.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
@@ -97,6 +97,104 @@ function newId(): string {
  */
 let openedTerminalRequest = 0
 
+/**
+ * Which mounted terminal surface owns the view (one at a time).
+ *
+ * The native right-sidebar fallback mounts a `RemoteRoot` per session that
+ * opened the remote page, so two `TerminalView`s can be alive at once. They
+ * share one localStorage tab list and one module-level request counter, so
+ * without an owner the hidden instance can steal an "open terminal here"
+ * request (its tab is invisible), and both instances keep XTerm sockets for the
+ * same stored session ids (duplicate input, last-writer-wins tabs). The owner is
+ * the surface on screen; only it renders the terminal UI and persists the tab
+ * list, so exactly one instance holds sockets for a given session.
+ */
+let terminalOwner: symbol | undefined
+const terminalOwnerListeners = new Set<() => void>()
+
+function publishTerminalOwner(next: symbol): void {
+  if (terminalOwner === next) return
+  terminalOwner = next
+  for (const listener of [...terminalOwnerListeners]) listener()
+}
+
+function subscribeTerminalOwner(listener: () => void): () => void {
+  terminalOwnerListeners.add(listener)
+  return () => {
+    terminalOwnerListeners.delete(listener)
+  }
+}
+
+/** First mount claims the panel, so a single-surface profile renders at once. */
+export function claimTerminalOwnerIfNone(id: symbol): void {
+  if (terminalOwner === undefined) publishTerminalOwner(id)
+}
+
+/** Whether `id` is the surface that currently owns the terminal panel. */
+export function terminalSurfaceOwnedBy(owner: symbol | undefined, id: symbol): boolean {
+  return owner === id
+}
+
+/** Why a terminal connection ended — and therefore whether the shell may live on. */
+export type TerminalExitKind =
+  /** The socket went away; the Host keeps the PTY for 10 minutes and can reattach. */
+  | 'reattach'
+  /** The remote shell really exited (or refused the connection at the shell level). */
+  | 'exited'
+  /** The Host no longer knows this session id: drop it and open a fresh shell. */
+  | 'expired'
+
+/** Failures that are about the socket, not about the shell inside it. */
+const SOCKET_LEVEL_MESSAGES = new Set(['websocket refused', 'websocket error'])
+
+/**
+ * Classify one terminal exit report.
+ *
+ * `XTerm` reports the ssh channel's exit code and, for socket-level problems, a
+ * message with `code === null`. A socket that closes with neither (page reload,
+ * network blip, laptop sleep) must NOT destroy the tab's `session` id: the Host
+ * keeps the PTY for `EMPTY_SOCKET_TTL_MS`, so the right answer is "keep the id,
+ * offer a reattach". Only a real exit (a code, or a shell-level error message)
+ * ends the session.
+ */
+export function classifyTerminalExit(code: number | null, message: string | undefined): TerminalExitKind {
+  if (message === 'terminal session expired') return 'expired'
+  if (code !== null) return 'exited'
+  if (message === undefined || SOCKET_LEVEL_MESSAGES.has(message)) return 'reattach'
+  return 'exited'
+}
+
+/** What one tab should look like after an exit report. */
+export interface TerminalExitState {
+  connected: boolean
+  /** Kept for `reattach`, cleared for `exited`/`expired`. */
+  session: string | undefined
+  kind: TerminalExitKind
+  /** i18n key for the note, when the note is a fixed sentence. */
+  noteKey?: 'term.disconnected' | 'term.closed'
+  /** Literal note (exit code or a host message), when it is not a fixed sentence. */
+  noteText?: string
+}
+
+/** Apply {@link classifyTerminalExit} to one tab. Pure, so the gate can pin it. */
+export function terminalExitState(
+  tab: { session?: string },
+  code: number | null,
+  message: string | undefined,
+): TerminalExitState {
+  const kind = classifyTerminalExit(code, message)
+  if (kind === 'expired') return { connected: false, session: undefined, kind }
+  if (kind === 'reattach') return { connected: false, session: tab.session, kind, noteKey: 'term.disconnected' }
+  return {
+    connected: false,
+    session: undefined,
+    kind,
+    ...(code === null
+      ? (message === undefined ? { noteKey: 'term.closed' as const } : { noteText: message })
+      : { noteText: `exit ${code}` }),
+  }
+}
+
 export function TerminalView(props: {
   t: (key: string) => string
   hosts: RemoteHostSummary[]
@@ -105,6 +203,15 @@ export function TerminalView(props: {
   request?: TerminalRequest
 }): ReactNode {
   const t = props.t
+  /** This mounted surface's identity in the one-owner arbitration (see above). */
+  const surfaceId = useRef<symbol>(Symbol('terminal-surface'))
+  // First mount claims the panel before the first paint, so a profile with one
+  // surface (the normal better-sidebar case) renders immediately.
+  claimTerminalOwnerIfNone(surfaceId.current)
+  const owner = useSyncExternalStore(
+    subscribeTerminalOwner,
+    () => terminalSurfaceOwnedBy(terminalOwner, surfaceId.current),
+  )
   const [alias, setAlias] = useState<string>(readAlias)
   const [tabs, setTabs] = useState<TermTab[]>(() => readStoredTabs().map(row => ({
     id: row.id,
@@ -119,17 +226,50 @@ export function TerminalView(props: {
     ? alias
     : (props.hosts[0]?.alias ?? '')
 
+  // The surface on screen takes the panel over from a hidden one (per-session
+  // native pages mount several instances). Last-visible wins; the hidden one
+  // stops rendering (and closes its sockets) instead of writing the same
+  // localStorage tab list behind the owner's back.
+  const wasOwner = useRef(false)
   useEffect(() => {
+    if (!owner) {
+      wasOwner.current = false
+      return
+    }
+    // Regaining the panel: the sessions this surface knew about may still be
+    // alive on the Host (10-minute reattach window), and their sockets were
+    // closed when ownership left. Reattach them instead of making the user click
+    // "Reconnect" for every tab; a tab whose shell really exited has no session
+    // id and stays dead.
+    const reclaim = !wasOwner.current
+    wasOwner.current = true
+    if (!reclaim) return
+    setTabs(prev => prev.map(tab => (
+      !tab.connected && tab.session !== undefined
+        ? { ...tab, connected: true, nonce: tab.nonce + 1, note: undefined }
+        : tab
+    )))
+  }, [owner])
+
+  useEffect(() => {
+    if (props.visible) publishTerminalOwner(surfaceId.current)
+  }, [props.visible])
+
+  useEffect(() => {
+    if (!owner) return
     try {
       localStorage.setItem(ALIAS_KEY, effectiveAlias)
     } catch {
       // Ignore.
     }
-  }, [effectiveAlias])
+  }, [effectiveAlias, owner])
 
   useEffect(() => {
+    // Only the owner persists: two instances writing one key is last-writer-wins
+    // and can resurrect a hidden surface's stale list over the visible one.
+    if (!owner) return
     persistTabs(tabs)
-  }, [tabs])
+  }, [tabs, owner])
 
   // A restored tab whose host no longer exists cannot reattach.
   useEffect(() => {
@@ -173,6 +313,13 @@ export function TerminalView(props: {
   useEffect(() => {
     const request = props.request
     if (request === undefined || request.id === openedTerminalRequest) return
+    // Only the surface actually on screen may consume the request: with several
+    // per-session instances mounted, a hidden one consuming it opened the tab
+    // where nobody could see it while the visible panel stayed empty. The
+    // owner flag turns true together with `visible`, and this effect re-runs
+    // when either changes, so the request is not lost — it is just owned by the
+    // right surface.
+    if (!owner || props.visible !== true) return
     openedTerminalRequest = request.id
     const target = request.alias !== '' && props.hosts.some(host => host.alias === request.alias)
       ? request.alias
@@ -181,7 +328,7 @@ export function TerminalView(props: {
     // "+" continues on the same host.
     if (target !== alias) setAlias(target)
     openTab(target, cdCommand(request.dir))
-  }, [props.request, props.hosts, effectiveAlias, alias, openTab])
+  }, [props.request, props.hosts, effectiveAlias, alias, openTab, owner, props.visible])
 
   const closeTab = useCallback(async (tab: TermTab): Promise<void> => {
     const ok = await confirmDialog({
@@ -232,6 +379,13 @@ export function TerminalView(props: {
     // unreachable. Reading it suggested aliases might be paths.
     const name = tab.alias
     return siblings.length > 1 ? `${name} #${index}` : name
+  }
+
+  if (!owner) {
+    // A hidden per-session surface: the visible one owns the terminal panel.
+    // Rendering here would mount a second XTerm per stored session (duplicate
+    // sockets/input) and its tab list would race the owner's on localStorage.
+    return null
   }
 
   return (
@@ -329,15 +483,20 @@ export function TerminalView(props: {
                 {...(tab.initialCommand === undefined ? {} : { initialInput: tab.initialCommand })}
                 onReady={(id) => patchTab(tab.id, { session: id, connected: true, note: undefined })}
                 onExit={(code, message) => {
-                  if (message === 'terminal session expired') {
+                  // A socket that goes away is NOT the shell exiting: the Host
+                  // keeps the PTY for 10 minutes, so keeping `session` is what
+                  // makes the reconnect a reattach instead of a new shell. Only
+                  // a real exit (or an expired id) drops it.
+                  const exitState = terminalExitState(tab, code, message)
+                  if (exitState.kind === 'expired') {
                     // Stale reattach: drop the id and retry once with a fresh shell.
                     patchTab(tab.id, { session: undefined, nonce: tab.nonce + 1, connected: true, note: undefined })
                     return
                   }
                   patchTab(tab.id, {
-                    connected: false,
-                    session: undefined,
-                    note: code === null ? (message ?? t('term.closed')) : `exit ${code}`,
+                    connected: exitState.connected,
+                    session: exitState.session,
+                    note: exitState.noteText ?? (exitState.noteKey === undefined ? undefined : t(exitState.noteKey)),
                   })
                 }}
               />
@@ -345,7 +504,13 @@ export function TerminalView(props: {
               <div className="rvs-term-dead">
                 {tab.note !== undefined && <div className="rvs-empty">{tab.note}</div>}
                 <div className="rvs-commit-row" style={{ justifyContent: 'center' }}>
-                  <button type="button" className="rvs-chip primary" onClick={() => reconnect(tab.id, true)}>
+                  <button
+                    type="button"
+                    className="rvs-chip primary"
+                    // A tab that still knows its Host session id reattaches to
+                    // the live shell; only a tab without one opens a fresh shell.
+                    onClick={() => reconnect(tab.id, tab.session === undefined)}
+                  >
                     {t('term.reconnect')}
                   </button>
                 </div>

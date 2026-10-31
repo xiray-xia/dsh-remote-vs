@@ -46,6 +46,10 @@ export interface StageClock {
 }
 /** The debounce window: how long clicks keep merging into one probe. */
 export declare const DEFAULT_STAGE_WINDOW_MS = 250;
+/** Called by the source-control panel whenever its repository changes. */
+export declare function setVisibleStageRepository(target: ScmTarget | undefined): void;
+/** The repository the coordinator may write local results back into. */
+export declare function visibleStageRepository(): ScmTarget | undefined;
 /**
  * Coordinates optimistic stage/unstage with a debounced, path-limited check.
  *
@@ -87,6 +91,15 @@ export declare class StageCoordinator {
     flush(): Promise<void>;
     /** Drop the pending window (page teardown; the writes already went out). */
     dispose(): void;
+    /**
+     * May a result about `target` be written into the panel's local model?
+     *
+     * `true` while no panel has reported a repository (headless callers, local
+     * checks) and while the reported repository IS `target`. `false` once the
+     * panel has moved to another repository: the paths in the result are relative
+     * to `target`'s root and would land on the wrong rows (see `visibleRepository`).
+     */
+    private stillVisible;
     /** Queue one write behind the previous one for the same repository. */
     private enqueue;
     /** (Re)start the debounce window. */

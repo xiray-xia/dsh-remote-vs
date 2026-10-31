@@ -88,12 +88,20 @@ const CONNECTION_ERROR_RE = /not connected|no response from server|connection lo
 /**
  * Whether `error` (or its message) is a transport-level failure.
  *
- * The flag is honoured first: a repeat failure's message is REWRITTEN to a
- * localized sentence before it is thrown (see `api.call`), and downstream
- * guards (toast quieting, the offline banner) must still see a link error.
+ * The flags are honoured first: a repeat failure's message is REWRITTEN to a
+ * localized sentence before it is thrown (see `api.call`), and downstream guards
+ * (toast quieting, the offline banner) must still see a link error.
+ *
+ * `deadline` wins over the text: a budget that ran out is an operation result,
+ * not a link failure. Its message contains "timed out", so the text rule alone
+ * would classify it as transport — and that is exactly what used to turn one
+ * slow listing into a red chip and a read-only editor.
  */
 export function isConnectionFailure(error: unknown): boolean {
-  if (typeof error === 'object' && error !== null && (error as { transport?: unknown }).transport === true) return true
+  if (typeof error === 'object' && error !== null) {
+    if ((error as { transport?: unknown }).transport === true) return true
+    if ((error as { deadline?: unknown }).deadline === true) return false
+  }
   const message = error instanceof Error ? error.message : String(error ?? '')
   return message !== '' && CONNECTION_ERROR_RE.test(message)
 }
@@ -166,8 +174,10 @@ export function applyConnectionStatuses(list: readonly RemoteConnectionStatus[])
 /** Record a transport failure the page just observed on `alias`. */
 export function noteConnectionFailure(alias: string, error: unknown): void {
   if (alias === '') return
+  // The ERROR, not its message: the `deadline` / `transport` flags live on the
+  // object, and a deadline must not paint the alias red.
+  if (!isConnectionFailure(error)) return
   const message = error instanceof Error ? error.message : String(error ?? '')
-  if (!isConnectionFailure(message)) return
   const prev = views.get(alias)
   views.set(alias, {
     alias,
@@ -222,6 +232,24 @@ export function isConnectionRecovery(
 /** Current view of the active alias (the hook is the UI path; this is for gates). */
 export function currentConnection(): ConnectionView | undefined {
   return snapshot
+}
+
+/**
+ * The cached health of ONE alias (`undefined` = never observed).
+ *
+ * `currentConnection()` answers for the alias the user is LOOKING at; an action
+ * that carries its own alias must ask by that alias instead. The undo path is
+ * the case in point: its coordinates come from `undoContext()` (the change
+ * panel), which can point at a different workspace than the visible one, and
+ * reading the visible alias' state there would block (or allow) the wrong host.
+ *
+ * A cached `error` is exactly what the save path already refuses on
+ * (`EditorPane` offline), and an unknown alias means "no evidence" — callers
+ * must treat `undefined` as "not proven down", never as healthy.
+ */
+export function connectionStateOf(alias: string): ConnectionState | undefined {
+  if (alias === '') return undefined
+  return views.get(alias)?.state
 }
 
 /** Subscribe to the active alias's connection view (undefined when none). */

@@ -144,7 +144,22 @@ export declare class SessionChanges {
      * instead of needing every root-move path to be found again.
      */
     private resetObservation;
-    /** Resolve the routing target once per session, caching the ledger. */
+    /**
+     * Resolve (or rebind) the ledger for one session from its CURRENT cwd.
+     *
+     * The cwd is re-resolved on every turn boundary instead of once per session: a
+     * session can change its working directory mid-conversation (a workspace
+     * switch, `working-directory.set`), and a ledger pinned to the first binding
+     * then keeps answering "what did this session change" about a tree the session
+     * is no longer working in — and points file-open and undo at it.
+     *
+     * Rebinding happens IN PLACE rather than forget+create: the panel keeps its
+     * identity and `turn` counter (no null-summary flicker) and one
+     * `resetObservation()` drops every fact that belonged to the previous root, so
+     * the field list stays in that one method. C1's root-snapshot guards in
+     * `refresh`/`publish`/`kickUntracked`/`absorbPreExisting` are exactly what makes
+     * this safe while a scan of the old root is still in flight.
+     */
     private ensure;
     /** Queue a refresh, coalescing bursts (a turn can end while one is running). */
     private schedule;

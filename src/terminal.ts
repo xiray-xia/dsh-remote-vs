@@ -3,6 +3,7 @@
  * detaches (reattach by id). Frames are JSON text (see protocol.ts).
  */
 import { randomUUID } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import type { WebSocket } from 'ws'
 import type { ClientChannel } from 'ssh2'
 import type { RemotePool } from './pool.ts'
@@ -21,6 +22,14 @@ interface Session {
   paused: boolean
   /** Fires once the last socket has been gone for EMPTY_SOCKET_TTL_MS. */
   reap: ReturnType<typeof setTimeout> | undefined
+  /**
+   * One decoder per stream: an SSH data chunk can end in the middle of a UTF-8
+   * character (a CJK glyph is 3 bytes, an emoji 4), and `chunk.toString('utf8')`
+   * would turn both halves into U+FFFD. `pool.ts` decodes exec output with the
+   * same API for exactly this reason.
+   */
+  outDecoder: StringDecoder
+  errDecoder: StringDecoder
 }
 
 /**
@@ -103,17 +112,26 @@ export class TerminalSessionRegistry {
       pending: 0,
       paused: false,
       reap: undefined,
+      outDecoder: new StringDecoder('utf8'),
+      errDecoder: new StringDecoder('utf8'),
     }
     this.sessions.set(id, session)
     channel.on('data', (chunk: Buffer) => {
-      this.broadcast(session, { t: 'out', d: chunk.toString('utf8') })
+      const text = session.outDecoder.write(chunk)
+      if (text !== '') this.broadcast(session, { t: 'out', d: text })
     })
     channel.stderr.on('data', (chunk: Buffer) => {
-      this.broadcast(session, { t: 'out', d: chunk.toString('utf8') })
+      const text = session.errDecoder.write(chunk)
+      if (text !== '') this.broadcast(session, { t: 'out', d: text })
     })
     channel.on('close', (code: number | null) => {
       session.alive = false
       session.exitCode = code
+      // Flush the decoder-held tail BEFORE the exit frame: a command's last
+      // character may still be sitting in the decoder when the channel closes.
+      for (const tail of [session.outDecoder.end(), session.errDecoder.end()]) {
+        if (tail !== '') this.broadcast(session, { t: 'out', d: tail })
+      }
       this.broadcast(session, { t: 'exit', code })
       for (const socket of session.sockets) {
         try {

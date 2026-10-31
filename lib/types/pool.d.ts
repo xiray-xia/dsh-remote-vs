@@ -1,6 +1,12 @@
 import { type ClientChannel, type SFTPWrapper } from 'ssh2';
 import type { RemoteStore } from './store.ts';
+import { DeadlineError } from './timeouts.ts';
 import type { RemoteConnectionStatus, RemoteExecResult } from './protocol.ts';
+/**
+ * The budget-out type lives in `timeouts.ts` (both halves need it); re-exported
+ * here because existing callers and the browse gate import it from the pool.
+ */
+export { DeadlineError };
 /** Whether `error` is a transport-level failure worth showing as a link problem. */
 export declare function isConnectionFailure(error: unknown): boolean;
 export interface ExecOptions {
@@ -74,6 +80,18 @@ export declare class RemotePool {
     private markOk;
     /** Record a connection-level failure the status chip should show. */
     private markError;
+    /**
+     * Record one operation's failure, EXCEPT when the budget simply ran out.
+     *
+     * A deadline means "this request did not answer in time", not "the link is
+     * down": the connection can be perfectly healthy and merely slow (a huge
+     * directory, an 8 MiB read on a thin link, a cold filesystem). Painting the
+     * chip red used to flip the editor to read-only and block saving — a false
+     * alarm with a real cost. Real transport failures still arrive as transport
+     * errors (`close`, `No response from server`, a channel open failure), and
+     * those keep marking; the operation itself still fails either way.
+     */
+    private noteOpFailure;
     /**
      * Probe one connection and record the outcome for the status indicator.
      *
@@ -171,6 +189,12 @@ export declare class RemotePool {
      * ssh2 has no channel-open timeout: a server that never answers leaves this
      * promise pending forever, which pins the connection's hold count and blocks
      * idle re-arming (the "SSH looks dead" symptom) while the HTTP request hangs.
+     *
+     * The deadline is spelled out here instead of wrapped around the promise
+     * because the ANSWER can arrive after it: `conn.sftp`'s callback is the only
+     * place that can still see the session, and a late one would otherwise leak a
+     * server-side channel that no slot or hold accounts for (the caller has long
+     * returned its own and moved on).
      */
     private openSession;
     /**
@@ -245,14 +269,14 @@ export declare class RemotePool {
     private hold;
     private release;
     private acquire;
+    /**
+     * The ssh2 client factory.
+     *
+     * A seam, not a preference: `dial` is the only place that has to react to
+     * "connect emitted close but never error", and a fake client is the only way a
+     * self-check can produce that shape without a real server. Production never
+     * overrides it.
+     */
+    private makeClient;
     private dial;
-}
-/**
- * An operation that ran out of its wall-clock budget.
- *
- * Tagged on purpose: callers have to tell "the remote never answered" from a real
- * remote failure (a missing path must not cost the session), and matching on the
- * message text would silently stop working the moment the template changed.
- */
-export declare class DeadlineError extends Error {
 }

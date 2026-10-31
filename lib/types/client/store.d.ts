@@ -43,6 +43,15 @@ export interface EditorTab {
     untracked: boolean;
     /** Set for a commit drill-down: the diff compares `ref^` with `ref`. */
     ref?: string;
+    /**
+     * 重命名差异的旧路径（commit diff 专用）。
+     *
+     * `openCommitFile` 的首次加载把它一起交给 `loadCommitFileDiff`（两个路径一起
+     * `git show -M` 才能把 rename 配对），但 `reloadTab` 是另一个调用点：不存进 tab，
+     * 重载（工具栏 ⟳ / 断线恢复的批量 reload）就只会拿新路径去问 git，rename 立刻
+     * 退化成「整篇新增」。
+     */
+    origPath?: string;
     /** 1-based line to reveal after load (a content-search hit). */
     line?: number;
     /**
@@ -576,7 +585,18 @@ export declare function openCommitFile(hash: string, rel: string, origPath?: str
 export declare function activateTab(id: string): void;
 export declare function closeTab(id: string): void;
 export declare function updateTab(id: string, next: Partial<EditorTab>): void;
-/** Write one tab back to the remote host. @returns true when the write landed. */
+/**
+ * Write one tab back to the remote host. @returns true when the burst's LAST
+ * write landed.
+ *
+ * Requests for the SAME tab are serialized (see `SaveSlot`); a request that
+ * arrives while one is in flight becomes the single pending write, replacing any
+ * earlier pending content. Every caller of that burst — the one that started it
+ * and the coalesced-away ones — resolves with the outcome of the write that
+ * finally lands: the bytes they asked for are part of the newer buffer the
+ * editor held, so "your edit is on disk" stays true (and a burst whose last
+ * write failed reports false to all of them).
+ */
 export declare function saveTab(id: string, content: string): Promise<boolean>;
 /**
  * Re-read one tab (file content or diff payload).

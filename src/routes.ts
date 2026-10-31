@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBodyResult, writeJson, writeRouteError } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { REMOTE_API, MAX_SELECTION_DOWNLOAD, selectionDownloadName, type ExecStreamEvent, type ImportReport, type RemoteTimeouts } from './protocol.ts'
 import type { HostPayload, RemoteStore } from './store.ts'
@@ -35,6 +35,72 @@ function queryParam(url: URL, name: string): string | undefined {
   const value = url.searchParams.get(name)
   return value === null ? undefined : value
 }
+
+/**
+ * A caller mistake the route can name: well-formed HTTP, unusable payload.
+ *
+ * `/files` used to throw plain Errors for missing fields and map EVERY failure
+ * to 502, so "your request had no path" was reported as "the remote host
+ * failed". The class keeps that distinction at the HTTP status.
+ */
+class BadRequestError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BadRequestError'
+  }
+}
+
+/**
+ * Reject an oversized JSON body BEFORE reading it.
+ *
+ * A known Content-Length lets the route answer 413 without draining the body at
+ * all (the GUI always sends one). A chunked body without the header is caught by
+ * `readJsonBodyResult` after the read and answered with the same 413, so this
+ * preflight is only the cheap path — not the only one.
+ */
+function bodyTooLarge(req: IncomingMessage, maxBytes: number): boolean {
+  const raw = req.headers['content-length']
+  if (typeof raw !== 'string') return false
+  const length = Number(raw)
+  return Number.isFinite(length) && length > maxBytes
+}
+
+/** Answer 413 and drain the rest of the body so the socket is not reset mid-response. */
+function writePayloadTooLarge(req: IncomingMessage, res: ServerResponse, maxBytes: number): void {
+  writeJson(res, 413, { error: `request body exceeds ${maxBytes} bytes` }, { connection: 'close' })
+  req.resume()
+}
+
+/**
+ * Read one JSON request body, answering the outcomes every route shares the same
+ * way: an oversized body is a 413 (the connection closes), malformed JSON is a
+ * 400. `{ ok: false }` means a response was already written — the handler returns.
+ *
+ * An EMPTY body still arrives as `null`, so each route keeps its own "missing
+ * object" answer, and `objectOnly` is passed through unchanged.
+ */
+async function readBodyOrError<T>(
+  req: IncomingMessage,
+  res: ServerResponse,
+  opts: { maxBytes?: number; objectOnly?: boolean } = {},
+): Promise<{ ok: true; body: T | null } | { ok: false }> {
+  const result = await readJsonBodyResult(req, opts)
+  if (result.kind === 'too-large') {
+    writeJson(res, 413, { error: `request body exceeds ${result.maxBytes} bytes` }, { connection: 'close' })
+    return { ok: false }
+  }
+  if (result.kind === 'invalid') {
+    writeJson(res, 400, { error: 'invalid JSON body' })
+    return { ok: false }
+  }
+  return { ok: true, body: result.kind === 'ok' ? (result.value as T) : null }
+}
+
+/** Body cap of the /files route (base64/UTF-8 file content). */
+const FILES_BODY_LIMIT = 10 * 1024 * 1024
+
+/** Body cap of the ssh_config import route (pasted config text). */
+const SSH_CONFIG_BODY_LIMIT = 1024 * 1024
 
 /** This plugin's version from the shipped package.json (Settings display). */
 let cachedVersion: string | undefined
@@ -158,7 +224,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
     try {
       channel = await pool.execChannel(alias, command)
     } catch (error) {
-      writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+      writeRouteError(res, error)
       return
     }
     res.writeHead(200, {
@@ -265,7 +331,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (method === 'POST') {
-          const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+          const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+          if (!read.ok) return
+          const body = read.body
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -298,7 +366,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 200, { ok: true })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null) {
           writeJson(res, 400, { error: 'invalid JSON body' })
           return
@@ -346,7 +416,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as { alias?: unknown } | null
+        const read = await readBodyOrError<{ alias?: unknown }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.alias !== 'string') {
           writeJson(res, 400, { error: 'alias is required' })
           return
@@ -367,7 +439,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as { alias?: unknown } | null
+        const read = await readBodyOrError<{ alias?: unknown }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.alias !== 'string') {
           writeJson(res, 400, { error: 'alias is required' })
           return
@@ -376,7 +450,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           const result = await bootstrap(pool, store, body.alias)
           writeJson(res, 200, result)
         } catch (error) {
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          const message = error instanceof Error ? error.message : String(error)
+          // An unknown alias is the caller's mistake; everything else failed while
+          // generating the keypair or pushing it to the host.
+          writeJson(res, message.startsWith('unknown host alias') ? 404 : 502, { error: message })
         }
       },
     },
@@ -393,11 +470,13 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as {
+        const read = await readBodyOrError<{
           alias?: unknown
           command?: unknown
           timeoutMs?: unknown
-        } | null
+        }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.alias !== 'string' || typeof body.command !== 'string' || body.command === '') {
           writeJson(res, 400, { error: 'alias and a non-empty command are required' })
           return
@@ -419,11 +498,13 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as {
+        const read = await readBodyOrError<{
           alias?: unknown
           command?: unknown
           timeoutMs?: unknown
-        } | null
+        }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.alias !== 'string' || typeof body.command !== 'string' || body.command === '') {
           writeJson(res, 400, { error: 'alias and a non-empty command are required' })
           return
@@ -553,7 +634,13 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true, maxBytes: 10 * 1024 * 1024 })) as Record<string, unknown> | null
+        if (bodyTooLarge(req, FILES_BODY_LIMIT)) {
+          writePayloadTooLarge(req, res, FILES_BODY_LIMIT)
+          return
+        }
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true, maxBytes: FILES_BODY_LIMIT })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.op !== 'string' || typeof body.alias !== 'string') {
           writeJson(res, 400, { error: 'op and alias are required' })
           return
@@ -562,40 +649,40 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         try {
           switch (body.op) {
             case 'list': {
-              if (typeof body.path !== 'string') throw new Error('path is required')
+              if (typeof body.path !== 'string') throw new BadRequestError('path is required')
               writeJson(res, 200, { entries: await files.list(alias, body.path) })
               return
             }
             case 'stat': {
-              if (typeof body.path !== 'string') throw new Error('path is required')
+              if (typeof body.path !== 'string') throw new BadRequestError('path is required')
               writeJson(res, 200, { entry: await files.stat(alias, body.path) })
               return
             }
             case 'read': {
-              if (typeof body.path !== 'string') throw new Error('path is required')
+              if (typeof body.path !== 'string') throw new BadRequestError('path is required')
               writeJson(res, 200, await files.read(alias, body.path))
               return
             }
             case 'write': {
-              if (typeof body.path !== 'string' || typeof body.content !== 'string') throw new Error('path and content are required')
+              if (typeof body.path !== 'string' || typeof body.content !== 'string') throw new BadRequestError('path and content are required')
               const encoding = body.encoding === 'base64' ? 'base64' : 'utf8'
               writeJson(res, 200, await files.write(alias, body.path, body.content, encoding))
               return
             }
             case 'mkdir': {
-              if (typeof body.path !== 'string') throw new Error('path is required')
+              if (typeof body.path !== 'string') throw new BadRequestError('path is required')
               await files.mkdir(alias, body.path)
               writeJson(res, 200, { ok: true })
               return
             }
             case 'rm': {
-              if (typeof body.path !== 'string') throw new Error('path is required')
+              if (typeof body.path !== 'string') throw new BadRequestError('path is required')
               await files.remove(alias, body.path, body.recursive === true)
               writeJson(res, 200, { ok: true })
               return
             }
             case 'rename': {
-              if (typeof body.from !== 'string' || typeof body.to !== 'string') throw new Error('from and to are required')
+              if (typeof body.from !== 'string' || typeof body.to !== 'string') throw new BadRequestError('from and to are required')
               await files.rename(alias, body.from, body.to)
               writeJson(res, 200, { ok: true })
               return
@@ -604,7 +691,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
               writeJson(res, 400, { error: `unknown op: ${body.op}` })
           }
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          // Caller mistakes are 400; only the remote side deserves 502.
+          const status = error instanceof BadRequestError ? 400 : 502
+          writeJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }
       },
     },
@@ -653,7 +742,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           const written = await files.upload(alias, path, req, undefined, overwrite)
           writeJson(res, 200, { ok: true, size: written.size })
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          writeRouteError(res, error)
         }
       },
     },
@@ -690,12 +779,11 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         try {
           await files.download(alias, path, res)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
           // The stat/stream start can still fail before any byte goes out, and
           // then the client expects its JSON error; once the body started (or
           // the connection is already gone) the only honest answer is closing
           // the connection.
-          if (!res.headersSent && !res.destroyed) writeJson(res, 502, { error: message })
+          if (!res.headersSent && !res.destroyed) writeRouteError(res, error)
           else res.destroy(error instanceof Error ? error : undefined)
         }
       },
@@ -738,7 +826,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           }
           command = directoryArchiveCommand(path)
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          writeRouteError(res, error)
           return
         }
         await streamArchive(alias, command, res, directoryArchiveName(path))
@@ -785,7 +873,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           for (const path of paths) await files.stat(alias, path)
           command = selectionArchiveCommand(paths)
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          writeRouteError(res, error)
           return
         }
         await streamArchive(alias, command, res, selectionDownloadName(paths.length))
@@ -824,7 +912,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (method === 'POST') {
-          const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+          const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+          if (!read.ok) return
+          const body = read.body
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -890,7 +980,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as { sessionId?: unknown } | null
+        const read = await readBodyOrError<{ sessionId?: unknown }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
         if (sessionId === '') {
           writeJson(res, 400, { error: 'sessionId must be a non-empty string' })
@@ -917,7 +1009,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
         const op = typeof body?.op === 'string' ? body.op : ''
         if (sessionId === '' || (op !== 'list' && op !== 'diff')) {
@@ -961,7 +1055,8 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         try {
           writeJson(res, 200, { diff: await ledger.diff(sessionId, path) })
         } catch (error) {
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          // Reading the diff is a remote (git) round trip: it failed upstream.
+          writeRouteError(res, error)
         }
       },
     },
@@ -983,7 +1078,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method ?? 'GET'}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as Record<string, unknown> | null
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         const mode = body?.mode
         if (mode !== 'off' && mode !== 'shadow' && mode !== 'enforce') {
           writeJson(res, 400, { error: `mode must be one of off/shadow/enforce (got ${JSON.stringify(mode) ?? 'missing'})` })
@@ -1001,7 +1098,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           await settings.update(ns, { routingMode: mode })
           writeJson(res, 200, { mode: worlds.mode })
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          writeRouteError(res, error)
         }
       },
     },
@@ -1027,7 +1124,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
             try {
               writeJson(res, 200, await probe(pool, alias))
             } catch (error) {
-              writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+              writeRouteError(res, error)
             }
             return
           }
@@ -1047,7 +1144,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as { alias?: unknown; version?: unknown } | null
+        const read = await readBodyOrError<{ alias?: unknown; version?: unknown }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.alias !== 'string') {
           writeJson(res, 400, { error: 'alias is required' })
           return
@@ -1055,7 +1154,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         try {
           writeJson(res, 200, await pushPipeline(pool, store, body.alias, typeof body.version === 'string' ? { version: body.version } : {}))
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          writeRouteError(res, error)
         }
       },
     },
@@ -1072,7 +1171,13 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { maxBytes: 1024 * 1024 })) as { text?: unknown } | null
+        if (bodyTooLarge(req, SSH_CONFIG_BODY_LIMIT)) {
+          writePayloadTooLarge(req, res, SSH_CONFIG_BODY_LIMIT)
+          return
+        }
+        const read = await readBodyOrError<{ text?: unknown }>(req, res, { maxBytes: SSH_CONFIG_BODY_LIMIT })
+        if (!read.ok) return
+        const body = read.body
         try {
           const text = body !== null && typeof body.text === 'string' ? body.text : readDefaultSshConfig()
           writeJson(res, 200, applyImport(parseSshConfig(text)))
@@ -1114,7 +1219,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           writeJson(res, 405, { error: `method not allowed: ${req.method}` })
           return
         }
-        const body = (await readJsonBody(req, { objectOnly: true })) as { id?: unknown } | null
+        const read = await readBodyOrError<{ id?: unknown }>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const body = read.body
         if (body === null || typeof body.id !== 'string' || body.id === '') {
           writeJson(res, 400, { error: 'id is required' })
           return
