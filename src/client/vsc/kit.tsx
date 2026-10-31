@@ -675,6 +675,14 @@ export interface MenuEntry {
   separated?: boolean
 }
 
+/**
+ * Grace period after a menu appears during which a LEFT mousedown cannot close
+ * it: the opening gesture itself may still deliver one (platform-dependent, and
+ * a trackpad two-finger tap more often), and a panel re-render around the click
+ * can shift where that event lands.
+ */
+const MENU_OPEN_GRACE_MS = 250
+
 /** Portal-rendered context menu, clamped to the viewport before paint. */
 export function ContextMenu(props: {
   x: number
@@ -684,6 +692,8 @@ export function ContextMenu(props: {
 }): ReactNode {
   const boxRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ left: props.x, top: props.y })
+  /** When this menu appeared (monotonic): see MENU_OPEN_GRACE_MS. */
+  const openedAt = useRef(typeof performance === 'undefined' ? 0 : performance.now())
 
   useLayoutEffect(() => {
     const box = boxRef.current
@@ -709,22 +719,39 @@ export function ContextMenu(props: {
 
   useEffect(() => {
     const onDown = (e: MouseEvent): void => {
+      // The right-click that opened this menu can deliver one more mousedown
+      // (platform-dependent; a trackpad two-finger tap does it more often), and
+      // the closing job belongs to LEFT presses anyway: a fresh right-click
+      // opens a NEW menu, which replaces this one without needing a close.
+      if (e.button === 2) return
+      if (performance.now() - openedAt.current < MENU_OPEN_GRACE_MS) return
       if (boxRef.current?.contains(e.target as Node) === true) return
       onCloseRef.current()
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') onCloseRef.current()
     }
-    const onScroll = (): void => onCloseRef.current()
+    const onResize = (): void => onCloseRef.current()
+    const onScroll = (e: Event): void => {
+      // Only the PAGE scrolling moves the world under the menu. Element
+      // scrollers (the file tree, the chat log, the SCM list) fire scroll events
+      // while background work lands — a git status refresh was enough to close
+      // the menu the moment it opened, which read as "the menu flashes and never
+      // opens". The menu is portaled at fixed viewport coordinates, so those
+      // scrolls do not invalidate it.
+      const target = e.target
+      if (target instanceof Node && target !== document && target !== document.documentElement && target !== document.body) return
+      onCloseRef.current()
+    }
     window.addEventListener('mousedown', onDown, true)
     window.addEventListener('keydown', onKey)
     window.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onScroll)
+    window.addEventListener('resize', onResize)
     return () => {
       window.removeEventListener('mousedown', onDown, true)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onScroll)
+      window.removeEventListener('resize', onResize)
     }
   }, [])
 

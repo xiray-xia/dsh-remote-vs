@@ -1291,7 +1291,17 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
                 // waiting one round trip. Leave/collapse cancels the pending one.
                 onMouseEnter={() => { if (entry.isDir) hoverDir(entry.path) }}
                 onMouseLeave={() => hoverDir(undefined)}
-                onContextMenu={(e) => openMenu(e, entry)}
+                // Right-click opens on POINTERDOWN — the first event of the
+                // gesture — so the menu is already mounted before any later
+                // event of the same click (a platform may replay mousedown, and
+                // a background git refresh may scroll) can close it. The
+                // contextmenu fallback covers surfaces that only send that
+                // (touch long-press).
+                onPointerDown={(e) => { if (e.button === 2) openMenu(e, entry) }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  if (menu.menu === undefined) openMenu(e, entry)
+                }}
                 onDragStart={(e) => {
                   dragPaths.current = selected.has(entry.path) ? [...selected] : [entry.path]
                   e.dataTransfer.effectAllowed = 'move'
@@ -1497,7 +1507,14 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         }}
         onDrop={(e) => handleDrop(root, e)}
       >
-        <div className="rvs-tree" onContextMenu={(e) => openMenu(e, undefined)}>
+        <div
+          className="rvs-tree"
+          onPointerDown={(e) => { if (e.button === 2) openMenu(e, undefined) }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            if (menu.menu === undefined) openMenu(e, undefined)
+          }}
+        >
           <div className="rvs-empty" style={{ textAlign: 'left', padding: '2px 8px', direction: 'rtl', unicodeBidi: 'plaintext' }} title={rootLabel}>
             <code style={{ fontSize: 11 }}>{rootLabel}</code>
           </div>
