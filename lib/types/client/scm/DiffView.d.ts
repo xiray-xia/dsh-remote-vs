@@ -21,4 +21,5 @@ import type { EditorTab } from '../store.tsx';
 export declare function DiffView(props: {
     tab: EditorTab;
     visible: boolean;
+    offline?: boolean;
 }): ReactNode;

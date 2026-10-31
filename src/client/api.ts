@@ -25,7 +25,8 @@ import {
   type RemoteWorkspaceBinding,
 } from '../protocol.ts'
 import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
-import { activeConnectionAlias, isConnectionFailure, noteConnectionFailure } from './connection.ts'
+import { activeConnectionAlias, currentConnection, isConnectionFailure, noteConnectionFailure } from './connection.ts'
+import { detectLang, makeT } from './i18n.ts'
 import { parseSseFrame, takeSseFrames } from './exec-output.ts'
 import {
   branchesCommand,
@@ -49,6 +50,8 @@ export class RemoteApiError extends Error {
   }
 }
 
+const t = makeT(detectLang())
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -64,10 +67,21 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const message = typeof data === 'object' && data !== null && 'error' in data && typeof (data as { error: unknown }).error === 'string'
       ? (data as { error: string }).error
       : `request failed: HTTP ${res.status}`
-    // A transport-class failure is visible in the status chip immediately,
-    // instead of after the next status poll. Business errors (missing file,
-    // permission denied, a failed git command) do not match this rule.
-    if (isConnectionFailure(message)) noteConnectionFailure(activeConnectionAlias(), new RemoteApiError(res.status, message))
+    if (isConnectionFailure(message)) {
+      const error = new RemoteApiError(res.status, message)
+      // Was the link already known to be down? The FIRST failure keeps its raw
+      // diagnostic (that is how the user learns WHY); every later failure is a
+      // repeat — the chip already explains it, so surfaces get one short
+      // sentence instead of another ssh2 string. The raw text stays on the
+      // console for anyone debugging the host.
+      const repeat = currentConnection()?.state === 'error'
+      noteConnectionFailure(activeConnectionAlias(), error)
+      if (repeat) {
+        console.debug('[dsh-remote-vs] transport error:', message)
+        throw new RemoteApiError(res.status, t('connection.actionFailed'))
+      }
+      throw error
+    }
     throw new RemoteApiError(res.status, message)
   }
   return data as T

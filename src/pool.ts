@@ -139,7 +139,7 @@ interface BrowseChannel {
  * because a handshake/channel deadline means the link (or the server behind it)
  * is not answering, which is exactly what the indicator is for.
  */
-const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection closed|connection refused|socket hang up|channel open failed|stalled|host .* was disconnected|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE/i
+const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection closed|connection refused|socket hang up|channel open fail(?:ed|ure)|stalled|host .* was disconnected|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE/i
 
 /** Whether `error` is a transport-level failure worth showing as a link problem. */
 export function isConnectionFailure(error: unknown): boolean {
@@ -281,10 +281,13 @@ export class RemotePool {
     }
     return [...aliases].sort().map((alias) => {
       const entry = this.health.get(alias)
+      const pooled = this.conns.get(alias)
       return {
         alias,
         state: entry?.state ?? 'idle',
-        open: this.conns.has(alias),
+        // connecting means a DIAL is in flight (the pooled entry exists before
+        // the Client does), so that is not an open connection yet.
+        open: pooled !== undefined && pooled.connecting === undefined,
         ...(entry?.okAt === undefined ? {} : { okAt: entry.okAt }),
         ...(entry?.errorAt === undefined ? {} : { errorAt: entry.errorAt }),
         ...(entry?.error === undefined ? {} : { error: entry.error }),
@@ -311,8 +314,14 @@ export class RemotePool {
       this.hold(alias)
       this.release(alias)
       void conn
+      // A surviving pooled connection never re-dials, so the success has to be
+      // recorded HERE: this is what the status chip's retry runs, and without it
+      // a retry against a still-open-but-unhealthy connection could never paint
+      // the host healthy again.
+      this.markOk(alias)
       return { ok: true, durationMs: Date.now() - started }
     } catch (error) {
+      if (isConnectionFailure(error)) this.markError(alias, error)
       return { ok: false, error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - started }
     }
   }
@@ -342,8 +351,12 @@ export class RemotePool {
       // `runExec` answers a command failure as a RESULT, so an `error` field
       // here means the transport itself broke; a non-zero exit still proves the
       // link works. `timedOut` is a command budget, not a connection problem.
+      // AMBIGUOUS results (channel closed with neither exit status nor error —
+      // what a dropped link looks like) must NOT mark ok: the connection-level
+      // close already recorded the failure, and overwriting it here would leave
+      // the chip green for exactly the disconnect users notice most.
       if (result.error !== undefined && isConnectionFailure(result.error)) this.markError(alias, result.error)
-      else this.markOk(alias)
+      else if (result.success || result.exitCode !== null) this.markOk(alias)
       return result
     } finally {
       this.releaseSlot(alias)
@@ -758,7 +771,16 @@ export class RemotePool {
    * bulk transfer asks for use `tryAcquireSlot`, so they never wait on it.
    */
   async withBrowseSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts: SftpOptions = {}): Promise<T> {
-    const lease = await this.leaseBrowse(alias)
+    let lease: { state: BrowseChannel; sftp: SFTPWrapper }
+    try {
+      lease = await this.leaseBrowse(alias)
+    } catch (error) {
+      // A channel/subsystem OPEN failure used to happen before this method's own
+      // catch (the lease sat outside the try), so the chip stayed healthy while
+      // every listing failed — exactly what MaxSessions exhaustion looks like.
+      if (isConnectionFailure(error)) this.markError(alias, error)
+      throw error
+    }
     const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
     try {
       const result = limit <= 0

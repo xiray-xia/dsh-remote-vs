@@ -326,7 +326,10 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-conn-label {
+  max-width: 9em;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .rvs-scroll::-webkit-scrollbar {

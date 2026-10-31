@@ -478,10 +478,10 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </div>
             )}
             {activeTab.loading && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
-            {offline && activeTab.kind === 'file' && activeTab.error === undefined && activeTab.loading === false && (
+            {offline && activeTab.error === undefined && activeTab.loading === false && (
               <div className="rvs-banner warn">
                 {t('connection.editorReadOnly')}
-                {activeTab.dirty && ` ${t('connection.editorDirty')}`}
+                {activeTab.kind === 'file' && activeTab.dirty && ` ${t('connection.editorDirty')}`}
               </div>
             )}
             {!activeTab.loading && activeTab.error !== undefined && (
@@ -490,7 +490,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </div>
             )}
             {!activeTab.loading && activeTab.error === undefined && activeTab.kind === 'diff' && (
-              <DiffView tab={activeTab} visible={props.visible} />
+              <DiffView tab={activeTab} visible={props.visible} offline={offline === true} />
             )}
             {!activeTab.loading && activeTab.error === undefined && activeTab.kind === 'file' && (
               <>

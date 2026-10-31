@@ -91,7 +91,8 @@ export interface CodeEditorHandle {
 const fallbackCompartment = new Compartment()
 
 /**
- * Compartment holding the read-only flag.`n *
+ * Compartment holding the read-only flag.
+ *
  * It has to be reconfigurable, not baked into the initial state: the link can go
  * down (or a truncated file can be re-read in full) while the buffer is mounted,
  * and remounting it to change editability would throw away undo history and the

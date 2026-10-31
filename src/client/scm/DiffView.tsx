@@ -259,7 +259,7 @@ const HUNK_TOAST_KEY: Record<'stage' | 'unstage' | 'revert', string> = {
   revert: 'scm.hunkReverted',
 }
 
-export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode {
+export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: boolean }): ReactNode {
   const store = useExplorer()
   const { t, lang } = store
   const tab = props.tab
@@ -421,6 +421,11 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
   }
 
   const saveAfter = async (): Promise<void> => {
+    if (props.offline === true) {
+      // The link is down: writing now can only fail (see the connection chip).
+      toast(t('connection.saveBlocked'), true)
+      return
+    }
     // The editable pane is a CodeMirror buffer: read it imperatively so the
     // write carries the live text, then persist through the same route the
     // file editor uses and reload the diff from the new working tree.
@@ -456,7 +461,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
     )
   }
 
-  const editable = mode === 'after' && !tab.staged
+  const editable = mode === 'after' && !tab.staged && props.offline !== true
 
   return (
     <div className="rvs-diff">
@@ -632,6 +637,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean }): ReactNode
                 ref={editorRef}
                 initial={editBuffer ?? tab.diff?.newText ?? ''}
                 path={tab.fullPath}
+                readOnly={props.offline === true}
                 visible={props.visible}
                 ctx={store.ctx}
                 sessionId={chat.sessionId}

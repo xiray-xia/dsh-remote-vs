@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
 import { ConnectionStatusChip } from './ConnectionStatus.tsx'
-import { applyConnectionStatuses, setActiveConnectionAlias, useConnectionStatus } from './connection.ts'
+import { applyConnectionStatuses, isConnectionRecovery, setActiveConnectionAlias, useConnectionStatus, type ConnectionTrace } from './connection.ts'
 import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
@@ -168,23 +168,30 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    *
    * Directory listings, git status and CLEAN editor tabs were all read before
    * the drop. Dirty tabs are deliberately not reloaded (that would throw the
-   * user's edits away) and the user is told so.
+   * user's edits away) and the user is told so. Read-only DIFF tabs have no
+   * unsaved edits, so they are reloaded like clean file tabs.
    *
    * Deps are intentionally just the state: `store` identity changes on every
    * publish, and re-running this on any publish would re-fire the refresh loop.
    */
-  const lastConnection = useRef<{ alias: string; state: string | undefined }>({ alias: '', state: undefined })
+  const lastConnection = useRef<ConnectionTrace | undefined>(undefined)
+  useEffect(() => {
+    // A workspace switch is not a recovery: re-baseline the trace on the new
+    // alias (two already-errored hosts change the alias without changing the
+    // state, and the recovery must still fire for the second one).
+    lastConnection.current = { alias: connectionAlias, state: connection?.state }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionAlias])
   useEffect(() => {
     const previous = lastConnection.current
     lastConnection.current = { alias: connectionAlias, state: connection?.state }
-    // A workspace switch is not a recovery: the previous alias's state says
-    // nothing about this one.
-    if (previous.alias !== connectionAlias) return
-    if (previous.state !== 'error' || connection?.state !== 'ok') return
+    if (!isConnectionRecovery(previous, connectionAlias, connection?.state)) return
     const dirty = store.tabs.filter(tab => tab.kind === 'file' && tab.dirty).length
     refreshAfterReconnect()
     for (const tab of store.tabs) {
-      if (tab.kind !== 'file' || tab.dirty || tab.loading) continue
+      if (tab.loading) continue
+      if (tab.kind === 'file' && tab.dirty) continue
+      if (tab.kind !== 'file' && tab.kind !== 'diff') continue
       void store.reloadTab(tab.id)
     }
     if (dirty > 0) store.info(t('connection.recoveredDirty'))

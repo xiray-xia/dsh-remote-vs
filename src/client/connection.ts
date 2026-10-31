@@ -18,6 +18,20 @@ import type { RemoteConnectionStatus } from '../protocol.ts'
 
 export type ConnectionState = 'ok' | 'error' | 'idle'
 
+/**
+ * The i18n key for a state's label.
+ *
+ * Kept here (not inside the chip) so the gate can assert the MAPPING without a
+ * browser: rendering the pool's normal lazy state as "not connected" was a real
+ * UX defect — idle means "nothing to report yet / connects on demand", not a
+ * broken link.
+ */
+export function connectionLabelKey(state: ConnectionState): string {
+  if (state === 'ok') return 'connection.ok'
+  if (state === 'error') return 'connection.error'
+  return 'connection.idle'
+}
+
 /** What the UI renders for one alias. */
 export interface ConnectionView {
   alias: string
@@ -42,7 +56,7 @@ export interface ConnectionView {
  * in sync deliberately: the client applies the same rule only to turn an
  * operation failure into an immediate indicator update.
  */
-const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection refused|socket hang up|channel open failed|stalled|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE|host .* was disconnected/i
+const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection refused|socket hang up|channel open fail(?:ed|ure)|connection closed|stalled|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE|host .* was disconnected/i
 
 /** Whether `error` (or its message) is a transport-level failure. */
 export function isConnectionFailure(error: unknown): boolean {
@@ -52,6 +66,8 @@ export function isConnectionFailure(error: unknown): boolean {
 
 let activeAlias = ''
 const views = new Map<string, ConnectionView>()
+/** Explicit-retry successes (epoch ms): a stale poll error must not undo them. */
+const probes = new Map<string, number>()
 const listeners = new Set<() => void>()
 /** Last value handed to `useSyncExternalStore` — a new object only on change. */
 let snapshot: ConnectionView | undefined
@@ -94,6 +110,10 @@ export function activeConnectionAlias(): string {
 export function applyConnectionStatuses(list: readonly RemoteConnectionStatus[]): void {
   for (const item of list) {
     const prev = views.get(item.alias)
+    // A poll response generated BEFORE a successful manual retry can land after
+    // it; a failure older than that probe must not repaint the chip red.
+    const probedAt = probes.get(item.alias) ?? 0
+    if (item.state === 'error' && probedAt > (item.errorAt ?? 0)) continue
     const keepLocalError = prev?.state === 'error' && item.state === 'ok'
       && prev.notedAt !== undefined && (item.okAt === undefined || item.okAt < prev.notedAt)
     if (keepLocalError) continue
@@ -127,23 +147,42 @@ export function noteConnectionFailure(alias: string, error: unknown): void {
   refreshSnapshot()
 }
 
-/** Clear the local overlay once the link is proven back (test/retry). */
-export function noteConnectionOk(alias: string): void {
-  const prev = views.get(alias)
-  views.set(alias, {
-    alias,
-    state: 'ok',
-    okAt: Date.now(),
-    open: prev?.open ?? false,
-  })
-  refreshSnapshot()
-}
 
 /** Drop every cached view — tests only (a live page keeps its map). */
 export function resetConnectionViews(): void {
   views.clear()
+  probes.clear()
   snapshot = undefined
   activeAlias = ''
+}
+
+/** Record that an explicit retry just succeeded for `alias`. */
+export function markConnectionProbeOk(alias: string): void {
+  if (alias === '') return
+  probes.set(alias, Date.now())
+}
+
+/** Where the last observed state came from (see `isConnectionRecovery`). */
+export interface ConnectionTrace {
+  alias: string
+  state: string | undefined
+}
+
+/**
+ * Whether this is the LINK recovering, as opposed to a workspace switch.
+ *
+ * Between two already-errored hosts the alias changes while the state does not;
+ * counting that as a recovery would refresh the wrong workspace. The caller
+ * keeps a trace keyed by alias, so by the time the new host recovers this sees
+ * `(b, error) → (b, ok)`.
+ */
+export function isConnectionRecovery(
+  previous: ConnectionTrace | undefined,
+  alias: string,
+  state: string | undefined,
+): boolean {
+  if (previous === undefined || previous.alias !== alias) return false
+  return previous.state === 'error' && state === 'ok'
 }
 
 /** Current view of the active alias (the hook is the UI path; this is for gates). */

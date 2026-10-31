@@ -296,6 +296,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   const loadDir = useCallback(async (dir: string, force = false): Promise<void> => {
     if (alias === '') return
+    // While the link is down, a listing can only produce a 45 s SSH dial (and a
+    // spinner over the "no cache" placeholder). Cached rows stay; recovery
+    // re-lists through the revision bump, so skipping here loses nothing.
+    if (offline) return
     const key = dirKey(alias, dir)
     // NOTE: a cached listing is deliberately NOT reused as the only source. The
     // tree relies on every caller re-listing after a write (`force` = start a
@@ -322,7 +326,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         return next
       })
     }
-  }, [alias, listingsApi])
+  }, [alias, listingsApi, offline])
 
   /**
    * Warm the listing cache for a directory the pointer is resting on.
@@ -335,11 +339,13 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
    */
   const prefetchDir = useCallback((dir: string): void => {
     if (alias === '') return
+    // A speculative read while the link is down is a real SSH dial for nothing.
+    if (offline) return
     const key = dirKey(alias, dir)
     if (listingsRef.current[key] !== undefined) return
     if (listingsApi.busy(dir)) return
     listingsApi.request(dir, revisionRef.current).catch(() => undefined)
-  }, [alias, listingsApi])
+  }, [alias, listingsApi, offline])
 
   /** Hover intent: prefetch the row under the pointer after a short rest. */
   const hoverDir = (path: string | undefined): void => {
@@ -1253,13 +1259,14 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const renderDir = (dir: string, depth: number): ReactNode => {
     const rows = rowsOf(dir)
     const key = dirKey(alias, dir)
+    if (rows === undefined && offline) {
+      // Checked BEFORE the loading line: a request that was already in flight
+      // when the link dropped would otherwise show "loading" for its own
+      // deadline and hide the honest answer.
+      return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('files.offline')}</div>
+    }
     if (rows === undefined && loading.has(key)) {
       return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('common.loading')}</div>
-    }
-    if (rows === undefined && offline) {
-      // Nothing cached for this folder and no link to read it: say that once,
-      // inline, instead of leaving a blank hole (or a toast per attempt).
-      return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('files.offline')}</div>
     }
     return (
       <>

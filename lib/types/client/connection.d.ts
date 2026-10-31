@@ -1,5 +1,14 @@
 import type { RemoteConnectionStatus } from '../protocol.ts';
 export type ConnectionState = 'ok' | 'error' | 'idle';
+/**
+ * The i18n key for a state's label.
+ *
+ * Kept here (not inside the chip) so the gate can assert the MAPPING without a
+ * browser: rendering the pool's normal lazy state as "not connected" was a real
+ * UX defect — idle means "nothing to report yet / connects on demand", not a
+ * broken link.
+ */
+export declare function connectionLabelKey(state: ConnectionState): string;
 /** What the UI renders for one alias. */
 export interface ConnectionView {
     alias: string;
@@ -33,10 +42,24 @@ export declare function activeConnectionAlias(): string;
 export declare function applyConnectionStatuses(list: readonly RemoteConnectionStatus[]): void;
 /** Record a transport failure the page just observed on `alias`. */
 export declare function noteConnectionFailure(alias: string, error: unknown): void;
-/** Clear the local overlay once the link is proven back (test/retry). */
-export declare function noteConnectionOk(alias: string): void;
 /** Drop every cached view — tests only (a live page keeps its map). */
 export declare function resetConnectionViews(): void;
+/** Record that an explicit retry just succeeded for `alias`. */
+export declare function markConnectionProbeOk(alias: string): void;
+/** Where the last observed state came from (see `isConnectionRecovery`). */
+export interface ConnectionTrace {
+    alias: string;
+    state: string | undefined;
+}
+/**
+ * Whether this is the LINK recovering, as opposed to a workspace switch.
+ *
+ * Between two already-errored hosts the alias changes while the state does not;
+ * counting that as a recovery would refresh the wrong workspace. The caller
+ * keeps a trace keyed by alias, so by the time the new host recovers this sees
+ * `(b, error) → (b, ok)`.
+ */
+export declare function isConnectionRecovery(previous: ConnectionTrace | undefined, alias: string, state: string | undefined): boolean;
 /** Current view of the active alias (the hook is the UI path; this is for gates). */
 export declare function currentConnection(): ConnectionView | undefined;
 /** Subscribe to the active alias's connection view (undefined when none). */

@@ -33,6 +33,11 @@ export const DYNAMIC_KEYS = [
   'downloads.running',
   'downloads.indeterminate',
   'downloads.sizeUnknown',
+  // Labels chosen through connectionLabelKey in connection.ts (a state → key
+  // mapping, so the call site is 	(connectionLabelKey(state))).
+  'connection.ok',
+  'connection.error',
+  'connection.idle',
 ] as const
 
 const zh: Record<string, string> = {
@@ -462,9 +467,9 @@ const zh: Record<string, string> = {
   'changes.undoConflict': '这处改动的上下文已经变了，远端拒绝了撤销（文件未被修改）。',
   'changes.undoMissing': '这处改动没有可用的补丁内容，无法撤销。',
   // -- 连接状态与断线降级
-  'connection.ok': '已连接',
+  'connection.ok': '连接正常',
   'connection.error': '连接异常',
-  'connection.idle': '未连接',
+  'connection.idle': '就绪（按需连接）',
   'connection.retrying': '重连中…',
   'connection.retryHint': '点击重试连接',
   'connection.lastOk': '最近成功',
@@ -472,8 +477,11 @@ const zh: Record<string, string> = {
   'connection.editorDirty': '有未保存改动，恢复连接后才能保存。',
   'connection.saveBlocked': '连接已断开，暂时无法保存；恢复后请重试。',
   'connection.readFailed': '连接已断开，无法读取该文件；恢复后会自动刷新。',
-  'connection.recovered': '连接已恢复：目录、Git 状态和只读标签已刷新。',
+  'connection.recovered': '连接已恢复：目录、Git 和未修改的标签已刷新。',
   'connection.recoveredDirty': '连接已恢复：目录与 Git 已刷新；有未保存改动的标签未自动重载。',
+  'connection.errorAt': '上次失败',
+  'connection.detail': '诊断',
+  'connection.actionFailed': '连接已断开，操作未发送；恢复后请重试。',
   'files.offline': '连接已断开，且此目录没有缓存',
 }
 
@@ -904,9 +912,9 @@ const en: Record<string, string> = {
   'changes.undoConflict': 'The surroundings of this change moved, so the host refused the revert (the file was not modified).',
   'changes.undoMissing': 'No patch is available for this change, so nothing was reverted.',
   // -- connection status + degraded (offline read-only) mode
-  'connection.ok': 'Connected',
+  'connection.ok': 'Connection OK',
   'connection.error': 'Connection issue',
-  'connection.idle': 'Not connected',
+  'connection.idle': 'Ready (on demand)',
   'connection.retrying': 'Reconnecting…',
   'connection.retryHint': 'Click to retry the connection',
   'connection.lastOk': 'Last success',
@@ -914,8 +922,11 @@ const en: Record<string, string> = {
   'connection.editorDirty': 'There are unsaved edits; they can be saved once the connection recovers.',
   'connection.saveBlocked': 'The connection is down, so the file cannot be saved; try again after it recovers.',
   'connection.readFailed': 'The connection is down, so this file cannot be read; it refreshes automatically when the link is back.',
-  'connection.recovered': 'Connection recovered: directories, git status and clean tabs were refreshed.',
+  'connection.recovered': 'Connection recovered: directories, git and unmodified tabs were refreshed.',
   'connection.recoveredDirty': 'Connection recovered: directories and git were refreshed; tabs with unsaved edits were left alone.',
+  'connection.errorAt': 'Last failure',
+  'connection.detail': 'Diagnostics',
+  'connection.actionFailed': 'The connection is down, so the action was not sent; try again after it recovers.',
   'files.offline': 'Connection lost, and this folder has no cached listing',
 }
 
