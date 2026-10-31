@@ -107,29 +107,53 @@ export function gitFailed(stderr: string): string | undefined {
 
 // ------------------------------------------------------------- parsers
 
+/**
+ * Parse the `-b` header line of `status --porcelain=v1`.
+ *
+ * The branch name runs up to the first whitespace or the `...` upstream
+ * separator — NOT through a character class that excludes dots. `release.1.2026`,
+ * `v1.2.3` and `feature/x.y` are ordinary branch names, and stopping at the
+ * first `.` also left the `...upstream` part and the `[ahead/behind]` block
+ * unmatched, so ahead/behind silently stayed 0 for those branches.
+ *
+ * Shapes git emits (all of them are covered here):
+ *   ## main
+ *   ## main...origin/main
+ *   ## main...origin/main [ahead 1, behind 2]
+ *   ## main...origin/main [gone]
+ *   ## HEAD (no branch)          (detached HEAD)
+ *   ## No commits yet on master  (empty repository)
+ */
+function parseStatusHead(head: string): { branch: string; detached: boolean; ahead: number; behind: number } {
+  if (!head.startsWith('## ')) return { branch: '', detached: false, ahead: 0, behind: 0 }
+  let rest = head.slice(3)
+  let counts = ''
+  const bracket = /^(.*?) \[([^\]]*)\]$/.exec(rest)
+  if (bracket !== null) {
+    rest = bracket[1] as string
+    counts = bracket[2] as string
+  }
+  // `[ahead 1]`, `[behind 2]`, `[ahead 1, behind 2]` and `[gone]` (no counts at
+  // all). Any other token in the block is ignored on purpose, exactly like git's
+  // own extra flags.
+  const aheadMatch = /(?:^|, )ahead (\d+)/.exec(counts)
+  const behindMatch = /(?:^|, )behind (\d+)/.exec(counts)
+  const ahead = aheadMatch === null ? 0 : Number(aheadMatch[1])
+  const behind = behindMatch === null ? 0 : Number(behindMatch[1])
+  const noCommits = /^No commits yet on (\S+)$/.exec(rest)
+  if (noCommits !== null) return { branch: noCommits[1] as string, detached: false, ahead, behind }
+  if (rest === 'HEAD (no branch)') return { branch: 'HEAD (detached)', detached: true, ahead: 0, behind: 0 }
+  // A refname cannot contain `..`, so the first `...` is always the separator.
+  const name = rest.split('...')[0] as string
+  if (name === 'HEAD') return { branch: 'HEAD (detached)', detached: true, ahead: 0, behind: 0 }
+  return { branch: name, detached: false, ahead, behind }
+}
+
 /** Parse `status --porcelain=v1 -b` into branch + file rows. */
 export function parseStatus(stdout: string): GitStatus {
   const lines = stdout.split('\n')
   const head = lines[0] ?? ''
-  let branch = ''
-  let detached = false
-  let ahead = 0
-  let behind = 0
-  const branchMatch = /^## ([^\s.]+(?:\.\.\.[^\s[]+)?)(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(head)
-  if (branchMatch !== null) {
-    const name = branchMatch[1] as string
-    if (name === 'HEAD' || name.startsWith('HEAD ')) {
-      detached = true
-      branch = 'HEAD (detached)'
-    } else {
-      branch = name.includes('...') ? (name.split('...')[0] as string) : name
-    }
-    ahead = branchMatch[2] !== undefined ? Number(branchMatch[2]) : 0
-    behind = branchMatch[3] !== undefined ? Number(branchMatch[3]) : 0
-  } else if (head.startsWith('## HEAD (no branch')) {
-    detached = true
-    branch = 'HEAD (detached)'
-  }
+  const { branch, detached, ahead, behind } = parseStatusHead(head)
   const staged: GitStatus['staged'] = []
   const unstaged: GitStatus['unstaged'] = []
   const untracked: string[] = []

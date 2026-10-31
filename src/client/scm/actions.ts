@@ -235,6 +235,12 @@ export interface DiffPayload {
   newText: string
   /** True when either side is binary (the view refuses to render it). */
   unsupported: boolean
+  /**
+   * True when the WORKING-TREE side hit the read cap (8 MiB), so `newText` is a
+   * prefix of the file. The after pane must then be read-only: saving it would
+   * write the truncated prefix back over the real file.
+   */
+  truncated?: boolean
 }
 
 /** Load a file's diff with both full revisions. */
@@ -242,7 +248,7 @@ export async function loadDiff(alias: string, root: string, path: string, staged
   if (untracked) {
     const read = await api.fileOp.read(alias, joinRemote(root, path))
     if (read.binary) return { diff: '', oldText: '', newText: '', unsupported: true }
-    return { diff: '', oldText: '', newText: read.text ?? '', unsupported: false }
+    return { diff: '', oldText: '', newText: read.text ?? '', unsupported: false, truncated: read.truncated }
   }
   const diffOut = await run(alias, diffCommand(root, { staged, path }))
   const diff = diffOut.stdout
@@ -252,6 +258,7 @@ export async function loadDiff(alias: string, root: string, path: string, staged
   const oldRev = staged ? 'HEAD' : ':0'
   const oldText = await tryRun(alias, fileAtRevCommand(root, oldRev, path))
   let newText = ''
+  let truncated = false
   if (staged) {
     newText = await tryRun(alias, fileAtRevCommand(root, ':0', path))
   } else {
@@ -259,13 +266,14 @@ export async function loadDiff(alias: string, root: string, path: string, staged
       const read = await api.fileOp.read(alias, joinRemote(root, path))
       if (read.binary) return { diff, oldText, newText: '', unsupported: true }
       newText = read.text ?? ''
+      truncated = read.truncated
     } catch {
       // Deleted on the worktree: the right side is empty by definition.
       newText = ''
     }
   }
   // `git show` appends nothing; a missing blob means "new file" ('').
-  return { diff, oldText: stripTrailingNewline(oldText), newText: stripTrailingNewline(newText), unsupported: false }
+  return { diff, oldText: stripTrailingNewline(oldText), newText: stripTrailingNewline(newText), unsupported: false, truncated }
 }
 
 /** `git show` output keeps the trailing newline the file content does not need. */

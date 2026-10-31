@@ -65,6 +65,14 @@ const OUT_LOW_WATER = 1 * 1024 * 1024
  */
 export const TERMINAL_MAX_FRAME_BYTES = 1024 * 1024
 
+/**
+ * `WebSocket.OPEN` (RFC 6455 readyState 1).
+ *
+ * Used to detect a socket that closed while a shell was still being opened: the
+ * library never replays a `close` event to a listener attached afterwards.
+ */
+const WS_OPEN = 1
+
 export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>()
 
@@ -222,6 +230,16 @@ export class TerminalSessionRegistry {
     }
     ws.on('close', detach)
     ws.on('error', detach)
+    /**
+     * The socket may have closed while `pool.shell()` was still dialing: a cold
+     * connection takes seconds, and a page reload (or a closed tab) during it
+     * happens well before those listeners exist. EventEmitter does not replay
+     * events, so without this the socket would sit in `sockets` forever, no
+     * detach would ever run, no reap would ever arm — and the session, its PTY
+     * and the pooled connection's hold would leak for the life of the process.
+     * `readyState` is the only way to observe "already gone" from here.
+     */
+    if (ws.readyState !== WS_OPEN) detach()
   }
 
   /** Keep the shell for a while (reload can reattach), then close it for good. */

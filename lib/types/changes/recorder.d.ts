@@ -127,6 +127,23 @@ export declare class SessionChanges {
      *   ledger outside the workspace it was created for.
      */
     useRepoSubdir(sessionId: string, subdir: string | undefined): void;
+    /**
+     * Forget everything observed against the ledger's previous root.
+     *
+     * The root is the subject of every fact this ledger holds: the baseline
+     * describes that tree, both scans name paths relative to it, and the flags
+     * that gate them (`absorbed`, `untrackedGivenUp`) are verdicts about that
+     * repository. Moving the root therefore makes the whole observation set
+     * meaningless at once — resetting only the ones a caller happened to remember
+     * is how the first cut of `useRepoSubdir` forgot `untracked` and `absorbed`,
+     * which announced the newly selected repository's PRE-EXISTING untracked
+     * files as this session's work (full-file additions, revertible — and a
+     * revert of an untracked file destroys a copy git never had).
+     *
+     * One entry point on purpose: a field added later belongs here by default,
+     * instead of needing every root-move path to be found again.
+     */
+    private resetObservation;
     /** Resolve the routing target once per session, caching the ledger. */
     private ensure;
     /** Queue a refresh, coalescing bursts (a turn can end while one is running). */
@@ -154,7 +171,7 @@ export declare class SessionChanges {
      * ledger looks one level down once and adopts the repository it finds, which
      * is the same idea the SCM panel's `repoSubdir` expresses by hand.
      *
-     * @returns entries relative to the ledger's root, or undefined when no
+     * @returns the entries and the root they are relative to, or undefined when no
      *   repository could be found (the ledger then reports why).
      */
     private scanTracked;

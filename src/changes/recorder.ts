@@ -110,6 +110,19 @@ interface FileRecord {
   after: string | null
   binary: boolean
   truncated: boolean
+  /**
+   * Whether {@link SessionChanges.diff} may hand out a real reverse patch.
+   *
+   * A record with no old side is a whole-file creation, and the only reverse of
+   * its patch is deleting the file. That is recoverable when git holds the
+   * content (a tracked addition — the index still has it) and unrecoverable when
+   * it does not: an untracked file exists only in the worktree, so a revert
+   * would destroy its single copy. A missing old side (a failed read) is not
+   * evidence either, and a creation patch built from missing evidence is a
+   * guess. Both cases are still served for display; only the patch is withheld,
+   * which makes the client's undo path fail closed instead of deleting.
+   */
+  undoable: boolean
 }
 
 /** Grace added to an exec budget before the watchdog gives up on it. */
@@ -125,7 +138,7 @@ interface Ledger {
   /** Content of every path that was ALREADY dirty when the session began. */
   baseline: Map<string, ReadResult> | undefined
   baselineTaken: boolean
-  /** Set once the untracked scan proves unusable on this host; stops retrying it. */
+  /** Set once the untracked scan proves unusable for THIS root; stops retrying it. */
   untrackedGivenUp: boolean
   /** Wall-clock ms this ledger appeared: the session's own start for mtime tests. */
   startedAt: number
@@ -292,8 +305,12 @@ export class SessionChanges {
       heading: '',
       lines: hunk.lines,
       // The client hands this straight to `git apply -R` for "revert this
-      // change", so it must be a real patch, not a display artifact.
-      patch: hunkPatch(record.display, hunk),
+      // change", so it must be a real patch, not a display artifact. Empty
+      // means "display only": the client's undo path refuses an empty patch
+      // (`changes.undoMissing`), which is the fail-closed answer for a record
+      // whose reverse would delete a file git has no copy of (see
+      // `FileRecord.undoable`).
+      patch: record.undoable ? hunkPatch(record.display, hunk) : '',
     }))
     if (hunks.length === 0) {
       return { kind: 'missing', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
@@ -389,16 +406,43 @@ export class SessionChanges {
     if (clean === ledger.subdir) return
     ledger.subdir = clean
     ledger.root = clean === '' ? ledger.baseRoot : `${ledger.baseRoot}/${clean}`
-    // The baseline describes the previous root; it means nothing for this one.
+    this.resetObservation(ledger)
+    this.schedule(ledger)
+  }
+
+  /**
+   * Forget everything observed against the ledger's previous root.
+   *
+   * The root is the subject of every fact this ledger holds: the baseline
+   * describes that tree, both scans name paths relative to it, and the flags
+   * that gate them (`absorbed`, `untrackedGivenUp`) are verdicts about that
+   * repository. Moving the root therefore makes the whole observation set
+   * meaningless at once — resetting only the ones a caller happened to remember
+   * is how the first cut of `useRepoSubdir` forgot `untracked` and `absorbed`,
+   * which announced the newly selected repository's PRE-EXISTING untracked
+   * files as this session's work (full-file additions, revertible — and a
+   * revert of an untracked file destroys a copy git never had).
+   *
+   * One entry point on purpose: a field added later belongs here by default,
+   * instead of needing every root-move path to be found again.
+   */
+  private resetObservation(ledger: Ledger): void {
     ledger.baseline = undefined
     ledger.baselineTaken = false
+    ledger.absorbed = false
     ledger.adoptedSubdir = false
+    ledger.tracked = []
+    ledger.untracked = undefined
+    ledger.untrackedAt = 0
+    ledger.untrackedMs = undefined
+    ledger.untrackedGivenUp = false
     ledger.files = []
     ledger.records = new Map()
     ledger.added = 0
     ledger.deleted = 0
+    ledger.truncated = undefined
     ledger.at = 0
-    this.schedule(ledger)
+    ledger.unavailable = undefined
   }
 
   // ------------------------------------------------------------- internals
@@ -489,9 +533,14 @@ export class SessionChanges {
    */
   private async refresh(ledger: Ledger): Promise<void> {
     if (ledger.disposed || ledger.root === '') return
-    const tracked = await this.scanTracked(ledger)
-    if (ledger.disposed || tracked === undefined) return
-    ledger.tracked = tracked
+    const scanned = await this.scanTracked(ledger)
+    if (ledger.disposed || scanned === undefined) return
+    // The root may have moved while the scan was in flight (the user picked
+    // another repository directory). `scanTracked` reports the root its entries
+    // belong to, so a mismatch means someone else owns the observation now —
+    // publish nothing and let that caller's own refresh land.
+    if (ledger.root !== scanned.root) return
+    ledger.tracked = scanned.entries
     await this.publish(ledger)
     void this.kickUntracked(ledger)
   }
@@ -499,6 +548,11 @@ export class SessionChanges {
   /** Recompute the panel's list from the scans currently known. */
   private async publish(ledger: Ledger): Promise<void> {
     if (ledger.disposed) return
+    // The reads below are relative to the root at THIS moment. A root move while
+    // they are in flight (the user picked another repository directory) makes
+    // the answer mixed-root, so it must not reach the panel; the caller that
+    // moved the root has already queued its own refresh.
+    const root = ledger.root
     const merged = new Map<string, StatusEntry>()
     for (const entry of ledger.tracked) merged.set(entry.path, entry)
     for (const entry of ledger.untracked ?? []) {
@@ -512,8 +566,9 @@ export class SessionChanges {
     if (!ledger.baselineTaken) {
       // First observation: everything dirty RIGHT NOW predates this ledger, so
       // it becomes the baseline rather than a change to report.
-      ledger.baseline = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
-      if (ledger.disposed) return
+      const first = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
+      if (ledger.disposed || ledger.root !== root) return
+      ledger.baseline = first
       ledger.baselineTaken = true
       ledger.files = []
       ledger.records = new Map()
@@ -531,7 +586,7 @@ export class SessionChanges {
     const fromHead = listed.filter(entry => !baseline.has(entry.path)).map(entry => entry.path)
     const head = fromHead.length === 0 ? new Map<string, ReadResult>() : await this.readPaths(ledger, fromHead, 'head')
     const after = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
-    if (ledger.disposed) return
+    if (ledger.disposed || ledger.root !== root) return
 
     const records = new Map<string, FileRecord>()
     const files: RemoteChangedFile[] = []
@@ -556,6 +611,12 @@ export class SessionChanges {
       // sides means the session never wrote to it.
       if ((binary || fileTruncated) && sameStat(beforeSide, afterSide)) continue
       const oversized = fileTruncated && !binary
+      // An untracked path with no old side is a file THIS session created and
+      // git still knows nothing about. Its reverse patch would be "delete the
+      // file", and that copy is the only one — the same applies when there is no
+      // old side at all because the read failed. Serve it for display only.
+      const untrackedCreation = entry.status === '?' && before === null
+      const undoable = !binary && !oversized && beforeSide !== undefined && !untrackedCreation
       const diff = binary || oversized ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
       const status = panelStatus(entry.status)
       const absolute = posixJoin(ledger.root, entry.path)
@@ -567,6 +628,7 @@ export class SessionChanges {
         after: afterText,
         binary,
         truncated: fileTruncated,
+        undoable,
       })
       added += diff.added
       deleted += diff.deleted
@@ -581,6 +643,9 @@ export class SessionChanges {
       })
     }
     files.sort((left, right) => left.display.localeCompare(right.display))
+    // Last gate before the panel sees anything: every read above was relative to
+    // `root`, so a root that moved while they ran makes this list a mixture.
+    if (ledger.root !== root) return
     ledger.records = records
     ledger.files = files
     ledger.added = added
@@ -606,14 +671,18 @@ export class SessionChanges {
    * ledger looks one level down once and adopts the repository it finds, which
    * is the same idea the SCM panel's `repoSubdir` expresses by hand.
    *
-   * @returns entries relative to the ledger's root, or undefined when no
+   * @returns the entries and the root they are relative to, or undefined when no
    *   repository could be found (the ledger then reports why).
    */
-  private async scanTracked(ledger: Ledger): Promise<StatusEntry[] | undefined> {
-    const tracked = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+  private async scanTracked(ledger: Ledger): Promise<{ root: string; entries: StatusEntry[] } | undefined> {
+    let root = ledger.root
+    const tracked = await this.run(ledger.alias, trackedStatusCommand(root))
+    // A concurrent root move makes this answer describe a tree nobody is
+    // looking at any more; hand back nothing instead of mixing two roots.
+    if (ledger.root !== root) return undefined
     if (tracked.ok) {
       ledger.unavailable = undefined
-      return parseStatusZ(tracked.stdout)
+      return { root, entries: parseStatusZ(tracked.stdout) }
     }
     // The configured repository directory may belong to a DIFFERENT workspace
     // (the panel reads it from whatever the explorer has selected), or the
@@ -623,12 +692,14 @@ export class SessionChanges {
       this.warn(`repository directory "${ledger.subdir}" is missing on the host; falling back to the session root`)
       ledger.subdir = ''
       ledger.root = ledger.baseRoot
-      ledger.baseline = undefined
-      ledger.baselineTaken = false
-      const retry = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+      // Same rule as `useRepoSubdir`: the previous root's observations (and its
+      // untracked verdicts) say nothing about this one.
+      this.resetObservation(ledger)
+      root = ledger.root
+      const retry = await this.run(ledger.alias, trackedStatusCommand(root))
       if (retry.ok) {
         ledger.unavailable = undefined
-        return parseStatusZ(retry.stdout)
+        return { root, entries: parseStatusZ(retry.stdout) }
       }
       ledger.unavailable = retry.reason
       return undefined
@@ -636,10 +707,11 @@ export class SessionChanges {
     if (!ledger.adoptedSubdir) {
       const found = await this.adoptRepositoryBelow(ledger)
       if (found !== undefined) {
-        const retry = await this.run(ledger.alias, trackedStatusCommand(ledger.root))
+        root = ledger.root
+        const retry = await this.run(ledger.alias, trackedStatusCommand(root))
         if (retry.ok) {
           ledger.unavailable = undefined
-          return parseStatusZ(retry.stdout)
+          return { root, entries: parseStatusZ(retry.stdout) }
         }
         ledger.unavailable = retry.reason
         return undefined
@@ -675,7 +747,15 @@ export class SessionChanges {
         + ' — set the repository directory in Source Control'
       return undefined
     }
-    ledger.root = `${ledger.root}/${found[0]}`
+    const adopted = `${ledger.root}/${found[0]}`
+    // Adopting a repository one level down is a root move like any other: what
+    // was observed against the container root (and what git said about the
+    // untracked walk there) describes a different tree.
+    this.resetObservation(ledger)
+    ledger.root = adopted
+    // `resetObservation` cleared it; the probe above already ran for this root,
+    // and re-probing on every refresh would turn one transient miss into a loop.
+    ledger.adoptedSubdir = true
     this.warn(`no repository at the session root; using ${ledger.root}`)
     return ledger.root
   }
@@ -693,12 +773,17 @@ export class SessionChanges {
   private async kickUntracked(ledger: Ledger): Promise<void> {
     if (ledger.disposed || ledger.untrackedGivenUp || ledger.untrackedJob !== undefined) return
     if (ledger.untracked !== undefined && Date.now() - ledger.untrackedAt < this.untrackedCadence(ledger)) return
+    // The paths this walk produces are relative to the root it runs in; capture
+    // it so a root move that happens mid-walk (seconds to minutes here) cannot
+    // merge the previous tree's names into the new one.
+    const root = ledger.root
     ledger.untrackedAt = Date.now()
     const job = (async () => {
       const started = Date.now()
-      const scan = await this.run(ledger.alias, untrackedCommand(ledger.root), this.untrackedBudget())
+      const scan = await this.run(ledger.alias, untrackedCommand(root), this.untrackedBudget())
       ledger.untrackedMs = Date.now() - started
       if (ledger.disposed) return
+      if (ledger.root !== root) return
       if (!scan.ok) {
         ledger.untrackedGivenUp = true
         this.warn(`untracked scan unusable (${scan.reason}); new files will not be listed`)
@@ -749,6 +834,7 @@ export class SessionChanges {
   private async absorbPreExisting(ledger: Ledger): Promise<void> {
     if (ledger.untracked === undefined || ledger.absorbed) return
     ledger.absorbed = true
+    const root = ledger.root
     const baseline = ledger.baseline ?? new Map<string, ReadResult>()
     ledger.baseline = baseline
     const unknown = ledger.untracked
@@ -756,7 +842,9 @@ export class SessionChanges {
       .filter(path => !baseline.has(path))
     if (unknown.length === 0) return
     const reads = await this.readPaths(ledger, unknown, 'worktree')
-    if (ledger.disposed) return
+    // A root move during the read makes the mtimes describe another tree; the
+    // move itself reset `absorbed`, so dropping the batch is enough.
+    if (ledger.disposed || ledger.root !== root) return
     for (const [path, read] of reads) {
       if (read.mtime === undefined) continue
       if (read.mtime * 1000 < ledger.startedAt) baseline.set(path, read)

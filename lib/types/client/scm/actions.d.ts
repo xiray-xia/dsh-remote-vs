@@ -86,6 +86,12 @@ export interface DiffPayload {
     newText: string;
     /** True when either side is binary (the view refuses to render it). */
     unsupported: boolean;
+    /**
+     * True when the WORKING-TREE side hit the read cap (8 MiB), so `newText` is a
+     * prefix of the file. The after pane must then be read-only: saving it would
+     * write the truncated prefix back over the real file.
+     */
+    truncated?: boolean;
 }
 /** Load a file's diff with both full revisions. */
 export declare function loadDiff(alias: string, root: string, path: string, staged: boolean, untracked?: boolean): Promise<DiffPayload>;

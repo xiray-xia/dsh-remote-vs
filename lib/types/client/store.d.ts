@@ -397,6 +397,13 @@ export declare function sessionRepoSubdir(sessionId?: string | undefined): strin
 /** The binding id the views are on (the dropdown/tree's answer), plain read. */
 export declare function selectedWorkspaceId(): string;
 /**
+ * Snapshot of the editor tabs, for non-React callers (the local gates).
+ *
+ * Same shape as `selectedWorkspaceId` / `gitState`: a plain read so a script can
+ * assert what the store actually holds without rendering a component.
+ */
+export declare function editorTabs(): readonly EditorTab[];
+/**
  * Point git at a directory inside the workspace. Repositories often live in a
  * sub-directory of the binding (`/srv/app` holding `/srv/app/web/.git`), and
  * git only answers for the directory it is run in, so the choice is persisted
@@ -538,8 +545,10 @@ export declare function remoteOpenBindings(): {
  * interceptor already resolved it), switching the explorer's selected
  * workspace when the on-screen one differs.
  *
- * @returns true when the file was handed to the editor; false when the binding
- *   is unknown (the caller then keeps the native preview).
+ * @returns true when the click was HANDLED — either the file went to the editor,
+ *   or it was deliberately refused with a message (see below); false only when
+ *   the binding is unknown, which is the caller's cue to keep the native
+ *   preview.
  */
 export declare function openRemoteFileInBinding(bindingId: string, remotePath: string, options?: {
     line?: number;

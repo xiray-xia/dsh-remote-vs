@@ -330,6 +330,25 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     changes,
   })
 
+  /**
+   * PTY sessions own their own lifetime, separate from route registration.
+   *
+   * `sync()` rebuilds the route/tool registrations whenever a volatile config
+   * value changes (`loader/volatile-update` fires for every settings edit), and a
+   * cleanup that also closed terminals made "change one setting" kill every live
+   * remote shell. So the registry gets a fiber-scoped effect of its own: it is
+   * disposed exactly once — when the plugin is actually unloaded — and never by
+   * the route re-registration in `sync()`.
+   *
+   * Cleanup order is load-bearing: this effect is registered AFTER the pool
+   * effect but BEFORE the routes effect created in `sync()`, and cordis starts a
+   * fiber's effect cleanups in reverse registration order (these cleanups are
+   * synchronous) — so on unload the routes are unregistered first (no new shell
+   * can be opened), then the terminals close (a channel close still has a live
+   * pool), and the pool is disposed last.
+   */
+  ctx.effect(() => () => { terminalSessions.dispose() }, 'dsh-remote-vs: terminal sessions')
+
   let disposeRoutes: (() => void) | undefined
 
   const tools = [
@@ -372,10 +391,11 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
       () => {
         const disposers = routes.map(route => ctx.webServer.register(route))
         const upgradeDisposer = ctx.webServer.registerUpgrade(upgrade)
+        // Route registration only: live PTY sessions are disposed by their own
+        // effect (see above), so a volatile config edit cannot kill them.
         return () => {
           for (const dispose of disposers) dispose()
           upgradeDisposer()
-          terminalSessions.dispose()
         }
       },
       'dsh-remote-vs: routes',

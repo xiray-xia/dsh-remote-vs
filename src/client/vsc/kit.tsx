@@ -483,6 +483,24 @@ function subscribe(listener: () => void): () => void {
   }
 }
 
+/**
+ * Dismiss the question that is on screen, if any, as "cancelled".
+ *
+ * `modalRequest` is a SINGLE slot: a second `confirmDialog`/`promptDialog` used
+ * to overwrite the pending one without settling its promise, so every awaiter
+ * hung forever. That is not academic — the workspace-switch guard awaits a
+ * confirm and holds a module-level `busy` flag while it does, so one overwritten
+ * dialog made every later dirty switch silently do nothing until a reload. The
+ * newest question is the one the user can actually answer; the older one is
+ * answered "cancelled" here.
+ */
+function dismissPendingModal(): void {
+  const pending = modalRequest
+  if (pending === undefined) return
+  modalRequest = undefined
+  pending.resolve(pending.kind === 'prompt' ? undefined : false)
+}
+
 /** Themed confirm; resolves false when dismissed. */
 export function confirmDialog(opts: {
   title: string
@@ -491,6 +509,7 @@ export function confirmDialog(opts: {
   okText?: string
   cancelText?: string
 }): Promise<boolean> {
+  dismissPendingModal()
   return new Promise<boolean>((resolve) => {
     modalSeq += 1
     modalRequest = {
@@ -518,6 +537,7 @@ export function promptDialog(opts: {
   okText?: string
   cancelText?: string
 }): Promise<string | undefined> {
+  dismissPendingModal()
   return new Promise<string | undefined>((resolve) => {
     modalSeq += 1
     modalRequest = {

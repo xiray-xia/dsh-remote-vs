@@ -229,11 +229,27 @@ export class RemoteStore {
     return next
   }
 
+  /**
+   * Delete one host AND its workspace bindings.
+   *
+   * The cascade has to keep the tombstone contract (see `removeWorkspace`): a
+   * binding that disappears while its alias dir stays on disk is no longer
+   * routed, but DSH's workspace registry still lists that dir, so a session
+   * rooted there would quietly execute LOCALLY against an empty folder instead
+   * of failing closed. Every cascaded binding is therefore tombstoned in the
+   * SAME atomic write as the removal — there is no on-disk state where the
+   * binding is gone but its tombstone is missing.
+   */
   remove(alias: string): boolean {
-    const before = this.doc.hosts.length
-    this.doc.hosts = this.doc.hosts.filter(h => h.alias !== alias)
+    this.reload()
+    const hosts = this.doc.hosts.filter(h => h.alias !== alias)
+    // Unknown alias: do not mutate (and do not record tombstones for nothing).
+    if (hosts.length === this.doc.hosts.length) return false
+    this.doc.hosts = hosts
+    for (const binding of this.doc.workspaces) {
+      if (binding.alias === alias) this.recordTombstone(join(aliasRoot(), binding.id))
+    }
     this.doc.workspaces = this.doc.workspaces.filter(w => w.alias !== alias)
-    if (this.doc.hosts.length === before) return false
     this.save()
     return true
   }
@@ -349,12 +365,22 @@ export class RemoteStore {
     return true
   }
 
+  /**
+   * Record one tombstone without writing (idempotent).
+   *
+   * The caller owns `save()` so a change covering several bindings lands in ONE
+   * atomic write: a crash between two writes must never leave a binding removed
+   * while its tombstone is still missing.
+   */
+  private recordTombstone(aliasPath: string): void {
+    if (!this.doc.tombstones.includes(aliasPath)) this.doc.tombstones.push(aliasPath)
+  }
+
   /** Record a removed alias path (idempotent). */
   addTombstone(aliasPath: string): void {
-    if (!this.doc.tombstones.includes(aliasPath)) {
-      this.doc.tombstones.push(aliasPath)
-      this.save()
-    }
+    if (this.doc.tombstones.includes(aliasPath)) return
+    this.recordTombstone(aliasPath)
+    this.save()
   }
 
   listTombstones(): string[] {

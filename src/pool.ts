@@ -1194,8 +1194,27 @@ export class RemotePool {
     }
     const entry: Pooled = { conn: undefined as unknown as Client, timer: undefined, lastUse: Date.now(), connecting: undefined, held: 0 }
     this.conns.set(alias, entry)
+    /**
+     * The entry object IS the ownership token: `drop()` deletes it and a later
+     * `acquire()` creates a NEW one, so comparing identity answers "does this
+     * dial still own the alias?" without any extra field.
+     *
+     * Both halves matter. Without the success check, a dial that finishes after
+     * `drop()` (host edited/deleted while connecting) leaves a live connection
+     * nobody can ever close: the entry is out of the map, `release()` is a no-op
+     * so no idle timer arms, and `dispose()` only walks the map. Without the
+     * failure check, a failed OLD dial deletes the NEW entry by alias.
+     */
     entry.connecting = this.dial(alias).then(
       (conn) => {
+        if (this.conns.get(alias) !== entry) {
+          try {
+            conn.end()
+          } catch {
+            // Already gone.
+          }
+          throw new Error(`host ${alias} was disconnected while connecting`)
+        }
         entry.conn = conn
         entry.connecting = undefined
         this.markOk(alias)
@@ -1216,7 +1235,7 @@ export class RemotePool {
         return conn
       },
       (error) => {
-        this.conns.delete(alias)
+        if (this.conns.get(alias) === entry) this.conns.delete(alias)
         this.markError(alias, error)
         throw error
       },

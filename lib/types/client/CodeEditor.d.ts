@@ -148,4 +148,16 @@ export declare const CodeEditor: import("react").ForwardRefExoticComponent<{
     savedText?: string;
     onSave: () => void;
     onDirty: (dirty: boolean) => void;
+    /**
+     * Last chance to hand the LIVE document to the store, called from this
+     * component's own unmount cleanup while the EditorView still exists.
+     *
+     * The parent cannot do this itself: React clears a child's ref before the
+     * parent's cleanup runs, so `editorRef.current` is already null there. An
+     * unmount that is not one of the plugin's own switches (the host swapping the
+     * remote-editor view away) would otherwise drop every unsaved edit while the
+     * tab kept its dirty dot, and the next Ctrl+S would write the stale bytes
+     * back. Only called when the buffer is dirty, so clean unmounts stay free.
+     */
+    onBuffer?: (tabId: string, text: string) => void;
 } & import("react").RefAttributes<CodeEditorHandle>>;

@@ -208,6 +208,26 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     store.closeTab(tab.id)
   }
 
+  /**
+   * Re-read one tab, refusing to throw away unsaved edits first.
+   *
+   * `reloadTab` replaces the buffer with the remote bytes; on a dirty tab that
+   * is the same data loss as closing without the guard, but it used to happen
+   * with no prompt at all (the toolbar button sits right next to Save).
+   */
+  const reloadWithGuard = async (tab: EditorTab): Promise<void> => {
+    if (tab.dirty) {
+      const ok = await confirmDialog({
+        title: t('editor.reloadDirty'),
+        text: tab.rel,
+        danger: true,
+        okText: t('editor.discardReload'),
+      })
+      if (!ok) return
+    }
+    await store.reloadTab(tab.id)
+  }
+
   const htmlDoc = useMemo(() => {
     if (activeTab === undefined || !activeTab.html) return ''
     return activeTab.text
@@ -432,7 +452,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
                   {t(tabStatusKey(activeTab))}
                 </span>
-                <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }} disabled={offline || activeTab.loading}>
+                <IconButton title={t('editor.reloadFile')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline || activeTab.loading}>
                   <IconRefresh size={13} />
                 </IconButton>
                 <IconButton
@@ -445,7 +465,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </>
             )}
             {activeTab.kind === 'diff' && (
-              <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }} disabled={offline}>
+              <IconButton title={t('scm.reloadDiff')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline}>
                 <IconRefresh size={13} />
               </IconButton>
             )}
@@ -550,6 +570,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       undoLabel={(mark) => undoActionLabel(t, mark.kind)}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}
+                      onBuffer={(tabId, text) => store.updateTab(tabId, { text })}
                     />
                   </div>
                 )}

@@ -230,6 +230,18 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   savedText?: string
   onSave: () => void
   onDirty: (dirty: boolean) => void
+  /**
+   * Last chance to hand the LIVE document to the store, called from this
+   * component's own unmount cleanup while the EditorView still exists.
+   *
+   * The parent cannot do this itself: React clears a child's ref before the
+   * parent's cleanup runs, so `editorRef.current` is already null there. An
+   * unmount that is not one of the plugin's own switches (the host swapping the
+   * remote-editor view away) would otherwise drop every unsaved edit while the
+   * tab kept its dirty dot, and the next Ctrl+S would write the stale bytes
+   * back. Only called when the buffer is dirty, so clean unmounts stay free.
+   */
+  onBuffer?: (tabId: string, text: string) => void
 }>(function CodeEditor(props, ref) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | undefined>(undefined)
@@ -979,6 +991,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
        * cannot ask for it. Also covers a tab closed while it was the active one.
        */
       disposeViewReport()
+      /**
+       * Hand the live document over BEFORE the view goes away (see `onBuffer`):
+       * this is the only moment at which the buffer and the tab id are both
+       * still readable. Dirty only — a clean unmount has nothing newer to keep.
+       */
+      const bufferHandler = propsRef.current.onBuffer
+      const bufferTabId = propsRef.current.tabId
+      if (dirtyRef.current && bufferHandler !== undefined && bufferTabId !== undefined) {
+        try {
+          bufferHandler(bufferTabId, view.state.doc.toString())
+        } catch {
+          // A disposed view: nothing to carry.
+        }
+      }
       view.destroy()
       viewRef.current = undefined
     }

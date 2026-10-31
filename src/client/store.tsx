@@ -48,7 +48,7 @@ import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
 import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, isLiveEditorFor, markLiveEditorSaved } from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
-import { isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
+import { confirmDialog, isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 
 /** One editor tab (code file, preview or diff). */
 export interface EditorTab {
@@ -913,20 +913,105 @@ export function openTerminalAt(dir: string): void {
  * has not resolved yet from undoing it.
  */
 export function selectWorkspace(id: string): void {
-  applyWorkspaceSelection(id, true)
+  if (state.workspaceId === id) return
+  /**
+   * A workspace switch closes EVERY tab (`applyWorkspaceSelection` replaces the
+   * list), so unsaved buffers must be confirmed first — the same rule the single
+   * tab close already follows (`EditorPane.closeWithGuard`). Without this the
+   * edits vanished with no prompt, from this plugin's own workspace dropdown.
+   *
+   * The CLEAN path stays fully synchronous on purpose: a switch that was read
+   * before repaints its whole change list in the same frame (see the hydration
+   * comment in `applyWorkspaceSelection`, and `check-git-cache` asserts it).
+   * Only the dirty path awaits the dialog.
+   */
+  const dirty = state.tabs.filter(tab => tab.dirty)
+  if (dirty.length === 0) {
+    applyWorkspaceSelection(id, true)
+    return
+  }
+  void (async () => {
+    if (!(await confirmDiscardOnWorkspaceSwitch(dirty))) return
+    applyWorkspaceSelection(id, true)
+  })()
 }
 
 /**
- * Select a binding on the PLUGIN's own initiative, claiming nothing.
+ * Switch workspace on the PLUGIN's own initiative (session follow, opening a
+ * file that belongs to another binding), claiming nothing.
  *
  * Two callers: opening a file that belongs to another binding (the change
  * panel, the click interceptor) and the follow itself. Neither is a statement
  * about where the user wants to browse — clicking a changed file is "show me
  * this result", not "I moved my workspace" — so a pending follow stays free to
  * put the selection back on the session's binding afterwards.
+ *
+ * Never discards unsaved edits: when any tab is dirty the switch is skipped and
+ * the selection stays where the user left it (they can still switch by hand,
+ * which goes through `selectWorkspace` and its confirmation).
+ *
+ * @returns whether the selection really is `id` afterwards. The auto callers
+ *   MUST check it: skipping the switch is not a no-op for them — a caller that
+ *   goes on to open a file would read that file with the OLD workspace's alias
+ *   (another host, or another file at the same path). See
+ *   `openRemoteFileInBinding`.
  */
-function selectWorkspaceAuto(id: string): void {
+function selectWorkspaceAuto(id: string): boolean {
+  if (state.workspaceId === id) return true
+  if (state.tabs.some(tab => tab.dirty)) return false
   applyWorkspaceSelection(id, false)
+  return true
+}
+
+/** Ask once before a workspace switch closes dirty editor tabs. */
+let switchGuardBusy = false
+/** Generation of the run that currently owns `switchGuardBusy` (see `finish`). */
+let switchGuardToken = 0
+/**
+ * How long a dirty workspace switch waits for its confirmation.
+ *
+ * The guard is a module-level flag, so an answer that never arrives must not
+ * hold it forever: the modal slot can be replaced, and the host can unmount the
+ * dialog host while the question is up. Without a deadline the flag would stay
+ * `true` for the rest of the session and every later dirty switch would do
+ * nothing at all, with no message (only a reload recovers). Generous on
+ * purpose — it exists for the pathological case, not to rush the user.
+ */
+const SWITCH_GUARD_TIMEOUT_MS = 60_000
+
+/**
+ * Ask before a workspace switch closes dirty editor tabs.
+ *
+ * @returns true only when the user answered "discard and switch"; a dismiss, a
+ *   second pending switch and a TIMEOUT all answer false — the timeout also
+ *   releases the guard and says so, so the failure is never silent.
+ */
+function confirmDiscardOnWorkspaceSwitch(dirty: readonly EditorTab[]): Promise<boolean> {
+  if (switchGuardBusy) return Promise.resolve(false)
+  switchGuardBusy = true
+  const token = ++switchGuardToken
+  return new Promise<boolean>((resolve) => {
+    let done = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (answer: boolean, timedOut = false): void => {
+      // A late answer from a dialog that already timed out must neither resolve
+      // this promise a second time nor unlock a NEWER guard run.
+      if (done) return
+      done = true
+      if (timer !== undefined) clearTimeout(timer)
+      if (switchGuardToken === token) switchGuardBusy = false
+      resolve(answer)
+      if (timedOut) toast(t('editor.switchTimeout'), true)
+    }
+    timer = setTimeout(() => finish(false, true), SWITCH_GUARD_TIMEOUT_MS)
+    timer.unref?.()
+    void confirmDialog({
+      title: t('editor.switchDirty'),
+      text: dirty.map(tab => tab.rel).join('、'),
+      danger: true,
+      okText: t('editor.discardSwitch'),
+    }).then(answer => finish(answer), () => finish(false))
+  })
 }
 
 /** Move the selection; `byUser` decides whether it is remembered as a choice. */
@@ -1199,6 +1284,16 @@ export function sessionRepoSubdir(sessionId?: string | undefined): string {
 /** The binding id the views are on (the dropdown/tree's answer), plain read. */
 export function selectedWorkspaceId(): string {
   return currentWorkspace()?.id ?? ''
+}
+
+/**
+ * Snapshot of the editor tabs, for non-React callers (the local gates).
+ *
+ * Same shape as `selectedWorkspaceId` / `gitState`: a plain read so a script can
+ * assert what the store actually holds without rendering a component.
+ */
+export function editorTabs(): readonly EditorTab[] {
+  return state.tabs
 }
 
 /**
@@ -1809,8 +1904,10 @@ export function remoteOpenBindings(): {
  * interceptor already resolved it), switching the explorer's selected
  * workspace when the on-screen one differs.
  *
- * @returns true when the file was handed to the editor; false when the binding
- *   is unknown (the caller then keeps the native preview).
+ * @returns true when the click was HANDLED — either the file went to the editor,
+ *   or it was deliberately refused with a message (see below); false only when
+ *   the binding is unknown, which is the caller's cue to keep the native
+ *   preview.
  */
 export function openRemoteFileInBinding(
   bindingId: string,
@@ -1821,7 +1918,19 @@ export function openRemoteFileInBinding(
   if (binding === undefined || remotePath === '') return false
   // AUTO, not a user choice: clicking a result that lives in another binding
   // must not cancel the session's pending follow (see `selectWorkspaceAuto`).
-  if (state.workspaceId !== binding.id) selectWorkspaceAuto(binding.id)
+  if (state.workspaceId !== binding.id && !selectWorkspaceAuto(binding.id)) {
+    /**
+     * The auto switch is skipped while any tab has unsaved edits, and the
+     * selection therefore still points at the OLD workspace. Opening the file
+     * anyway would read it with that workspace's alias — a different host (the
+     * read just fails) or, on the same host, whatever happens to live at the
+     * same path — and it would mint a tab keyed by the wrong alias. Refuse, say
+     * why, and still answer "handled" so the click interceptor does not fall
+     * back to the native preview and repeat the same wrong resolution.
+     */
+    toast(t('files.openBlockedByDirty'), true)
+    return true
+  }
   openFile(remotePath, options)
   return true
 }
@@ -1879,6 +1988,9 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
         diff: payload,
         model: payload.unsupported ? undefined : buildDiffModel(payload),
         binary: payload.unsupported,
+        // The after pane is a prefix when the working-tree read hit the cap:
+        // it must be read-only, or saving it would truncate the real file.
+        truncated: payload.truncated === true,
       })
     } catch (error) {
       patchTab(id, { loading: false, error: error instanceof Error ? error.message : String(error) })
@@ -1964,7 +2076,17 @@ export function updateTab(id: string, next: Partial<EditorTab>): void {
 export async function saveTab(id: string, content: string): Promise<boolean> {
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
-  if (workspace === undefined || tab === undefined || tab.kind !== 'file' || tab.binary || tab.truncated) return false
+  if (workspace === undefined || tab === undefined || tab.binary || tab.truncated) return false
+  /**
+   * A working-tree diff's "after" pane is editable (see `DiffView.saveAfter`),
+   * and it edits the WORKING TREE file at `tab.fullPath` — so this path must
+   * accept `kind: 'diff'` too. It did not: every save from that pane returned
+   * false silently, the write never happened, `reloadTab` repainted the remote
+   * bytes and the user's edit was gone while the tab still looked saved.
+   * Commit diffs (`ref`) and the staged side are history: never writable.
+   */
+  const writable = tab.kind === 'file' || (tab.kind === 'diff' && tab.ref === undefined && !tab.staged)
+  if (!writable) return false
   // Never fall back to the tab's loaded text. `tab.text` is only ever written
   // by a load/reload or by the surface handoff (`captureLiveBuffer`), never as
   // a fallback for a caller without a live buffer, so substituting it here
@@ -2067,6 +2189,7 @@ export async function reloadTab(id: string): Promise<void> {
       diff: payload,
       binary: payload.unsupported,
       model: payload.unsupported ? undefined : buildDiffModel(payload),
+      truncated: payload.truncated === true,
       dirty: false,
     })
   } catch (error) {

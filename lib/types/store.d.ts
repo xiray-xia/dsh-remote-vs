@@ -52,6 +52,17 @@ export declare class RemoteStore {
     require(alias: string): RemoteHostEntry;
     create(payload: HostPayload): RemoteHostEntry;
     update(alias: string, patch: Partial<Omit<HostPayload, 'alias'>>): RemoteHostEntry;
+    /**
+     * Delete one host AND its workspace bindings.
+     *
+     * The cascade has to keep the tombstone contract (see `removeWorkspace`): a
+     * binding that disappears while its alias dir stays on disk is no longer
+     * routed, but DSH's workspace registry still lists that dir, so a session
+     * rooted there would quietly execute LOCALLY against an empty folder instead
+     * of failing closed. Every cascaded binding is therefore tombstoned in the
+     * SAME atomic write as the removal — there is no on-disk state where the
+     * binding is gone but its tombstone is missing.
+     */
     remove(alias: string): boolean;
     private normalize;
     /** Secret-free projection for browser/agent surfaces. */
@@ -60,6 +71,14 @@ export declare class RemoteStore {
     listWorkspaces(): RemoteWorkspaceBinding[];
     createWorkspace(payload: WorkspacePayload): RemoteWorkspaceBinding;
     removeWorkspace(id: string): boolean;
+    /**
+     * Record one tombstone without writing (idempotent).
+     *
+     * The caller owns `save()` so a change covering several bindings lands in ONE
+     * atomic write: a crash between two writes must never leave a binding removed
+     * while its tombstone is still missing.
+     */
+    private recordTombstone;
     /** Record a removed alias path (idempotent). */
     addTombstone(aliasPath: string): void;
     listTombstones(): string[];

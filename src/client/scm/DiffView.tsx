@@ -259,6 +259,57 @@ const HUNK_TOAST_KEY: Record<'stage' | 'unstage' | 'revert', string> = {
   revert: 'scm.hunkReverted',
 }
 
+/** Why one hunk action (stage / unstage / revert) cannot run for this tab. */
+export type HunkBlockReason = 'offline' | 'truncated'
+
+/**
+ * Whether a hunk action is refused, and why.
+ *
+ * A hunk action ships `model.hunks[].patch` to `git apply` on the host, and that
+ * patch was parsed out of a `git diff` the host caps (`GIT_CAP`, 2 MB): on a
+ * capped read the last hunk can be a HALF patch, which git refuses as corrupt
+ * and the user sees git's raw error instead of "the file is too big". The pane
+ * is already read-only for a capped read (the `truncated` tab flag, D3); hunk
+ * writes have to obey that same promise instead of being the one exception.
+ *
+ * Pure and exported so the gate can pin both halves (offline and truncated)
+ * without rendering CodeMirror.
+ */
+export function hunkBlockReason(
+  tab: Pick<EditorTab, 'truncated'>,
+  offline: boolean,
+): HunkBlockReason | undefined {
+  if (offline) return 'offline'
+  if (tab.truncated) return 'truncated'
+  return undefined
+}
+
+/**
+ * The text the editable "after" pane must mount with.
+ *
+ * Three sources, in order, and each exists for a different unmount:
+ *  - `editBuffer` — this component's own handoff. A MODE switch (split/before/
+ *    after) unmounts only the `CodeEditor`, so the pane keeps its state.
+ *  - `tab.text` — a PREVIOUS mount's handoff, written by `onBuffer` when a tab
+ *    switch or a surface flip unmounted the whole pane. Only trusted while the
+ *    tab is dirty: once saved, the disk bytes are the truth (and a later reload
+ *    must be able to show them).
+ *  - the disk bytes — first mount, or a clean tab.
+ *
+ * Pure and exported for the same reason as `hunkBlockReason`: the handoff is
+ * exactly the kind of thing that looks right in review and silently drops text
+ * in practice.
+ */
+export function diffAfterInitialText(
+  editBuffer: string | undefined,
+  tab: Pick<EditorTab, 'text' | 'dirty'>,
+  newText: string | undefined,
+): string {
+  if (editBuffer !== undefined) return editBuffer
+  if (tab.dirty && tab.text !== '') return tab.text
+  return newText ?? ''
+}
+
 export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: boolean }): ReactNode {
   const store = useExplorer()
   const { t, lang } = store
@@ -399,10 +450,14 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
   )
 
   const runHunk = async (index: number, kind: 'stage' | 'unstage' | 'revert'): Promise<void> => {
-    // A hunk action is a remote write: offline it can only fail (and the first
-    // failure surfaces raw socket text). Keep the gutter visibly disabled too.
-    if (props.offline === true) {
-      toast(t('connection.saveBlocked'), true)
+    // A hunk action is a remote write, and it ships a patch parsed out of a
+    // possibly CAPPED diff: offline it can only fail (and the first failure
+    // surfaces raw socket text), on a truncated tab it would send a half patch
+    // that git rejects as corrupt. Both are refused with the reason; the gutter
+    // buttons are disabled for the same two states.
+    const blocked = hunkBlockReason(tab, props.offline === true)
+    if (blocked !== undefined) {
+      toast(t(blocked === 'offline' ? 'connection.saveBlocked' : 'scm.hunkTruncated'), true)
       return
     }
     const hunk = model?.hunks.find(item => item.index === index)
@@ -430,6 +485,12 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     if (props.offline === true) {
       // The link is down: writing now can only fail (see the connection chip).
       toast(t('connection.saveBlocked'), true)
+      return
+    }
+    if (tab.truncated) {
+      // `newText` is only the read cap's prefix: writing it would truncate the
+      // real file. The pane is read-only, but Ctrl+S must say why.
+      toast(t('editor.truncatedReadOnly'), true)
       return
     }
     // The editable pane is a CodeMirror buffer: read it imperatively so the
@@ -467,10 +528,18 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     )
   }
 
-  const editable = mode === 'after' && !tab.staged && props.offline !== true
+  const editable = mode === 'after' && !tab.staged && props.offline !== true && !tab.truncated
+  /**
+   * The gutter hunk buttons obey the same refusal as `runHunk` (see
+   * `hunkBlockReason`), and a disabled button names the REAL reason when it has
+   * one — a silently greyed control reads as a bug.
+   */
+  const hunkDisabled = props.offline === true || tab.truncated
+  const hunkDisabledTitle = tab.truncated ? t('scm.hunkTruncated') : undefined
 
   return (
     <div className="rvs-diff">
+      {tab.truncated && <div className="rvs-banner warn">{t('editor.truncatedReadOnly')}</div>}
       <div className="rvs-diff-toolbar">
         <Segmented<ViewMode>
           value={mode}
@@ -567,8 +636,8 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                                 <button
                                   type="button"
                                   className="rvs-hunk-btn stage"
-                                  title={tab.staged ? t('scm.unstageHunk') : t('scm.stageHunk')}
-                                  disabled={props.offline === true}
+                                  title={hunkDisabledTitle ?? (tab.staged ? t('scm.unstageHunk') : t('scm.stageHunk'))}
+                                  disabled={hunkDisabled}
                                   onClick={() => { void runHunk(hunk.index, tab.staged ? 'unstage' : 'stage') }}
                                 >
                                   {tab.staged ? '↧' : '⤒'}
@@ -577,8 +646,8 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                                   <button
                                     type="button"
                                     className="rvs-hunk-btn revert"
-                                    title={t('scm.revertHunk')}
-                                    disabled={props.offline === true}
+                                    title={hunkDisabledTitle ?? t('scm.revertHunk')}
+                                    disabled={hunkDisabled}
                                     onClick={() => { void runHunk(hunk.index, 'revert') }}
                                   >
                                     ↩
@@ -643,10 +712,16 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
               <CodeEditor
                 key={`${tab.id}:edit`}
                 ref={editorRef}
-                initial={editBuffer ?? tab.diff?.newText ?? ''}
+                initial={diffAfterInitialText(editBuffer, tab, tab.diff?.newText)}
+                // The disk side of the dirty comparison, exactly like the file
+                // editor (`EditorPane` passes `activeTab.baseline`): without it a
+                // remount that carries the handoff text would be judged clean
+                // against itself and the tab's dot would drift from the buffer.
+                savedText={tab.diff?.newText}
                 path={tab.fullPath}
-                readOnly={props.offline === true}
+                readOnly={props.offline === true || tab.truncated}
                 visible={props.visible}
+                tabId={tab.id}
                 ctx={store.ctx}
                 sessionId={chat.sessionId}
                 remoteRoot={store.repoRoot ?? store.root}
@@ -656,6 +731,17 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                 onDirty={(dirty) => {
                   store.updateTab(tab.id, { dirty })
                   forceRender(n => n + 1)
+                }}
+                /**
+                 * The diff pane's half of the D1 handover. Its `CodeEditor` is
+                 * unmounted BOTH by a mode switch (this component stays mounted)
+                 * and by a tab switch / surface flip (everything unmounts), so the
+                 * text has to land in both places: this mount's buffer for the
+                 * first, the tab for the second.
+                 */
+                onBuffer={(id, text) => {
+                  setEditBuffer(text)
+                  store.updateTab(id, { text })
                 }}
               />
             </div>

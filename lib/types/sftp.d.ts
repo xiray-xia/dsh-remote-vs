@@ -83,6 +83,31 @@ export declare class RemoteFiles {
     list(alias: string, dir: string): Promise<RemoteFileEntry[]>;
     stat(alias: string, file: string): Promise<RemoteFileEntry>;
     read(alias: string, file: string): Promise<RemoteRead>;
+    /**
+     * Write one file whole (the remote editor's save / `remote_write`), atomically.
+     *
+     * Not `writeFile` on the target: that truncates it first, so an interrupted
+     * save (a dropped link, a Host restart, a full disk mid-write) left the
+     * previous content gone AND the new one half written. The bytes go to a SIDE
+     * file next to the target (`.part-<id>`) and are only moved into place once the
+     * body is complete.
+     *
+     * "Moved into place" must not delete the target first: the old unlink-then-
+     * rename pair had a window where a failed rename left NEITHER the old file nor
+     * the new one, and reported it as `no such file`. `replaceFile` therefore uses
+     * OpenSSH's atomic `posix-rename` when the server advertises it, and otherwise
+     * swaps the target aside with a rollback, so the previous bytes survive every
+     * failure with the real error attached.
+     *
+     * Two things a fresh inode would otherwise lose:
+     *  - a symbolic link target: the side file lives next to the link's REAL
+     *    target and the link itself is left alone (the old in-place write punched
+     *    through it; replacing it with a plain file silently changed what the path
+     *    means);
+     *  - the permission bits: they are copied back with `setstat` after the swap.
+     *    Owner/group cannot be preserved without a privileged chown, so a save
+     *    keeps the bytes and the mode but takes the SSH user's ownership.
+     */
     write(alias: string, file: string, content: string, encoding?: 'utf8' | 'base64'): Promise<{
         size: number;
     }>;
