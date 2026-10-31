@@ -13,14 +13,18 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
-import { applyConnectionStatuses, connectionLabelKey, markConnectionProbeOk, useConnectionStatus, type ConnectionView } from './connection.ts'
+import {
+  applyConnectionStatuses,
+  AUTO_RETRY_MAX_ATTEMPTS,
+  AUTO_RETRY_MS,
+  connectionLabelKey,
+  consumeAutoRetry,
+  markConnectionProbeOk,
+  useConnectionStatus,
+  type ConnectionView,
+} from './connection.ts'
 import { useExplorer } from './store.tsx'
 import { MiniSpinner } from './vsc/kit.tsx'
-
-/** Auto-retry cadence for an errored link (one dial per tick). */
-const AUTO_RETRY_MS = 30_000
-/** Give up after this many consecutive failures; the chip stays clickable. */
-const AUTO_RETRY_MAX_ATTEMPTS = 3
 
 /** Tooltip: alias, state, the last failure (with its time) or the last success. */
 function titleOf(connection: ConnectionView, t: (key: string) => string): string {
@@ -75,6 +79,11 @@ export function ConnectionStatusChip(props: { compact?: boolean }): ReactNode {
   // A broken link is retried on its own, within a budget, while the page is
   // visible. Recovery otherwise waits for the user to touch something.
   const errored = connection?.state === 'error'
+  // The budget belongs to ONE error episode on ONE host: switching to another
+  // errored workspace must not inherit a spent budget.
+  useEffect(() => {
+    autoAttempts.current = 0
+  }, [alias])
   useEffect(() => {
     if (!errored || alias === '') {
       if (!errored) autoAttempts.current = 0
@@ -82,11 +91,12 @@ export function ConnectionStatusChip(props: { compact?: boolean }): ReactNode {
     }
     const timer = window.setInterval(() => {
       if (document.hidden) return
-      if (autoAttempts.current >= AUTO_RETRY_MAX_ATTEMPTS) {
+      const plan = consumeAutoRetry(errored ? 'error' : 'idle', autoAttempts.current)
+      autoAttempts.current = plan.attempts
+      if (!plan.run) {
         window.clearInterval(timer)
         return
       }
-      autoAttempts.current += 1
       void attempt()
     }, AUTO_RETRY_MS)
     return () => window.clearInterval(timer)
@@ -95,23 +105,25 @@ export function ConnectionStatusChip(props: { compact?: boolean }): ReactNode {
   }, [errored, alias])
 
   if (alias === '' || connection === undefined) return null
-  const clickable = errored && !retrying
   const label = retrying ? t('connection.retrying') : t(connectionLabelKey(connection.state))
-  const className = `rvs-conn rvs-conn-${connection.state}${props.compact === true ? ' compact' : ''}${clickable ? ' clickable' : ''}`
+  const className = `rvs-conn rvs-conn-${connection.state}${props.compact === true ? ' compact' : ''}${errored ? ' clickable' : ''}`
   const title = titleOf(connection, t)
-  if (!clickable) {
+  if (!errored) {
     // A healthy/idle read-out must not be a button whose click does nothing.
     return (
       <span className={className} title={title} role="status" aria-label={label}>
         <span className="rvs-conn-dot" aria-hidden="true" />
-        {retrying && <MiniSpinner />}
         {props.compact !== true && <span className="rvs-conn-label">{label}</span>}
       </span>
     )
   }
+  // Errored stays a BUTTON even while an automatic attempt is in flight: that
+  // dial can take the whole ready-timeout, and hiding the manual affordance for
+  // its duration is exactly when the user reaches for it.
   return (
-    <button type="button" className={className} title={title} aria-label={label} onClick={() => { void attempt() }}>
+    <button type="button" className={className} title={title} aria-label={label} aria-busy={retrying} onClick={() => { void attempt() }}>
       <span className="rvs-conn-dot" aria-hidden="true" />
+      {retrying && <MiniSpinner />}
       {props.compact !== true && <span className="rvs-conn-label">{label}</span>}
     </button>
   )

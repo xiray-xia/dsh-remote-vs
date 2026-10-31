@@ -309,6 +309,13 @@ export class RemotePool {
   /** Test a connection without disturbing the pool. */
   async test(alias: string): Promise<{ ok: boolean; banner?: string; error?: string; durationMs: number }> {
     const started = Date.now()
+    // A test must PROVE the link, not report that a pooled Client object
+    // exists. On a connection that survived a transport failure the old version
+    // answered ok without dialing, so the status chip's retry looked like it
+    // worked while the link was still broken — and a half-open link then
+    // oscillated green/red between retry and the next real request. Drop first
+    // so cquire dials for real.
+    this.drop(alias)
     try {
       const conn = await this.acquire(alias)
       this.hold(alias)

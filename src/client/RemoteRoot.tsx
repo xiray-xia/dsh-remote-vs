@@ -48,6 +48,15 @@ const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
  */
 const CONNECTION_POLL_MS = 5_000
 
+/**
+ * How long the link must stay up before the recovery refresh runs.
+ *
+ * Two poll intervals: one good sample can be a race (a retry's probe beating a
+ * still-failing dial); two in a row mean the link is actually back. Auto-retry
+ * makes flaps cheap to trigger, so the damping lives here.
+ */
+const RECOVERY_SETTLE_MS = 10_000
+
 export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNode {
   useBootstrap(props.ctx)
   return (
@@ -175,6 +184,11 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    * publish, and re-running this on any publish would re-fire the refresh loop.
    */
   const lastConnection = useRef<ConnectionTrace | undefined>(undefined)
+  // Live mirrors for the settle timer below (it fires long after the effect ran).
+  const connectionRef = useRef(connection)
+  connectionRef.current = connection
+  const connectionAliasRef = useRef(connectionAlias)
+  connectionAliasRef.current = connectionAlias
   useEffect(() => {
     // A workspace switch is not a recovery: re-baseline the trace on the new
     // alias (two already-errored hosts change the alias without changing the
@@ -186,16 +200,25 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     const previous = lastConnection.current
     lastConnection.current = { alias: connectionAlias, state: connection?.state }
     if (!isConnectionRecovery(previous, connectionAlias, connection?.state)) return
-    const dirty = store.tabs.filter(tab => tab.kind === 'file' && tab.dirty).length
-    refreshAfterReconnect()
-    for (const tab of store.tabs) {
-      if (tab.loading) continue
-      if (tab.kind === 'file' && tab.dirty) continue
-      if (tab.kind !== 'file' && tab.kind !== 'diff') continue
-      void store.reloadTab(tab.id)
-    }
-    if (dirty > 0) store.info(t('connection.recoveredDirty'))
-    else store.info(t('connection.recovered'))
+    // Require the link to STAY up for a couple of polls before refreshing: a
+    // flapping link would otherwise re-fire git + a full tree re-list + every
+    // tab reload on each flap. Auto-retry makes flaps cheap to trigger, so the
+    // damping has to live here rather than in "the user must click".
+    const timer = window.setTimeout(() => {
+      if (connectionRef.current?.state !== 'ok') return
+      if (connectionAliasRef.current !== connectionAlias) return
+      const dirty = store.tabs.filter(tab => tab.dirty).length
+      refreshAfterReconnect()
+      for (const tab of store.tabs) {
+        if (tab.loading) continue
+        if (tab.dirty) continue
+        if (tab.kind !== 'file' && tab.kind !== 'diff') continue
+        void store.reloadTab(tab.id)
+      }
+      if (dirty > 0) store.info(t('connection.recoveredDirty'))
+      else store.info(t('connection.recovered'))
+    }, RECOVERY_SETTLE_MS)
+    return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connection?.state])
 

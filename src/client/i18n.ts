@@ -38,6 +38,8 @@ export const DYNAMIC_KEYS = [
   'connection.ok',
   'connection.error',
   'connection.idle',
+  // Thrown after a repeat transport failure; translated at throw time.
+  'connection.actionFailed',
 ] as const
 
 const zh: Record<string, string> = {
@@ -477,8 +479,8 @@ const zh: Record<string, string> = {
   'connection.editorDirty': '有未保存改动，恢复连接后才能保存。',
   'connection.saveBlocked': '连接已断开，暂时无法保存；恢复后请重试。',
   'connection.readFailed': '连接已断开，无法读取该文件；恢复后会自动刷新。',
-  'connection.recovered': '连接已恢复：目录、Git 和未修改的标签已刷新。',
-  'connection.recoveredDirty': '连接已恢复：目录与 Git 已刷新；有未保存改动的标签未自动重载。',
+  'connection.recovered': '连接已恢复：目录、Git、未修改的文件标签和只读 diff 标签已刷新。',
+  'connection.recoveredDirty': '连接已恢复：目录、Git 与只读标签已刷新；有未保存改动的标签未自动重载。',
   'connection.errorAt': '上次失败',
   'connection.detail': '诊断',
   'connection.actionFailed': '连接已断开，操作未发送；恢复后请重试。',
@@ -922,8 +924,8 @@ const en: Record<string, string> = {
   'connection.editorDirty': 'There are unsaved edits; they can be saved once the connection recovers.',
   'connection.saveBlocked': 'The connection is down, so the file cannot be saved; try again after it recovers.',
   'connection.readFailed': 'The connection is down, so this file cannot be read; it refreshes automatically when the link is back.',
-  'connection.recovered': 'Connection recovered: directories, git and unmodified tabs were refreshed.',
-  'connection.recoveredDirty': 'Connection recovered: directories and git were refreshed; tabs with unsaved edits were left alone.',
+  'connection.recovered': 'Connection recovered: directories, git, unmodified file tabs and read-only diff tabs were refreshed.',
+  'connection.recoveredDirty': 'Connection recovered: directories, git and read-only tabs were refreshed; tabs with unsaved edits were left alone.',
   'connection.errorAt': 'Last failure',
   'connection.detail': 'Diagnostics',
   'connection.actionFailed': 'The connection is down, so the action was not sent; try again after it recovers.',

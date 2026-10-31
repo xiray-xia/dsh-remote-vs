@@ -399,6 +399,12 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
   )
 
   const runHunk = async (index: number, kind: 'stage' | 'unstage' | 'revert'): Promise<void> => {
+    // A hunk action is a remote write: offline it can only fail (and the first
+    // failure surfaces raw socket text). Keep the gutter visibly disabled too.
+    if (props.offline === true) {
+      toast(t('connection.saveBlocked'), true)
+      return
+    }
     const hunk = model?.hunks.find(item => item.index === index)
     if (hunk === undefined || store.repoRoot === undefined) return
     setHunkBusy(index)
@@ -562,6 +568,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                                   type="button"
                                   className="rvs-hunk-btn stage"
                                   title={tab.staged ? t('scm.unstageHunk') : t('scm.stageHunk')}
+                                  disabled={props.offline === true}
                                   onClick={() => { void runHunk(hunk.index, tab.staged ? 'unstage' : 'stage') }}
                                 >
                                   {tab.staged ? '↧' : '⤒'}
@@ -571,6 +578,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                                     type="button"
                                     className="rvs-hunk-btn revert"
                                     title={t('scm.revertHunk')}
+                                    disabled={props.offline === true}
                                     onClick={() => { void runHunk(hunk.index, 'revert') }}
                                   >
                                     ↩

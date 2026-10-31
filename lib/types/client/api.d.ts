@@ -4,6 +4,14 @@
 import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
+    /**
+     * The request failed because the SSH link did, not because the remote said no.
+     *
+     * Carried as a flag because the message can be REWRITTEN to a localized
+     * sentence for repeat failures; classification must survive that rewrite so
+     * callers (toast quieting, offline banners) keep treating it as transport.
+     */
+    transport?: boolean;
     constructor(status: number, message: string);
 }
 /** Query for one remote terminal socket. */

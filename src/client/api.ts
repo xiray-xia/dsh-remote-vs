@@ -42,6 +42,14 @@ import {
 } from '../git-format.ts'
 
 export class RemoteApiError extends Error {
+  /**
+   * The request failed because the SSH link did, not because the remote said no.
+   *
+   * Carried as a flag because the message can be REWRITTEN to a localized
+   * sentence for repeat failures; classification must survive that rewrite so
+   * callers (toast quieting, offline banners) keep treating it as transport.
+   */
+  transport?: boolean
   constructor(
     readonly status: number,
     message: string,
@@ -49,8 +57,6 @@ export class RemoteApiError extends Error {
     super(message)
   }
 }
-
-const t = makeT(detectLang())
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -69,6 +75,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       : `request failed: HTTP ${res.status}`
     if (isConnectionFailure(message)) {
       const error = new RemoteApiError(res.status, message)
+      error.transport = true
       // Was the link already known to be down? The FIRST failure keeps its raw
       // diagnostic (that is how the user learns WHY); every later failure is a
       // repeat — the chip already explains it, so surfaces get one short
@@ -78,7 +85,11 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       noteConnectionFailure(activeConnectionAlias(), error)
       if (repeat) {
         console.debug('[dsh-remote-vs] transport error:', message)
-        throw new RemoteApiError(res.status, t('connection.actionFailed'))
+        // Translated at throw time (not module load): the message follows the
+        // language the page is in when the failure happens.
+        const localized = new RemoteApiError(res.status, makeT(detectLang())('connection.actionFailed'))
+        localized.transport = true
+        throw localized
       }
       throw error
     }

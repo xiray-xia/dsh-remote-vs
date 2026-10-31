@@ -1,5 +1,25 @@
 import type { RemoteConnectionStatus } from '../protocol.ts';
 export type ConnectionState = 'ok' | 'error' | 'idle';
+/** Automatic-retry cadence for an errored link (one dial per tick). */
+export declare const AUTO_RETRY_MS = 30000;
+/**
+ * Automatic attempts allowed per error episode.
+ *
+ * Not endless on purpose: each attempt is a real SSH dial, and repeated dials
+ * against a password-auth host can count towards a lockout. After the budget
+ * the chip stays a manual retry control.
+ */
+export declare const AUTO_RETRY_MAX_ATTEMPTS = 3;
+/**
+ * Decide one automatic-retry tick.
+ *
+ * Pure so the budget can be pinned without a browser: ok/idle reset the
+ * count, rror consumes one attempt until the budget is spent.
+ */
+export declare function consumeAutoRetry(state: ConnectionState, attempts: number): {
+    run: boolean;
+    attempts: number;
+};
 /**
  * The i18n key for a state's label.
  *
@@ -27,7 +47,13 @@ export interface ConnectionView {
      */
     notedAt?: number;
 }
-/** Whether `error` (or its message) is a transport-level failure. */
+/**
+ * Whether `error` (or its message) is a transport-level failure.
+ *
+ * The flag is honoured first: a repeat failure's message is REWRITTEN to a
+ * localized sentence before it is thrown (see `api.call`), and downstream
+ * guards (toast quieting, the offline banner) must still see a link error.
+ */
 export declare function isConnectionFailure(error: unknown): boolean;
 /** Point the view at the workspace the user is looking at. */
 export declare function setActiveConnectionAlias(alias: string): void;

@@ -18,6 +18,33 @@ import type { RemoteConnectionStatus } from '../protocol.ts'
 
 export type ConnectionState = 'ok' | 'error' | 'idle'
 
+/** Automatic-retry cadence for an errored link (one dial per tick). */
+export const AUTO_RETRY_MS = 30_000
+
+/**
+ * Automatic attempts allowed per error episode.
+ *
+ * Not endless on purpose: each attempt is a real SSH dial, and repeated dials
+ * against a password-auth host can count towards a lockout. After the budget
+ * the chip stays a manual retry control.
+ */
+export const AUTO_RETRY_MAX_ATTEMPTS = 3
+
+/**
+ * Decide one automatic-retry tick.
+ *
+ * Pure so the budget can be pinned without a browser: ok/idle reset the
+ * count, rror consumes one attempt until the budget is spent.
+ */
+export function consumeAutoRetry(
+  state: ConnectionState,
+  attempts: number,
+): { run: boolean; attempts: number } {
+  if (state !== 'error') return { run: false, attempts: 0 }
+  if (attempts >= AUTO_RETRY_MAX_ATTEMPTS) return { run: false, attempts }
+  return { run: true, attempts: attempts + 1 }
+}
+
 /**
  * The i18n key for a state's label.
  *
@@ -58,8 +85,15 @@ export interface ConnectionView {
  */
 const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection refused|socket hang up|channel open fail(?:ed|ure)|connection closed|stalled|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE|host .* was disconnected/i
 
-/** Whether `error` (or its message) is a transport-level failure. */
+/**
+ * Whether `error` (or its message) is a transport-level failure.
+ *
+ * The flag is honoured first: a repeat failure's message is REWRITTEN to a
+ * localized sentence before it is thrown (see `api.call`), and downstream
+ * guards (toast quieting, the offline banner) must still see a link error.
+ */
 export function isConnectionFailure(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null && (error as { transport?: unknown }).transport === true) return true
   const message = error instanceof Error ? error.message : String(error ?? '')
   return message !== '' && CONNECTION_ERROR_RE.test(message)
 }
