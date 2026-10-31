@@ -261,6 +261,13 @@ export function FindWidget(props: {
    * that subtree travels away with the text. Fixed coordinates cannot.
    */
   anchor?: { top: number; right: number } | undefined
+  /**
+   * Bumped by the editor whenever its selection changes while this widget is
+   * open. The `n/N` readout is derived from the caret, and moves made OUTSIDE the
+   * widget (F3 / Shift-F3, a click, an arrow key) never told it — the numbers
+   * stayed on the previous match while the caret had moved on.
+   */
+  tick?: number
   onClose: () => void
 }): ReactNode {
   const [state, setState] = useState<FindState>(EMPTY)
@@ -355,6 +362,19 @@ export function FindWidget(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, props.open, props.view])
+
+  /**
+   * Re-read the `n/N` readout when the EDITOR's selection changed under us.
+   *
+   * `refreshCount` is declared after the early return below (it is written for
+   * event handlers), so this uses the same module-level `countFor` helper it
+   * wraps. Stepping from inside the widget already refreshes itself; this covers
+   * the moves that do not pass through the widget at all.
+   */
+  useEffect(() => {
+    if (!props.open || props.view === undefined) return
+    setCount(countFor(props.view))
+  }, [props.tick, props.open, props.view])
 
   if (!props.open) return null
 

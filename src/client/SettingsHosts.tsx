@@ -64,7 +64,7 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
     setSaving(true)
     setError(undefined)
     api.setRoutingMode(next).then(
-      (live) => setMode(live),
+      (live) => { setMode(live); refreshSidebarStore() },
       (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
     ).finally(() => setSaving(false))
   }

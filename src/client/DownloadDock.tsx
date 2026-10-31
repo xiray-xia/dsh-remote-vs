@@ -12,7 +12,14 @@
 
 import { useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { cancelDownload, dismissDownload, downloadsStore, formatByteCount, type DownloadTask } from './downloads.ts'
+import {
+  cancelDownload,
+  dismissDownload,
+  downloadDetailText,
+  downloadPercent,
+  downloadsStore,
+  type DownloadTask,
+} from './downloads.ts'
 import { FileIcon, FolderIcon, IconButton, IconClose, IconStop } from './vsc/kit.tsx'
 
 const STATUS_KEY: Record<DownloadTask['status'], string> = {
@@ -23,32 +30,11 @@ const STATUS_KEY: Record<DownloadTask['status'], string> = {
   handedOff: 'downloads.handedOff',
 }
 
-/** One line of detail under the bar (bytes, fallback note, or the failure). */
-function detailText(task: DownloadTask, t: (key: string) => string): string {
-  if (task.status === 'failed') return task.error ?? t('downloads.failed')
-  if (task.status === 'cancelled') return t('downloads.cancelled')
-  if (task.status === 'handedOff') return t('downloads.handedOffDetail')
-  if (task.status === 'done') {
-    return task.via === 'browserDefault' ? t('downloads.browserDefault') : t('downloads.done')
-  }
-  const loaded = formatByteCount(task.loaded)
-  const archive = task.directory || task.selection !== undefined
-  if (task.total !== undefined && task.total > 0) return `${loaded} / ${formatByteCount(task.total)}`
-  // An archive has no length by design (chunked tar). A plain FILE with no
-  // known total means a shell/proxy stripped content-length (DSH Desktop does)
-  // — saying "packaging…" there wrongly suggests we re-archive the file.
-  return `${loaded} · ${t(archive ? 'downloads.indeterminate' : 'downloads.sizeUnknown')}`
-}
-
-/** Percent for the bar, or `undefined` while the size is unknown (archives). */
-function percentOf(task: DownloadTask): number | undefined {
-  if (task.total === undefined || task.total <= 0) return undefined
-  return Math.min(100, Math.round((task.loaded / task.total) * 100))
-}
-
 function DownloadRow(props: { task: DownloadTask; t: (key: string) => string }): ReactNode {
   const { task, t } = props
-  const percent = percentOf(task)
+  // The formatting lives in `downloads.ts` (pure, node-gateable); the dock only
+  // renders it.
+  const percent = downloadPercent(task)
   return (
     <div className={`rvs-download ${task.status}`}>
       <div className="rvs-download-head">
@@ -77,7 +63,7 @@ function DownloadRow(props: { task: DownloadTask; t: (key: string) => string }):
           />
         </div>
       )}
-      <div className={`rvs-download-meta ${task.status}`} title={task.error}>{detailText(task, t)}</div>
+      <div className={`rvs-download-meta ${task.status}`} title={task.error}>{downloadDetailText(task, t)}</div>
     </div>
   )
 }

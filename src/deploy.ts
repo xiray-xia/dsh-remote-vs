@@ -605,8 +605,16 @@ async function pushHelper(
     const detail = `push failed: ${error instanceof Error ? error.message : String(error)}`
     store.setDeploy(alias, failedState(store, alias, artifact, detail))
     // Keep the live helper dir and any `.old` backup: a failed push must not
-    // leave the host without the version it already had.
-    const cleanup = `rm -f ${shRoot(paths.tmpFile)}; rm -rf ${shRoot(paths.verDir + '.next')}; rm -f ${shRoot(manifestNext)}`
+    // leave the host without the version it already had. If the swap died
+    // between `mv live .old` and `mv next live`, the backup is moved back here
+    // (P2-N4: the install script's own recovery line only runs on the NEXT push,
+    // which can be minutes away under the retry backoff).
+    const cleanup = [
+      `rm -f ${shRoot(paths.tmpFile)}`,
+      `rm -rf ${shRoot(paths.verDir + '.next')}`,
+      `rm -f ${shRoot(manifestNext)}`,
+      `if [ ! -d ${shRoot(paths.verDir)} ] && [ -d ${shRoot(paths.verDir + '.old')} ]; then mv ${shRoot(paths.verDir + '.old')} ${shRoot(paths.verDir)}; fi`,
+    ].join('; ')
     await pool.exec(alias, cleanup, { timeoutMs: 15_000 }).catch(() => undefined)
     return { alias, probe: probed, action: 'failed', previous, installed: null, detail }
   }

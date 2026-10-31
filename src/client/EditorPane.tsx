@@ -19,6 +19,7 @@ import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } 
 import { DiffView } from './scm/DiffView.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
+import { installSaveShortcut } from './vsc/save-shortcut.ts'
 import {
   IconButton,
   IconClose,
@@ -363,6 +364,49 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     // it the live buffer.
     await store.saveTab(tab.id, text)
   }
+
+  /**
+   * Latest `saveActive`, for the window-level shortcut.
+   *
+   * The listener is installed ONCE and must act on the current render's tab /
+   * offline state, never on the render that happened to register it.
+   */
+  const saveActiveRef = useRef(saveActive)
+  saveActiveRef.current = saveActive
+  /** The tab the shortcut would save right now (kept fresh by the line above). */
+  const saveShortcutTabRef = useRef<EditorTab | undefined>(activeTab)
+  saveShortcutTabRef.current = activeTab
+
+  /**
+   * Keep Ctrl/Cmd+S working when the caret is NOT inside CodeMirror.
+   *
+   * The editor's own keymap only fires while its view has focus, so after
+   * clicking the tab strip / info row / a sidebar panel the keystroke did
+   * nothing — silently, while the save button's title advertises `(Ctrl+S)`.
+   * The installer runs in the bubble phase and steps aside when CodeMirror
+   * already handled the key (`defaultPrevented`), so a focused editor still
+   * saves exactly once. Everything downstream is the existing save path
+   * (`saveActive` → `store.saveTab`), so the offline / truncated guards and the
+   * per-tab save queue apply unchanged.
+   *
+   * Only the VISIBLE surface registers: several `EditorPane`s can stay mounted at
+   * once (every native session tab keeps its `RemoteRoot` alive, and the
+   * sidebar/centre/floating surfaces overlap during a swap). The module already
+   * dedupes to ONE window listener and dispatches to a single surface; gating on
+   * `visible` additionally keeps a hidden pane from being the one that answers.
+   */
+  useEffect(() => {
+    if (!props.visible) return
+    return installSaveShortcut(() => {
+      // A themed dialog owns its input: saving the file behind it would surprise.
+      if (typeof document !== 'undefined' && document.querySelector('.rvs-modal-mask') !== null) return undefined
+      const tab = saveShortcutTabRef.current
+      // Working-tree diffs are `DiffView`'s own onSave contract; previews have no
+      // buffer at all. `saveActive` would misreport both.
+      if (tab === undefined || tab.kind !== 'file' || tab.image || tab.binary) return undefined
+      return () => { void saveActiveRef.current() }
+    })
+  }, [props.visible])
 
   if (tabs.length === 0) {
     return (

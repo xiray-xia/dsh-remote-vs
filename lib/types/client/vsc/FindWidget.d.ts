@@ -76,6 +76,13 @@ export declare function FindWidget(props: {
         top: number;
         right: number;
     } | undefined;
+    /**
+     * Bumped by the editor whenever its selection changes while this widget is
+     * open. The `n/N` readout is derived from the caret, and moves made OUTSIDE the
+     * widget (F3 / Shift-F3, a click, an arrow key) never told it — the numbers
+     * stayed on the previous match while the caret had moved on.
+     */
+    tick?: number;
     onClose: () => void;
 }): ReactNode;
 export {};

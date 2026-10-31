@@ -102,6 +102,43 @@ const FILES_BODY_LIMIT = 10 * 1024 * 1024
 /** Body cap of the ssh_config import route (pasted config text). */
 const SSH_CONFIG_BODY_LIMIT = 1024 * 1024
 
+/**
+ * Total budget for one archive stream (directory or multi-selection download).
+ *
+ * A hung remote `tar` (a stalled mount, a failing disk, a huge tree) otherwise
+ * pins the Host channel until the CLIENT disconnects, and `channel.close()`
+ * alone cannot stop a tar that is blocked on a read. Enforced on the remote side
+ * so it survives a dead HTTP socket too.
+ */
+const ARCHIVE_TIMEOUT_SECONDS = 600
+
+/**
+ * Wrap one archive command in a remote-side deadline.
+ *
+ * The command is a single `tar` invocation with already-quoted operands
+ * (`archive.ts` builders), so prefixing is syntactically safe and makes tar the
+ * direct child of `timeout` — TERM (then KILL after 3 s) reaches tar itself, no
+ * process-group id is needed (2026-10 audit, A16-1). Hosts without GNU `timeout`
+ * (BSD/macOS) fall back to today's behaviour instead of failing the download.
+ */
+export function archiveCommandWithDeadline(command: string): string {
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 3 ${ARCHIVE_TIMEOUT_SECONDS} ${command}; else ${command}; fi`
+}
+
+/**
+ * Error for a failed archive stream.
+ *
+ * GNU `timeout` reports 124 when TERM sufficed and 137 when KILL was needed;
+ * both mean "the remote budget ran out", which is more actionable than
+ * `tar failed (124): no stderr`.
+ */
+export function archiveFailureMessage(exitCode: number | null | undefined, stderr: string): Error {
+  if (exitCode === 124 || exitCode === 137) return new Error(`archive timed out after ${ARCHIVE_TIMEOUT_SECONDS}s`)
+  const detail = stderr.trim() === '' ? 'no stderr' : stderr.trim().slice(0, 400)
+  const code = exitCode === null || exitCode === undefined ? 'signal' : exitCode
+  return new Error(`tar failed (${code}): ${detail}`)
+}
+
 /** This plugin's version from the shipped package.json (Settings display). */
 let cachedVersion: string | undefined
 
@@ -222,7 +259,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   const streamArchive = async (alias: string, command: string, res: ServerResponse, downloadName: string): Promise<void> => {
     let channel: Awaited<ReturnType<typeof pool.execChannel>>
     try {
-      channel = await pool.execChannel(alias, command)
+      channel = await pool.execChannel(alias, archiveCommandWithDeadline(command))
     } catch (error) {
       writeRouteError(res, error)
       return
@@ -233,6 +270,9 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
     })
+    // Send the headers now so the browser's save/stream starts immediately instead
+    // of waiting for the remote tar to produce its first byte (A16-2).
+    res.flushHeaders()
     let closed = false
     /** `undefined` until the remote process reports one. */
     let exitCode: number | null | undefined
@@ -286,8 +326,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
     channel.on('close', () => {
       if (closed) return
       if (exitCode !== 0) {
-        const detail = stderr.trim() === '' ? 'no stderr' : stderr.trim().slice(0, 400)
-        stop(new Error(`tar failed (${exitCode === null ? 'signal' : exitCode}): ${detail}`))
+        stop(archiveFailureMessage(exitCode, stderr))
         return
       }
       stop()
@@ -517,6 +556,11 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           // A reverse proxy must not buffer an event stream into uselessness.
           'X-Accel-Buffering': 'no',
         })
+        // Headers must leave NOW: the client `fetch()` only resolves once they
+        // arrive, and a silent command (a push waiting on the far end) would
+        // otherwise keep the request unresolved until the first event or the
+        // 15 s heartbeat (A16-2).
+        res.flushHeaders()
         /** No more events to the client (finished, or the socket broke). */
         let outputClosed = false
         /** `res.end` already called. */

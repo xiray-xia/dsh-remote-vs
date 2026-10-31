@@ -11,6 +11,7 @@
  * tree without the two views knowing about each other.
  */
 import { type ReactNode } from 'react';
+import type { RemoteExecResult } from '../protocol.ts';
 /**
  * Whether a scope still belongs to the workspace root it was entered under.
  *
@@ -39,4 +40,30 @@ export declare function visibleSearchBanners(input: {
     contentTruncated: boolean;
     linesClipped: boolean;
 };
+/** First non-empty warning line from a finished search, or undefined. */
+export declare function stderrWarning(stderr: string, maxChars?: number): string | undefined;
+/**
+ * What clicking one NAME result should do.
+ *
+ * `find` can report a DIRECTORY, and `store.openFile()` has no type guard: a
+ * click used to hand the directory path to the editor (the Host answered
+ * "not a file: … is a directory" and the surface was switched for nothing).
+ */
+export declare function nameHitAction(hit: {
+    isDir: boolean;
+}): 'reveal' | 'open';
+/** True when a rejection is a user cancel (not a failure to report). */
+export declare function isSearchCancellation(error: unknown, signal: AbortSignal | undefined): boolean;
+/**
+ * One content search over the STREAMING exec route.
+ *
+ * `api.exec` cannot be cancelled: a replaced query left the remote `grep`
+ * running for its whole 120 s budget while the client ignored the answer.
+ * `execStream` carries an AbortSignal and the Host kills the remote process
+ * group when the response closes, so a cancelled search really stops. The
+ * route forwards output as SSE frames instead of `stdout`/`stderr`, so they are
+ * accumulated here and handed to the same parser as before. A Host without the
+ * route (404/405) is remembered and served by `api.exec` from then on.
+ */
+export declare function runContentSearch(alias: string, command: string, signal: AbortSignal): Promise<RemoteExecResult>;
 export declare function SearchView(): ReactNode;

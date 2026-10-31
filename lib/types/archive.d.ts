@@ -6,7 +6,7 @@
  * writes it to its own disk. Pure string builders (no fs, no exec) so the
  * download gate can pin the exact command shape.
  */
-/** Download file name for one archived directory. */
+/** Download file name for one archived directory (normalized like the command). */
 export declare function directoryArchiveName(dir: string): string;
 /**
  * One POSIX shell command that writes the directory's gzip tar to stdout.

@@ -15,11 +15,24 @@ import type {
 import type { RemoteWorlds, WorldRoute } from './worlds.ts'
 import { remoteCommand } from './ssh-proc.ts'
 
-/** True when argv selects PowerShell (remote worlds are POSIX-only). */
-function isPwshArgv(argv: readonly string[]): boolean {
+/**
+ * Windows shells: remote worlds are POSIX-only, so ALL of these fail closed.
+ *
+ * Recognising only `pwsh` was fail-open: `powershell.exe` / `cmd.exe` / `.ps1`
+ * fell through to the bare-name rewrite and were then looked up on the remote
+ * PATH. Usually that produced a misleading "not found"; with a same-named binary
+ * on the host it would have run something else entirely. Exported so the guard
+ * can be asserted directly, without a host.
+ */
+const WINDOWS_SHELL = /^(?:pwsh|pwsh-preview|powershell|powershell_ise|cmd)(?:\.exe)?$/i
+/** Windows script extensions: argv[0] naming one cannot run without a shell. */
+const WINDOWS_SCRIPT = /\.(?:ps1|bat|cmd)$/i
+
+/** True when argv selects a Windows shell (unsupported in remote worlds). */
+export function isWindowsShellArgv(argv: readonly string[]): boolean {
   if (argv.length === 0) return false
   const base = (argv[0] as string).replace(/\\/g, '/').split('/').pop() ?? ''
-  return /^pwsh(\.exe)?$/i.test(base)
+  return WINDOWS_SHELL.test(base) || WINDOWS_SCRIPT.test(base)
 }
 
 export default class TransparentSubprocessRuntime extends SubprocessRuntime {
@@ -63,9 +76,9 @@ export default class TransparentSubprocessRuntime extends SubprocessRuntime {
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
     const route = this.effective(this.remote.routeDir(spec.cwd), `spawn ${spec.argv[0] ?? ''} @ ${spec.cwd}`)
     if (route.kind === 'local') return this.local.spawn(spec)
-    if (isPwshArgv(spec.argv)) {
+    if (isWindowsShellArgv(spec.argv)) {
       throw new SubprocessExecutableNotFoundError(
-        `remote worlds are POSIX-only: '${spec.argv[0]}' cannot run on ${route.alias}; use the bash tool (Remote preset) instead`,
+        `remote worlds are POSIX-only: '${spec.argv[0]}' is a Windows shell and cannot run on ${route.alias}; use the bash tool (Remote preset) instead`,
       )
     }
     const runtime = this.remote.procFor(route.alias)

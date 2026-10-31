@@ -35,6 +35,37 @@ export const revealLineField = StateField.define<DecorationSet>({
 const LIT_MS = 2600
 
 /**
+ * The pending extinguish timer of each editor.
+ *
+ * A second jump used to be switched off by the FIRST jump's timer: the highlight
+ * is documented as ~2.6 s and jumping repeatedly in one file is an advertised
+ * flow, so a new jump has to CANCEL the previous one's timer instead of letting
+ * it land early. Keyed by view because more than one editor exists at a time
+ * (the diff panes mount their own).
+ */
+const litTimers = new WeakMap<EditorView, number>()
+
+/**
+ * Light the landing line and (re)arm its extinguish timer.
+ *
+ * Replacing the previous timer is the whole point (see `litTimers`): without it
+ * the older jump's timer fires mid-way through the newer highlight.
+ */
+function scheduleExtinguish(view: EditorView, lit: (position: number | null) => void): void {
+  const previous = litTimers.get(view)
+  if (previous !== undefined) window.clearTimeout(previous)
+  const timer = window.setTimeout(() => {
+    litTimers.delete(view)
+    try {
+      lit(null)
+    } catch {
+      // A disposed view: nothing to switch off.
+    }
+  }, LIT_MS)
+  litTimers.set(view, timer)
+}
+
+/**
  * Scroll to a 1-based line, put the caret on it and light it up.
  *
  * Centering is done in TWO steps on purpose: CodeMirror scrolls its own
@@ -67,13 +98,7 @@ export function revealLine(view: EditorView, target: number, lit: (position: num
       // No layout: the CodeMirror scroll already did its best.
     }
   }, 30)
-  window.setTimeout(() => {
-    try {
-      lit(null)
-    } catch {
-      // Disposed.
-    }
-  }, LIT_MS)
+  scheduleExtinguish(view, lit)
 }
 
 /** The rendered `.cm-line` element for a 1-based line number, if visible. */
@@ -132,11 +157,5 @@ export function revealRange(
       // No layout: the CodeMirror scroll already did its best.
     }
   }, 30)
-  window.setTimeout(() => {
-    try {
-      lit?.(null)
-    } catch {
-      // Disposed.
-    }
-  }, LIT_MS)
+  if (lit !== undefined) scheduleExtinguish(view, lit)
 }

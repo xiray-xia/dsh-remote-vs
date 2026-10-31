@@ -6,6 +6,7 @@ import type { RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } f
 import { RemoteApiError, api } from './api.ts'
 import { WorkspaceWizard } from './WorkspaceWizard.tsx'
 import { Btn, Notice, Row, hairline } from './ui.tsx'
+import { confirmDialog } from './vsc/kit.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -26,10 +27,25 @@ export function WorkspacesView(props: {
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
 
-  const remove = (id: string): void => {
-    setBusy(id)
-    api.deleteWorkspace(id).then(
-      () => { setBusy(undefined); setNotice('binding removed'); setError(undefined); props.onChanged() },
+  /**
+   * Unbind one workspace, after a confirmation.
+   *
+   * This used to fire on a single click while deleting a HOST (the other
+   * destructive action on this screen) asks first; the binding removal also
+   * writes a fail-closed tombstone, so a stray click is not losslessly undone.
+   */
+  const remove = async (workspace: RemoteWorkspaceBinding): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t('ws.unbindTitle'),
+      text: t('ws.unbindConfirm').replace('{name}', workspace.name),
+      danger: true,
+      okText: t('ws.delete'),
+      cancelText: t('common.cancel'),
+    })
+    if (!ok) return
+    setBusy(workspace.id)
+    api.deleteWorkspace(workspace.id).then(
+      () => { setBusy(undefined); setNotice(t('ws.removed')); setError(undefined); props.onChanged() },
       (e: unknown) => { setBusy(undefined); setError(err(e)); setNotice(undefined) },
     )
   }
@@ -75,7 +91,7 @@ export function WorkspacesView(props: {
               {props.onOpenFiles !== undefined && (
                 <Btn kind="primary" onClick={() => props.onOpenFiles?.(w.id)}>{t('ws.open')}</Btn>
               )}
-              <Btn kind="danger" onClick={() => remove(w.id)} disabled={busy !== undefined}>{t('ws.delete')}</Btn>
+              <Btn kind="danger" onClick={() => { void remove(w) }} disabled={busy !== undefined}>{t('ws.delete')}</Btn>
             </Row>
           </div>
         </div>
@@ -84,7 +100,7 @@ export function WorkspacesView(props: {
         <WorkspaceWizard
           t={t}
           hosts={props.hosts}
-          onDone={() => { setWizard(false); setNotice('binding saved'); setError(undefined); props.onChanged() }}
+          onDone={() => { setWizard(false); setNotice(t('ws.saved')); setError(undefined); props.onChanged() }}
           onCancel={() => setWizard(false)}
         />
       )}

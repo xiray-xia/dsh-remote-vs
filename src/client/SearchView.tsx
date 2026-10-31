@@ -21,7 +21,8 @@ import {
 } from '../search-ops.ts'
 import { searchFiles, type SearchHit } from './scm/actions.ts'
 import { repoRelative, useExplorer } from './store.tsx'
-import { api } from './api.ts'
+import { RemoteApiError, api } from './api.ts'
+import type { RemoteExecResult } from '../protocol.ts'
 import { startDownload } from './downloads.ts'
 import {
   ContextMenu,
@@ -118,6 +119,73 @@ export function visibleSearchBanners(input: {
   }
 }
 
+/** First non-empty warning line from a finished search, or undefined. */
+export function stderrWarning(stderr: string, maxChars = 200): string | undefined {
+  for (const line of stderr.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed !== '') return trimmed.length > maxChars ? `${trimmed.slice(0, maxChars)}…` : trimmed
+  }
+  return undefined
+}
+
+/**
+ * What clicking one NAME result should do.
+ *
+ * `find` can report a DIRECTORY, and `store.openFile()` has no type guard: a
+ * click used to hand the directory path to the editor (the Host answered
+ * "not a file: … is a directory" and the surface was switched for nothing).
+ */
+export function nameHitAction(hit: { isDir: boolean }): 'reveal' | 'open' {
+  return hit.isDir ? 'reveal' : 'open'
+}
+
+/** True when a rejection is a user cancel (not a failure to report). */
+export function isSearchCancellation(error: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted === true) return true
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+/** Set once the Host proved it has no exec-stream route (older Host fallback). */
+let contentSearchStreamUnsupported = false
+/** Cap for the streamed content-search output (the parser caps hits anyway). */
+const CONTENT_STREAM_ACCUM_CAP = 8 * 1024 * 1024
+
+/**
+ * One content search over the STREAMING exec route.
+ *
+ * `api.exec` cannot be cancelled: a replaced query left the remote `grep`
+ * running for its whole 120 s budget while the client ignored the answer.
+ * `execStream` carries an AbortSignal and the Host kills the remote process
+ * group when the response closes, so a cancelled search really stops. The
+ * route forwards output as SSE frames instead of `stdout`/`stderr`, so they are
+ * accumulated here and handed to the same parser as before. A Host without the
+ * route (404/405) is remembered and served by `api.exec` from then on.
+ */
+export async function runContentSearch(alias: string, command: string, signal: AbortSignal): Promise<RemoteExecResult> {
+  if (contentSearchStreamUnsupported) return api.exec(alias, command, 120_000)
+  let stdout = ''
+  let stderr = ''
+  const append = (stream: 'out' | 'err', text: string): void => {
+    if (stdout.length + stderr.length >= CONTENT_STREAM_ACCUM_CAP) return
+    if (stream === 'out') stdout += text
+    else stderr += text
+  }
+  try {
+    const result = await api.execStream(alias, command, 120_000, {
+      signal,
+      onData: (stream, text) => append(stream === 'out' ? 'out' : 'err', text),
+    })
+    return { ...result, stdout, stderr }
+  } catch (error) {
+    if (isSearchCancellation(error, signal)) throw error
+    if (error instanceof RemoteApiError && (error.status === 404 || error.status === 405)) {
+      contentSearchStreamUnsupported = true
+      return api.exec(alias, command, 120_000)
+    }
+    throw error
+  }
+}
+
 export function SearchView(): ReactNode {
   const store = useExplorer()
   const { t, alias, root, repoRoot } = store
@@ -135,8 +203,15 @@ export function SearchView(): ReactNode {
   const [busy, setBusy] = useState(false)
   const [ran, setRan] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  /** Non-fatal stderr from the last answered content search. */
+  const [warning, setWarning] = useState<string | undefined>(undefined)
   const seq = useRef(0)
+  /** Aborts the in-flight content search when the query changes/clears. */
+  const runAbort = useRef<AbortController | undefined>(undefined)
   const menu = useContextMenu()
+
+  /** Nothing may keep streaming after the panel is gone. */
+  useEffect(() => () => { runAbort.current?.abort() }, [])
 
   const effectiveScope = scope === '' ? root : scope
   const scopeLabel = useMemo(() => {
@@ -177,11 +252,16 @@ export function SearchView(): ReactNode {
       // its own ticket, and results for a query the user already cleared (or
       // for the previous workspace) get rendered into the empty panel.
       seq.current += 1
+      // Stop the remote grep instead of only ignoring its answer (it used to
+      // keep a channel busy for the whole 120 s budget).
+      runAbort.current?.abort()
+      runAbort.current = undefined
       setBusy(false)
       setNameHits([])
       setContentHits([])
       setRan(false)
       setError(undefined)
+      setWarning(undefined)
       // The truncation banners describe the answer that just went away; left
       // set, they would hang over an empty panel and read as a claim about the
       // cleared query. `visibleSearchBanners` is the other half of this guard
@@ -194,6 +274,7 @@ export function SearchView(): ReactNode {
     const ticket = ++seq.current
     setBusy(true)
     setError(undefined)
+    setWarning(undefined)
     // A banner must never outlive the answer it describes: clear the ones this
     // run is about to refresh, so switching modes/queries cannot show the
     // previous answer's "truncated" while the new one is still on the wire.
@@ -216,7 +297,12 @@ export function SearchView(): ReactNode {
           wholeWord: opts.wholeWord,
           regex: opts.regex,
         })
-        const result = await api.exec(alias, command, 120_000)
+        // Replace (not just ignore) the previous search: abort first so the
+        // remote process group stops, then run this one with its own controller.
+        runAbort.current?.abort()
+        const controller = new AbortController()
+        runAbort.current = controller
+        const result = await runContentSearch(alias, command, controller.signal)
         if (seq.current !== ticket) return
         if (!result.success && result.stdout.trim() === '' && result.stderr.trim() !== '') {
           // grep exits 1 when nothing matched — that is a result, not a failure,
@@ -237,11 +323,20 @@ export function SearchView(): ReactNode {
           setContentTruncated(parsed.truncated)
           setLinesClipped(parsed.linesClipped)
           setNameHits([])
+          // Warnings with hits used to be dropped on the floor by the `else`
+          // branch: keep them visible above the results.
+          setWarning(stderrWarning(result.stderr))
         }
+        if (runAbort.current === controller) runAbort.current = undefined
       }
       setRan(true)
     } catch (caught) {
       if (seq.current !== ticket) return
+      // A cancelled search is not an error: the ticket already moved on.
+      if (isSearchCancellation(caught, activeMode === 'content' ? runAbort.current?.signal : undefined)) {
+        setBusy(false)
+        return
+      }
       setError(caught instanceof Error ? caught.message : String(caught))
       setContentHits([])
       setNameHits([])
@@ -454,6 +549,7 @@ export function SearchView(): ReactNode {
       )}
 
       {error !== undefined && <div className="rvs-banner error">{error}</div>}
+      {warning !== undefined && <div className="rvs-banner warn">{t('search.stderrWarn').replace('{detail}', warning)}</div>}
       {banners.contentTruncated && <div className="rvs-banner warn">{t('search.truncated')}</div>}
       {banners.linesClipped && <div className="rvs-banner warn">{t('search.linesClipped')}</div>}
 
@@ -471,7 +567,15 @@ export function SearchView(): ReactNode {
                 type="button"
                 className="rvs-hit"
                 title={hit.path}
-                onClick={() => openHit(`${(effectiveScope === '' ? root : effectiveScope).replace(/\/+$/, '')}/${hit.path}`)}
+                onClick={() => {
+                  // A `find` hit can be a DIRECTORY: opening it as a file asks
+                  // the Host to read a directory and switches the surface for
+                  // nothing. Reveal it in the explorer instead (same action the
+                  // right-click menu offers for directories).
+                  const { abs } = nameHitPaths(hit)
+                  if (nameHitAction(hit) === 'reveal') store.revealInExplorer(abs)
+                  else openHit(abs)
+                }}
                 onContextMenu={(event) => { openHitMenu(event, hit) }}
               >
                 <span className="rvs-node-icon">

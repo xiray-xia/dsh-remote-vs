@@ -45,14 +45,17 @@ function errText(e: unknown): string {
 }
 
 /** True when the failure is "this backend serves no browse primitives". */
-function isUnavailable(e: unknown): boolean {
+export function isUnavailable(e: unknown): boolean {
   if (e !== null && typeof e === 'object' && 'rpcError' in e) {
     const rpc = (e as { rpcError: unknown }).rpcError
     if (rpc !== null && typeof rpc === 'object' && 'code' in rpc) {
       return (rpc as { code: unknown }).code === 'directory-picker/unavailable'
     }
   }
-  return /unavailable/i.test(errText(e))
+  // Only the protocol token, never a generic word: "remote host temporarily
+  // unavailable" is a real failure to show/retry, not "this backend serves no
+  // browse primitives" (using the native picker for it hid the actual error).
+  return errText(e).includes('directory-picker/unavailable')
 }
 
 function LocalLeg(props: {
@@ -345,6 +348,40 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
     wasOpen.current = props.open
   }, [props.open])
 
+  /**
+   * Keyboard/focus for the occupied directory-flow dialog.
+   *
+   * Escape used to be an `onKeyDown` on the inner box, so it only worked while
+   * focus was already inside the dialog (right after opening it was not); and
+   * closing left focus nowhere. A document-level listener while open fixes both
+   * without touching the owner's dialog contract.
+   */
+  const boxRef = useRef<HTMLDivElement>(null)
+  const openerRef = useRef<HTMLElement | null>(null)
+  const cancelRef = useRef(props.onCancel)
+  cancelRef.current = props.onCancel
+  const busyRef = useRef(props.busy)
+  busyRef.current = props.busy
+  useEffect(() => {
+    if (!props.open) return
+    openerRef.current = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+    const focusTimer = window.setTimeout(() => {
+      boxRef.current?.querySelector<HTMLElement>('button:not([disabled])')?.focus()
+    }, 0)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || busyRef.current) return
+      e.preventDefault()
+      cancelRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.clearTimeout(focusTimer)
+      window.removeEventListener('keydown', onKey)
+      const opener = openerRef.current
+      if (opener !== null && document.body.contains(opener)) opener.focus()
+    }
+  }, [props.open])
+
   if (!props.open) return null
 
   const injected: DirectoryFlowInjected = {
@@ -364,6 +401,7 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
       }}
     >
       <div
+        ref={boxRef}
         style={{
           width: 'min(600px, calc(100vw - 32px))',
           maxHeight: 'min(680px, calc(100vh - 32px))',
@@ -377,9 +415,6 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
           fontSize: 13,
         }}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape' && !props.busy) props.onCancel()
-        }}
       >
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
           <strong>{t('flow.title')}</strong>

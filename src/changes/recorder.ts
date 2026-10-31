@@ -145,6 +145,15 @@ interface Ledger {
   /** Set once the untracked scan proves unusable for THIS root; stops retrying it. */
   untrackedGivenUp: boolean
   /**
+   * Why the untracked scan was written off, kept so the panel can SAY so.
+   *
+   * Capability loss without a reason reads as "this session changed nothing new",
+   * which is the opposite of the truth: the walk that finds new files is off. This
+   * is sticky (a later successful tracked scan must not hide it) and only cleared
+   * by a successful walk or by moving the root (`resetObservation`).
+   */
+  untrackedFailure: string | undefined
+  /**
    * Wall-clock ms when observation of the CURRENT root started.
    *
    * The baseline's "was this file here before?" test compares file mtimes against
@@ -156,7 +165,7 @@ interface Ledger {
   absorbed: boolean
   /** True once a repository below the session root has been looked for. */
   adoptedSubdir: boolean
-  /** The session root as first resolved; oot may be this plus subdir. */
+  /** The session root as first resolved; root may be this plus subdir. */
   baseRoot: string
   /** Explicit repository directory inside the root ('' = the root itself). */
   subdir: string
@@ -183,6 +192,17 @@ interface Ledger {
   /** Serialized background work; a second schedule coalesces into one run. */
   queue: Promise<void>
   dirty: boolean
+  /**
+   * Monotonic publish ledger: only the LATEST started publish may write.
+   *
+   * Two publishes can be in flight at once by design (the queued `refresh` and the
+   * background untracked job, which runs outside the queue), each holding a
+   * snapshot taken before its own awaits. Without this, the one that finishes last
+   * wins with the OLDER data — rows vanish/reappear and counts flop for a scan.
+   * Deliberately NOT reset by `resetObservation`: it orders writes, it is not an
+   * observation of a root (the root guard already covers identity).
+   */
+  publishSeq: number
   disposed: boolean
 }
 
@@ -242,6 +262,21 @@ export class SessionChanges {
   summary(sessionId: string): RemoteChangesSummary | null {
     const ledger = this.ledgers.get(sessionId)
     if (ledger === undefined) return null
+    /*
+     * Why "unavailable" has two sources.
+     *
+     * The tracked scan explains itself through `ledger.unavailable`. A written-off
+     * untracked walk has no such channel — it permanently removes the "new files"
+     * column, and silence there reads as "this session changed nothing new". So the
+     * sticky `untrackedFailure` is folded in here, with the one action that can
+     * recover it. The explicit reason wins: a successful tracked scan clears
+     * `ledger.unavailable` every turn, while `untrackedFailure` survives until a
+     * walk succeeds or the root moves.
+     */
+    const unavailable = ledger.unavailable
+      ?? (ledger.untrackedFailure === undefined
+        ? undefined
+        : `new-file scan unavailable: ${ledger.untrackedFailure} (use the refresh button to retry)`)
     return {
       alias: ledger.alias,
       root: ledger.root,
@@ -266,7 +301,7 @@ export class SessionChanges {
        */
       pending: ledger.untrackedJob !== undefined || (ledger.pending && ledger.files.length > 0),
       ...(ledger.truncated === true ? { truncated: true as const } : {}),
-      ...(ledger.unavailable === undefined ? {} : { unavailable: ledger.unavailable }),
+      ...(unavailable === undefined ? {} : { unavailable }),
     }
   }
 
@@ -455,6 +490,7 @@ export class SessionChanges {
     ledger.untrackedAt = 0
     ledger.untrackedMs = undefined
     ledger.untrackedGivenUp = false
+    ledger.untrackedFailure = undefined
     ledger.files = []
     ledger.records = new Map()
     ledger.added = 0
@@ -532,6 +568,7 @@ export class SessionChanges {
       baseline: undefined,
       baselineTaken: false,
       untrackedGivenUp: false,
+      untrackedFailure: undefined,
       startedAt: Date.now(),
       absorbed: false,
       adoptedSubdir: false,
@@ -553,6 +590,7 @@ export class SessionChanges {
       pending: false,
       queue: Promise.resolve(),
       dirty: false,
+      publishSeq: 0,
       disposed: false,
     }
     this.ledgers.set(target.sessionId, ledger)
@@ -605,6 +643,8 @@ export class SessionChanges {
   /** Recompute the panel's list from the scans currently known. */
   private async publish(ledger: Ledger): Promise<void> {
     if (ledger.disposed) return
+    // Ordering ticket: see Ledger.publishSeq. Taken before the first await.
+    const seq = ++ledger.publishSeq
     // The reads below are relative to the root at THIS moment. A root move while
     // they are in flight (the user picked another repository directory) makes
     // the answer mixed-root, so it must not reach the panel; the caller that
@@ -625,6 +665,8 @@ export class SessionChanges {
       // it becomes the baseline rather than a change to report.
       const first = await this.readPaths(ledger, listed.map(entry => entry.path), 'worktree')
       if (ledger.disposed || ledger.root !== root) return
+      // A newer publish already started: it owns the baseline now.
+      if (ledger.publishSeq !== seq) return
       ledger.baseline = first
       ledger.baselineTaken = true
       ledger.files = []
@@ -703,9 +745,11 @@ export class SessionChanges {
       })
     }
     files.sort((left, right) => left.display.localeCompare(right.display))
-    // Last gate before the panel sees anything: every read above was relative to
-    // `root`, so a root that moved while they ran makes this list a mixture.
+    // Last gates before the panel sees anything: `root` covers IDENTITY (the tree
+    // moved while we read), `publishSeq` covers ORDER (a later publish already
+    // wrote a newer list, and this older snapshot must not overwrite it).
     if (ledger.root !== root) return
+    if (ledger.publishSeq !== seq) return
     ledger.records = records
     ledger.files = files
     ledger.added = added
@@ -846,9 +890,13 @@ export class SessionChanges {
       if (ledger.root !== root) return
       if (!scan.ok) {
         ledger.untrackedGivenUp = true
+        // Keep WHY: the panel can show it, and its absence would make a dead
+        // capability look like "this session created no files".
+        ledger.untrackedFailure = scan.reason
         this.warn(`untracked scan unusable (${scan.reason}); new files will not be listed`)
         return
       }
+      ledger.untrackedFailure = undefined
       ledger.untracked = parseUntrackedZ(scan.stdout)
       await this.absorbPreExisting(ledger)
       // A completed scan is worth one more publish: it is the only source of

@@ -10,6 +10,23 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type ReactNode } from 'react';
+/**
+ * Which tabs a recovered link must reload, and how many dirty tabs to warn about.
+ *
+ * Pure so the gate can drive it with a synthetic list: the recovery timer used
+ * to close over the tab array of the render that STARTED it (10 s earlier), so a
+ * tab opened or closed in that window was missed. Only clean file/diff tabs are
+ * reloaded; a dirty tab is the user's unsaved work and must never be replaced.
+ */
+export declare function planRecoveryReload(tabs: readonly {
+    id: string;
+    dirty: boolean;
+    loading: boolean;
+    kind: string;
+}[]): {
+    dirty: number;
+    reload: string[];
+};
 export declare function RemoteRoot(props: {
     ctx: Context;
     visible?: boolean;

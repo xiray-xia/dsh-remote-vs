@@ -79,9 +79,11 @@ export default class TransparentSpillStore extends SpillStore {
     // Remote backend: mirror local semantics (private dir, derived name).
     const fs = await this.remote.fsFor(route.alias)
     const home = await this.remote.homeFor(route.alias)
-    // Retention runs BEFORE the write but never blocks it: a failed sweep is a
-    // warning, and the artifact is still saved (the model result is the point).
-    await this.sweepOnce(route.alias, home)
+    // Retention is scheduled BEFORE the write and never blocks it (P2-N6: the
+    // first spill per host used to await a remote `find` with a 20 s budget).
+    // The per-host marker is set synchronously inside `sweepOnce`, so concurrent
+    // first spills still issue exactly one sweep; a slow/failed sweep only warns.
+    void this.sweepOnce(route.alias, home)
     const dir = sessionSpillDir(home, input.owner.sessionId)
     await this.remote.mkdirRemote(route.alias, dir)
     const name = safeName(input.suggestedName ?? 'spill.txt')

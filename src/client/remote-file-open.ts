@@ -23,6 +23,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { api } from './api.ts'
+import { connectionStateOf, isConnectionFailure } from './connection.ts'
+import { probeCandidates } from './file-open-probe.ts'
 import {
   parseFileAddress,
   resolveRemoteOpenTarget,
@@ -72,34 +74,12 @@ function lineOf(options: unknown): number | undefined {
 }
 
 /**
- * Probe candidates in order and return the first one that exists.
- *
- * Every click pays at most one remote stat when the first candidate is right;
- * the probe is skipped entirely only when the binding has a single candidate
- * AND that candidate is the workspace-root spelling (the common, healthy
- * case) — see the caller for the fallback search when every probe misses.
- *
- * @returns the chosen remote path, or `undefined` when none exists.
- */
-async function firstExisting(
-  alias: string,
-  candidates: readonly string[],
-): Promise<string | undefined> {
-  for (const candidate of candidates) {
-    const exists = await withDeadline(api.fileOp.stat(alias, candidate), EXIST_PROBE_MS).then(
-      () => true,
-      () => false,
-    )
-    if (exists === true) return candidate
-  }
-  return undefined
-}
-
-/**
  * Last-resort lookup for a clicked PROJECT-relative path (the model `cd`ed
  * inside individual shell commands, so the session cwd never moved): search
  * the binding's remote tree for a unique file whose path ends with the
- * clicked spelling. Only issued after every direct candidate missed.
+ * clicked spelling. Only issued after every direct candidate said "missing" —
+ * a timeout or a dropped link is NOT "missing" (see `file-open-probe.ts`), so
+ * an unknown verdict never pays for this 7s search.
  */
 async function searchSuffix(binding: RemoteOpenBinding, relative: string): Promise<string | undefined> {
   const command = suffixFindCommand(binding.remotePath, relative)
@@ -148,22 +128,30 @@ function interceptSync(ctx: Context, parsed: ParsedFileAddress, address: string,
     const open = (remotePath: string): void => {
       openRemoteFileInBinding(target.binding.id, remotePath, line === undefined ? {} : { line })
     }
-    const existing = await firstExisting(target.binding.alias, target.candidates)
-    if (existing !== undefined) {
-      open(existing)
+    const existing = await probeCandidates(target.binding.alias, target.candidates, {
+      stat: api.fileOp.stat,
+      deadline: withDeadline,
+      connection: connectionStateOf,
+      isLinkFailure: isConnectionFailure,
+    }, EXIST_PROBE_MS)
+    if (existing.kind === 'exists') {
+      open(existing.path)
       return
     }
-    // Nothing at the direct spellings: the model may have quoted a
-    // project-relative path (its `cd` lived inside shell commands only).
-    if (relative !== undefined) {
+    // Nothing at the direct spellings that the host could ANSWER: the model may
+    // have quoted a project-relative path (its `cd` lived inside shell commands
+    // only). An unknown verdict (timeout / dropped link) says nothing about the
+    // spelling, so it must not pay for the search either.
+    if (existing.kind === 'missing' && relative !== undefined) {
       const found = await searchSuffix(target.binding, relative)
       if (found !== undefined) {
         open(found)
         return
       }
     }
-    // Still nothing: open the primary spelling so the editor shows the remote
-    // read error (named against the remote workspace, not the empty alias).
+    // Otherwise open the primary spelling so the editor shows the remote read
+    // error (named against the remote workspace, not the empty alias) — with a
+    // dead link that is the offline read-only banner, not a dead click.
     open(target.candidates[0])
   })().catch((error: unknown) => {
     // The editor open itself failed: keep the click a no-op rather than

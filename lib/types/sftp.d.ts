@@ -84,7 +84,18 @@ export declare class RemoteFiles {
      * regardless of age — they are not orphans.
      */
     private readonly activePartials;
-    /** alias -> directories whose side file could not be removed (sweep next write). */
+    /**
+     * Side files this process CREATED and could not remove (`alias\0path`).
+     *
+     * This is the ONLY set a sweep may delete from. Deleting a name that merely
+     * LOOKS like a side file is a guess, and guessing wrong destroys the user's
+     * data (the audit's P2-N1: `foo.part-deadbeef` in a directory that once
+     * recorded an orphan, older than the age bound, was irreversibly removed).
+     * A leftover from a previous Host process is therefore never swept either:
+     * junk that stays is recoverable, a deleted user file is not.
+     */
+    private readonly ownedPartials;
+    /** alias -> directories that may hold an owned side file (sweep on next write). */
     private readonly orphanDirs;
     constructor(pool: RemotePool);
     list(alias: string, dir: string): Promise<RemoteFileEntry[]>;
@@ -96,8 +107,8 @@ export declare class RemoteFiles {
      * Not `writeFile` on the target: that truncates it first, so an interrupted
      * save (a dropped link, a Host restart, a full disk mid-write) left the
      * previous content gone AND the new one half written. The bytes go to a SIDE
-     * file next to the target (`.part-<id>`) and are only moved into place once the
-     * body is complete.
+     * file next to the target (`.dsh-rvs.part-<8 hex>`, see `PART_MARKER`) and are
+     * only moved into place once the body is complete.
      *
      * "Moved into place" must not delete the target first: the old unlink-then-
      * rename pair had a window where a failed rename left NEITHER the old file nor
@@ -127,8 +138,8 @@ export declare class RemoteFiles {
      * first — a drop can name a path several levels below the target — and the
      * source is piped straight into the SFTP write stream.
      *
-     * The bytes go to a SIDE file (`.part-<id>` next to the target) and are
-     * renamed into place only once the body ended cleanly. Writing the real path
+     * The bytes go to a SIDE file (`.dsh-rvs.part-<8 hex>` next to the target) and
+     * are renamed into place only once the body ended cleanly. Writing the real path
      * directly left a half file behind whenever the upload was cancelled, which
      * then looked like a complete file in the explorer (2026-10-20 user report).
      * A cancelled upload removes its side file; when the CONNECTION is what failed
@@ -199,16 +210,34 @@ export declare class RemoteFiles {
      * file the user created.
      */
     private discardPartial;
+    /** Register one side file as ours: in flight now, and sweepable after it fails. */
+    private trackPartial;
+    /** Add one owned side-file key, evicting the oldest when the set is full. */
+    private rememberOwned;
+    /** The side file reached its target (or was removed): no longer ours to sweep. */
+    private forgetPartial;
     private markOrphanDir;
     /**
-     * Remove `.part-*` files this process left behind in `dir` (age-gated).
+     * Remove the side files THIS process left behind in `dir`.
      *
      * Runs after a SUCCESSFUL write/upload into a directory that recorded an
-     * orphan, so the healthy path pays nothing. Only names matching the exact
-     * side-file shape are touched, in-flight ones are skipped, and anything younger
-     * than `PART_SWEEP_MIN_AGE_MS` is left alone (it may belong to another Host
-     * process writing the same directory). A sweep failure is never the caller's
-     * problem: the record simply survives for the next write.
+     * orphan, so the healthy path pays nothing. Two independent locks keep it off
+     * anything the user owns:
+     *
+     *  1. the name must match the plugin's reserved shape (`.dsh-rvs.part-<8 hex>`);
+     *  2. the exact path must be in `ownedPartials` — a set only `trackPartial`
+     *     writes, i.e. a file this process itself created.
+     *
+     * The shape alone would still be a guess (the audit's P2-N1: a user file
+     * `foo.part-deadbeef` was deleted after the age bound), so the ownership check
+     * is the load-bearing one. A leftover from a PREVIOUS Host process carries the
+     * shape but is not owned, and is therefore never deleted either — including a
+     * side file left by a pre-marker release (`.part-<8 hex>`, which does not even
+     * match the current shape). Junk that stays is recoverable; a deleted user
+     * file is not.
+     *
+     * A sweep failure is never the caller's problem: the record simply survives
+     * for the next write.
      */
     private sweepOrphanDirs;
     /** Add one key to a bounded set, evicting the oldest entry when full. */

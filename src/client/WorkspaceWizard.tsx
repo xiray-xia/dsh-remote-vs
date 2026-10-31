@@ -113,7 +113,7 @@ export function WorkspaceWizard(props: {
           setError(undefined)
         } else {
           setTested(false)
-          setError(r.error ?? 'unknown')
+          setError(r.error ?? t('hosts.unknownError'))
           setNotice(undefined)
         }
       },
@@ -170,12 +170,12 @@ export function WorkspaceWizard(props: {
           if (!entry.isDir) {
             setPathOk(false)
             setVerifiedAlias(undefined)
-            setError(`${candidate}: not a directory`)
+            setError(t('ws.notDirectory').replace('{path}', candidate))
             setNotice(undefined)
           } else {
             setPathOk(true)
             setVerifiedAlias(request.requestAlias)
-            setNotice(`${candidate}: directory OK`)
+            setNotice(t('ws.directoryOk').replace('{path}', candidate))
             setError(undefined)
           }
         },

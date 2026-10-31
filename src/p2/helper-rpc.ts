@@ -116,6 +116,31 @@ class HelperTimeoutError extends Error {
   }
 }
 
+/**
+ * Close each resource, ignoring failures — and keeping going.
+ *
+ * Teardown runs while an error is already unwinding: one resource that throws on
+ * close must not stop the NEXT one from being released (that skipped socket is
+ * exactly the leak this exists to prevent). Exported so the gate can drive the
+ * real behaviour with fake resources; there is no transport to stub locally.
+ */
+export function closeQuietly(
+  resources: ReadonlyArray<{ close?: () => void; end?: () => void }>,
+): void {
+  for (const resource of resources) {
+    try {
+      resource.close?.()
+    } catch {
+      // Ignore: teardown must reach every resource.
+    }
+    try {
+      resource.end?.()
+    } catch {
+      // Ignore.
+    }
+  }
+}
+
 export class RpcConnection {
   private conn: Client | undefined
   private channel: ClientChannel | undefined
@@ -204,30 +229,17 @@ export class RpcConnection {
    */
   private async reconnect(): Promise<void> {
     if (this.disposed) throw new Error('helper RPC was disposed')
-    try {
-      this.peer?.close()
-    } catch {
-      // Ignore.
-    }
-    try {
-      this.channel?.close()
-    } catch {
-      // Ignore.
-    }
-    try {
-      this.conn?.end()
-    } catch {
-      // Ignore.
-    }
-    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
-    this.peer = undefined
-    this.channel = undefined
-    this.conn = undefined
+    // One teardown for every field: the old transport is fully gone before a new
+    // attempt starts (a half-closed one would keep the ssh session alive).
+    this.teardownTransport()
     this.dead = undefined
     this.readyPromise = this.open()
     try {
       await this.readyPromise
     } catch (error) {
+      // Belt and braces: `open()` already tears its own attempt down on failure,
+      // but the reconnect path must leave NO lingering transport either way.
+      this.teardownTransport()
       // Leave no poisoned promise behind: the next caller should be able to try.
       this.readyPromise = undefined
       throw error
@@ -237,22 +249,7 @@ export class RpcConnection {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
-    try {
-      this.peer?.close()
-    } catch {
-      // Ignore.
-    }
-    try {
-      this.channel?.close()
-    } catch {
-      // Ignore.
-    }
-    try {
-      this.conn?.end()
-    } catch {
-      // Ignore.
-    }
+    this.teardownTransport()
   }
 
   private async peerReady(): Promise<SshRpcPeer> {
@@ -263,10 +260,50 @@ export class RpcConnection {
     return this.peer
   }
 
+  /**
+   * Release the current transport, whatever state it is in.
+   *
+   * Shared by `reconnect()`, a failed `open()` and `dispose()` because all three
+   * carry the same obligation: afterwards no ssh session, channel or heartbeat may
+   * survive. A half-open transport is a real leak — the socket lives until the
+   * remote's keepalive gives up, and the next attempt opens a SECOND session.
+   * `stderrTail` is cleared too: it describes the connection being torn down, and
+   * keeping it would attribute the NEXT failure to the previous transport's error
+   * output.
+   */
+  private teardownTransport(): void {
+    if (this.heartbeat !== undefined) {
+      clearTimeout(this.heartbeat)
+      this.heartbeat = undefined
+    }
+    const resources: Array<{ close?: () => void; end?: () => void }> = []
+    if (this.peer !== undefined) resources.push(this.peer)
+    if (this.channel !== undefined) resources.push(this.channel)
+    if (this.conn !== undefined) resources.push(this.conn)
+    closeQuietly(resources)
+    this.peer = undefined
+    this.channel = undefined
+    this.conn = undefined
+    this.stderrTail = ''
+  }
+
   private async open(): Promise<RpcHello> {
-    const { entry } = this.opts
     const conn = new Client()
     this.conn = conn
+    try {
+      return await this.dialAndHello(conn)
+    } catch (error) {
+      // Anything that fails after the socket is up must not leave it behind: the
+      // caller only sees the reject, and the next attempt would open a second
+      // session while this one lingers until keepalive gives up.
+      this.teardownTransport()
+      throw error
+    }
+  }
+
+  /** The part of {@link open} that runs once the socket object exists. */
+  private async dialAndHello(conn: Client): Promise<RpcHello> {
+    const { entry } = this.opts
     await new Promise<void>((resolve, reject) => {
       let settled = false
       conn.on('ready', () => {

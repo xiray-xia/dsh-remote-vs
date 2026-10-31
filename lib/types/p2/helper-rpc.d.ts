@@ -17,6 +17,18 @@ export interface RpcHello {
     platform: string;
     nodeVersion: string;
 }
+/**
+ * Close each resource, ignoring failures — and keeping going.
+ *
+ * Teardown runs while an error is already unwinding: one resource that throws on
+ * close must not stop the NEXT one from being released (that skipped socket is
+ * exactly the leak this exists to prevent). Exported so the gate can drive the
+ * real behaviour with fake resources; there is no transport to stub locally.
+ */
+export declare function closeQuietly(resources: ReadonlyArray<{
+    close?: () => void;
+    end?: () => void;
+}>): void;
 export declare class RpcConnection {
     private readonly opts;
     private conn;
@@ -58,6 +70,20 @@ export declare class RpcConnection {
     private reconnect;
     dispose(): Promise<void>;
     private peerReady;
+    /**
+     * Release the current transport, whatever state it is in.
+     *
+     * Shared by `reconnect()`, a failed `open()` and `dispose()` because all three
+     * carry the same obligation: afterwards no ssh session, channel or heartbeat may
+     * survive. A half-open transport is a real leak — the socket lives until the
+     * remote's keepalive gives up, and the next attempt opens a SECOND session.
+     * `stderrTail` is cleared too: it describes the connection being torn down, and
+     * keeping it would attribute the NEXT failure to the previous transport's error
+     * output.
+     */
+    private teardownTransport;
     private open;
+    /** The part of {@link open} that runs once the socket object exists. */
+    private dialAndHello;
     private invalidate;
 }

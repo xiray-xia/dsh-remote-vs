@@ -27,4 +27,6 @@ export interface DirectoryFlowInjected {
     createDirectory: (path: string, name: string) => Promise<string>;
     pickDirectory: () => Promise<string | null>;
 }
+/** True when the failure is "this backend serves no browse primitives". */
+export declare function isUnavailable(e: unknown): boolean;
 export declare function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFlowInjected): ReactNode;

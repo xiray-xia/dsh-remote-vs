@@ -149,6 +149,98 @@ function parseStatusHead(head: string): { branch: string; detached: boolean; ahe
   return { branch: name, detached: false, ahead, behind }
 }
 
+/**
+ * Reverse git's C-style quoting of one porcelain path.
+ *
+ * `git status --porcelain` (without `-z`) quotes any path containing whitespace,
+ * a quote, a backslash or a control character, and escapes the specials inside:
+ * `"a\"b.txt"`, `"plain space.txt"`, `"ctl\001name.txt"`. Passing that field on
+ * as if it were the path made every such file unusable in the SCM panel
+ * (open/diff/stage asked for a literal filename with quotes in it) — and a space
+ * in a name is common, not an exotic edge (2026-10 audit, A18-b).
+ *
+ * Unquoted input is returned unchanged. Octal escapes are decoded as BYTES and
+ * only then interpreted as UTF-8: a multi-byte character can arrive as several
+ * `\NNN` escapes and failing to group them would corrupt it.
+ */
+export function unquoteGitPath(path: string): string {
+  if (path.length < 2 || !path.startsWith('"') || !path.endsWith('"')) return path
+  const body = path.slice(1, -1)
+  let out = ''
+  let bytes: number[] = []
+  const flushBytes = (): void => {
+    if (bytes.length === 0) return
+    // `TextDecoder` exists in both halves (browser bundle + Node), unlike Buffer.
+    out += new TextDecoder().decode(Uint8Array.from(bytes))
+    bytes = []
+  }
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index] as string
+    if (char !== '\\') {
+      flushBytes()
+      out += char
+      continue
+    }
+    const escaped = body[index + 1]
+    if (escaped === undefined) {
+      flushBytes()
+      out += '\\'
+      break
+    }
+    index += 1
+    switch (escaped) {
+      case 'a': flushBytes(); out += '\x07'; break
+      case 'b': flushBytes(); out += '\b'; break
+      case 'f': flushBytes(); out += '\f'; break
+      case 'n': flushBytes(); out += '\n'; break
+      case 'r': flushBytes(); out += '\r'; break
+      case 't': flushBytes(); out += '\t'; break
+      case 'v': flushBytes(); out += '\v'; break
+      case '"': flushBytes(); out += '"'; break
+      case '\\': flushBytes(); out += '\\'; break
+      default: {
+        const octal = /^[0-7]{1,3}/.exec(body.slice(index))?.[0]
+        if (octal === undefined) {
+          flushBytes()
+          out += escaped
+          break
+        }
+        bytes.push(Number.parseInt(octal, 8))
+        index += octal.length - 1
+      }
+    }
+  }
+  flushBytes()
+  return out
+}
+
+/**
+ * The path of one porcelain row (`XY PATH`, or `XY OLD -> NEW` for renames).
+ *
+ * Each side is quoted independently, so a rename may mix quoted and plain names.
+ * A quoted name can itself contain ` -> `, hence the closing quote is located
+ * before looking for the arrow (an unquoted name containing the same bytes keeps
+ * the old, ambiguous behaviour — unchanged by this fix).
+ */
+function statusRowPath(raw: string): string {
+  if (raw.startsWith('"')) {
+    let index = 1
+    while (index < raw.length) {
+      if (raw[index] === '\\') {
+        index += 2
+        continue
+      }
+      if (raw[index] === '"') break
+      index += 1
+    }
+    const rest = raw.slice(index + 1)
+    const arrow = rest.indexOf(' -> ')
+    return unquoteGitPath(arrow >= 0 ? rest.slice(arrow + 4).trim() : raw)
+  }
+  const arrow = raw.indexOf(' -> ')
+  return unquoteGitPath(arrow >= 0 ? raw.slice(arrow + 4) : raw)
+}
+
 /** Parse `status --porcelain=v1 -b` into branch + file rows. */
 export function parseStatus(stdout: string): GitStatus {
   const lines = stdout.split('\n')
@@ -163,9 +255,7 @@ export function parseStatus(stdout: string): GitStatus {
     if (line.length < 4) continue
     const x = line[0] as string
     const y = line[1] as string
-    let path = line.slice(3)
-    const arrow = path.indexOf(' -> ')
-    if (arrow >= 0) path = path.slice(arrow + 4)
+    const path = statusRowPath(line.slice(3))
     if (x === '?' && y === '?') {
       if (untracked.length < STATUS_ROW_CAP) untracked.push(path)
       else truncated = true

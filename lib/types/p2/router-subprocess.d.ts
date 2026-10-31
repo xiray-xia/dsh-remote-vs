@@ -6,6 +6,8 @@
  */
 import { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess';
 import type { SubprocessHandle, SubprocessSpawnSpec, SubprocessTerminalEnvironment, SubprocessTerminalHandle, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess';
+/** True when argv selects a Windows shell (unsupported in remote worlds). */
+export declare function isWindowsShellArgv(argv: readonly string[]): boolean;
 export default class TransparentSubprocessRuntime extends SubprocessRuntime {
     static inject: string[];
     private get local();

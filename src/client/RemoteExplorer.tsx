@@ -90,6 +90,31 @@ function dirKey(alias: string, dir: string): string {
   return `${alias}:${dir}`
 }
 
+/**
+ * Whether a "show this folder" request still needs to be processed.
+ *
+ * The store keeps the request object after it has been handled, and this effect
+ * re-runs whenever `root`/`loadDir` change (workspace switch, offline flip). No
+ * consumed marker meant switching back to a workspace replayed the OLD reveal:
+ * it re-expanded the ancestor chain and scrolled away from wherever the user was.
+ */
+export function shouldConsumeReveal(lastId: number, id: number): boolean {
+  return lastId !== id
+}
+
+/**
+ * Whether a remote WRITE may start.
+ *
+ * Uploads hold one `AbortController` slot and a batch can run for minutes; a
+ * second upload used to overwrite that slot (the first became uncancellable and
+ * the two progress bars overwrote each other), and paste/delete could interleave
+ * with the transfer. Serializing writes through one flag is the smallest fix;
+ * read-only browsing stays allowed.
+ */
+export function writeAllowed(transferActive: boolean): boolean {
+  return !transferActive
+}
+
 /** True when `path` is `prefix` itself or a descendant of it. */
 export function pathUnder(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`)
@@ -379,6 +404,52 @@ export function buildVisibleRows(input: {
   return out
 }
 
+/**
+ * Where a keyboard move from `currentPath` lands.
+ *
+ * Pure so the a11y gate can pin the tree navigation without mounting React:
+ * `up`/`down` walk the flat visible rows, `parent` finds the enclosing directory
+ * row (if it is still visible), `child` the first row under a directory.
+ */
+export function rowKeyboardTarget(
+  rows: readonly ExplorerRow[],
+  currentPath: string,
+  intent: 'up' | 'down' | 'parent' | 'child',
+): string | undefined {
+  const entries = rows.filter((row): row is Extract<ExplorerRow, { kind: 'entry' }> => row.kind === 'entry')
+  const at = entries.findIndex(row => row.entry.path === currentPath)
+  if (at < 0) return undefined
+  if (intent === 'up') return entries[at - 1]?.entry.path
+  if (intent === 'down') return entries[at + 1]?.entry.path
+  const current = entries[at] as { depth: number }
+  if (intent === 'child') {
+    const next = entries[at + 1]
+    return next !== undefined && next.depth > current.depth ? next.entry.path : undefined
+  }
+  for (let index = at - 1; index >= 0; index -= 1) {
+    const candidate = entries[index] as { depth: number; entry: RemoteFileEntry }
+    if (candidate.depth < current.depth) return candidate.entry.path
+  }
+  return undefined
+}
+
+/**
+ * Which row should own the tree's Tab stop.
+ *
+ * The roving tabindex puts `tabIndex={0}` on exactly ONE row (the focused one),
+ * so a focused path that stops existing — the row was deleted, renamed, or its
+ * directory collapsed — leaves every row at -1 and the whole tree unreachable by
+ * keyboard. This keeps a stop alive: an existing focused row wins, otherwise the
+ * first row does, otherwise none (empty tree).
+ *
+ * Pure, so the gate can pin the fallback without mounting React.
+ */
+export function nextFocusPath(rows: readonly ExplorerRow[], focusedPath: string | undefined): string | undefined {
+  const entries = rows.filter((row): row is Extract<ExplorerRow, { kind: 'entry' }> => row.kind === 'entry')
+  if (focusedPath !== undefined && entries.some(row => row.entry.path === focusedPath)) return focusedPath
+  return entries[0]?.entry.path
+}
+
 /** Handlers one row needs, held in a ref so a memoized row never re-renders for them. */
 export interface ExplorerRowActions {
   select: (entry: RemoteFileEntry, event: React.MouseEvent) => void
@@ -393,6 +464,9 @@ export interface ExplorerRowActions {
   commitRename: (entry: RemoteFileEntry, name: string) => void
   cancelRename: () => void
   reference: (entry: RemoteFileEntry) => void
+  /** Keyboard navigation: ↑↓←→/Home/End/Enter/Space/Shift+F10 live in the parent. */
+  keyDown: (entry: RemoteFileEntry, event: React.KeyboardEvent) => void
+  focusPath: (path: string) => void
 }
 
 interface ExplorerRowProps {
@@ -405,6 +479,7 @@ interface ExplorerRowProps {
   isCut: boolean
   isDropTarget: boolean
   isRenaming: boolean
+  isFocused: boolean
   chatEnabled: boolean
   /** Precomputed so `t` (whose identity may change with a store publish) is not a prop. */
   referenceTitle: string
@@ -420,15 +495,24 @@ interface ExplorerRowProps {
  * the whole expanded tree (a 20 000-entry directory means 20 000 rows).
  */
 export const ExplorerRowView = memo(function ExplorerRowView(props: ExplorerRowProps): ReactNode {
-  const { entry, depth, status, ignored, isSelected, isOpen, isCut, isDropTarget, isRenaming, chatEnabled, actions } = props
+  const { entry, depth, status, ignored, isSelected, isOpen, isCut, isDropTarget, isRenaming, isFocused, chatEnabled, actions } = props
   const { openMenu } = actions.current
   return (
     <div
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-selected={isSelected}
+      // Directories expose their expansion; files have no aria-expanded.
+      {...(entry.isDir ? { 'aria-expanded': isOpen } : {})}
+      tabIndex={isFocused ? 0 : -1}
+      onFocus={() => actions.current.focusPath(entry.path)}
+      onKeyDown={(e) => actions.current.keyDown(entry, e)}
       className={[
         'rvs-node',
         isSelected ? 'selected' : '',
         isCut ? 'cut' : '',
         isDropTarget ? 'drop-target' : '',
+        isFocused ? 'focused' : '',
       ].filter(Boolean).join(' ')}
       style={{ paddingLeft: 8 + depth * 14 }}
       title={entry.path}
@@ -552,6 +636,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const treeRef = useRef<HTMLDivElement>(null)
   /** Abort handle for the batch on the wire (the upload bar's ✕). */
   const uploadAbort = useRef<AbortController | undefined>(undefined)
+  /** True while a remote WRITE batch is in flight (upload/paste/delete serialization). */
+  const transferRef = useRef(false)
+  /** Last handled "show this folder" request id (see `shouldConsumeReveal`). */
+  const lastRevealId = useRef(0)
   const menu = useContextMenu()
 
   const chatTarget = useRemoteChatTarget(store.ctx)
@@ -673,6 +761,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   useEffect(() => {
     const request = store.revealRequest
     if (request === undefined) return
+    // Consume each request exactly once: this effect also re-runs when `root`
+    // or `loadDir` change, and replaying an old request re-expanded the
+    // previous workspace's chain and scrolled the tree away from the user.
+    if (!shouldConsumeReveal(lastRevealId.current, request.id)) return
+    lastRevealId.current = request.id
     const base = root.replace(/\/+$/, '')
     const target = request.path.replace(/\/+$/, '')
     if (target !== base && !target.startsWith(`${base}/`)) return
@@ -924,6 +1017,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     setRenaming(prev => (prev !== undefined && gone(prev) ? undefined : prev))
     setCreating(prev => (prev !== undefined && gone(prev.dir) ? undefined : prev))
     setDropTarget(prev => (prev !== undefined && gone(prev) ? undefined : prev))
+    // The focused row may be the one being removed. Clearing it here is what
+    // lets the visibility effect below re-home the roving Tab stop to the first
+    // remaining row instead of leaving EVERY row at tabIndex=-1.
+    setFocusedPath(prev => (prev !== undefined && gone(prev) ? undefined : prev))
     setClipboard(prev => {
       if (prev === undefined) return prev
       const paths = prev.paths.filter(path => !gone(path))
@@ -941,9 +1038,17 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     setListings(prev => rekeyListings(prev, alias, from, to))
     setRenaming(prev => (prev === undefined ? undefined : moved(prev)))
     setCreating(prev => (prev === undefined ? undefined : { ...prev, dir: moved(prev.dir) }))
+    // A rename/move must carry the Tab stop with the row it belongs to.
+    setFocusedPath(prev => (prev === undefined ? undefined : moved(prev)))
   }, [alias])
 
   const doCreate = async (name: string): Promise<void> => {
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     const state = creating
     setCreating(undefined)
     if (state === undefined || name.trim() === '') return
@@ -971,6 +1076,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   const doRename = async (entry: RemoteFileEntry, name: string): Promise<void> => {
     setRenaming(undefined)
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     if (name.trim() === '' || name === entry.name) return
     let target: string
     try {
@@ -1000,6 +1111,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   const doDelete = async (entries: RemoteFileEntry[]): Promise<void> => {
     if (entries.length === 0) return
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     const first = entries[0] as RemoteFileEntry
     const label = entries.length === 1 ? first.path : `${entries.length} ${t('files.items')}`
     const ok = await confirmDialog({
@@ -1037,6 +1154,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const doPaste = async (intoDir: string): Promise<void> => {
     const clip = clipboard
     if (clip === undefined || clip.paths.length === 0) return
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     setBusy(true)
     const failed: string[] = []
     /** Cut sources that really moved: their path-indexed state follows them. */
@@ -1072,6 +1195,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   const doDrop = async (intoDir: string, event: React.DragEvent): Promise<void> => {
     event.preventDefault()
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     setDropTarget(undefined)
     const sources = dragPaths.current
     dragPaths.current = []
@@ -1124,10 +1253,19 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   ): Promise<void> => {
     dropLog('runUpload', { dir, alias, entries: entries.length })
     if (alias === '' || dir === '') return
+    // One write batch at a time: a second upload would overwrite the single
+    // `uploadAbort` slot (the first then cannot be cancelled) and the two
+    // progress bars would fight over one state object.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
+    transferRef.current = true
     const plan = withDroppedDirs(planUpload(entries), extraDirs)
     dropLog('plan', { files: plan.files.length, dirs: plan.dirs.length, skipped: plan.skipped.length })
     if (plan.files.length === 0 && plan.dirs.length === 0) {
       if (plan.skipped.length > 0) toast(t('files.uploadSkipped'), true)
+      transferRef.current = false
       setUpload(undefined)
       return
     }
@@ -1184,6 +1322,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       if (!ok) {
         // ✕ during the prompt (or a dismissed modal) ends the batch here.
         uploadAbort.current = undefined
+        transferRef.current = false
         setUpload(undefined)
         return
       }
@@ -1256,6 +1395,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       // which takes ~60 s on this tree; keeping the bar up through it made a
       // finished (or cancelled) upload look stuck and made ✕ look dead.
       uploadAbort.current = undefined
+      transferRef.current = false
       setUpload(undefined)
       setBusy(false)
     }
@@ -1332,6 +1472,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   const handleDrop = (dir: string, event: React.DragEvent): void => {
     if (!isFileDrag(event.dataTransfer)) return
+    // Remote writes are serialized: an upload in flight owns the single
+    // abort slot, so no second write batch may start beside it.
+    if (!writeAllowed(transferRef.current)) {
+      toast(t('files.transferBusy'), true)
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     setDropTarget(undefined)
@@ -1475,9 +1621,27 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
 
   // ---------------------------------------------------------- context menu
 
+  /**
+   * Begin inline creation in `dir`.
+   *
+   * The create row is rendered only under an EXPANDED directory (the flat row
+   * builder walks expanded nodes), so asking for "New file" on a collapsed
+   * folder used to set state nobody could see — the menu looked dead until the
+   * user expanded it by hand. Expand (and list) the target first.
+   */
+  const startCreate = useCallback((dir: string, kind: 'file' | 'folder'): void => {
+    if (dir !== '' && dir !== root && !expanded.has(dir)) {
+      setExpanded(prev => new Set(prev).add(dir))
+      void loadDir(dir)
+    }
+    setCreating({ dir, kind })
+  }, [root, expanded, loadDir])
+
   const openMenu = (event: React.MouseEvent, entry: RemoteFileEntry | undefined): void => {
     event.preventDefault()
     event.stopPropagation()
+    /** One write batch at a time (see `writeAllowed`). */
+    const transferBusy = !writeAllowed(upload === undefined)
     if (entry !== undefined && !selected.has(entry.path)) {
       setSelected(new Set([entry.path]))
       setAnchor(entry.path)
@@ -1493,14 +1657,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       dir = entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/')
     }
     const entries: MenuEntry[] = [
-      { label: t('files.newFile'), onSelect: () => setCreating({ dir, kind: 'file' }) },
-      { label: t('files.newFolder'), onSelect: () => setCreating({ dir, kind: 'folder' }) },
+      { label: t('files.newFile'), onSelect: () => startCreate(dir, 'file'), disabled: transferBusy },
+      { label: t('files.newFolder'), onSelect: () => startCreate(dir, 'folder'), disabled: transferBusy },
       {
         label: t('files.uploadFile'),
         onSelect: () => {
           uploadInto.current = dir
           filePicker.current?.click()
         },
+        disabled: transferBusy,
       },
       {
         label: t('files.uploadFolder'),
@@ -1508,11 +1673,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
           uploadInto.current = dir
           folderPickerHandle.current?.click()
         },
+        disabled: transferBusy,
       },
       {
         label: t('files.pasteHere'),
         onSelect: () => { void doPaste(dir) },
-        disabled: clipboard === undefined,
+        disabled: clipboard === undefined || transferBusy,
         hint: clipboard === undefined ? undefined : `${clipboard.paths.length}`,
       },
     ]
@@ -1556,6 +1722,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         label: t('files.delete') + (targets.length > 1 ? ` (${targets.length})` : ''),
         onSelect: () => { void doDelete(targets) },
         danger: true,
+        disabled: transferBusy,
       })
       entries.push({ label: t('files.copyRel'), onSelect: () => { void copyText(targets.map(item => repoRelative(repoRoot, item.path) || item.path).join('\n')); toast(t('files.copiedClipboard')) }, separated: true })
       entries.push({ label: t('files.copyAbs'), onSelect: () => { void copyText(targets.map(item => item.path).join('\n')); toast(t('files.copiedClipboard')) } })
@@ -1619,6 +1786,88 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   }
 
   /**
+   * Keyboard focus (roving tabindex).
+   *
+   * The rows are leaf `memo` components, so moving focus is an index walk over
+   * the flat visible rows plus a DOM lookup by `data-rvs-path`: before this the
+   * tree had no keyboard path at all (no focusable row, no arrow/Enter/Esc
+   * handling), which made the explorer unusable without a pointer.
+   */
+  const [focusedPath, setFocusedPath] = useState<string | undefined>(undefined)
+  const visibleRowsRef = useRef<ExplorerRow[]>([])
+  const focusRow = (path: string | undefined): void => {
+    // `undefined` means an arrow key hit an edge: keep the current stop instead
+    // of blanking it (the visibility effect only re-homes a path that stopped
+    // existing — a no-op move must not cost the tree its Tab stop).
+    if (path === undefined) return
+    setFocusedPath(path)
+    requestAnimationFrame(() => {
+      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
+        .find(candidate => candidate.dataset.rvsPath === path)
+      row?.focus()
+    })
+  }
+  const onRowKeyDown = (entry: RemoteFileEntry, event: React.KeyboardEvent): void => {
+    const rows = visibleRowsRef.current
+    const key = event.key
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault()
+      focusRow(rowKeyboardTarget(rows, entry.path, key === 'ArrowDown' ? 'down' : 'up'))
+      return
+    }
+    if (key === 'ArrowRight' && entry.isDir) {
+      event.preventDefault()
+      if (!expanded.has(entry.path)) {
+        toggleDir(entry)
+        focusRow(entry.path)
+        return
+      }
+      focusRow(rowKeyboardTarget(rows, entry.path, 'child') ?? entry.path)
+      return
+    }
+    if (key === 'ArrowLeft') {
+      event.preventDefault()
+      if (entry.isDir && expanded.has(entry.path)) {
+        toggleDir(entry)
+        focusRow(entry.path)
+        return
+      }
+      focusRow(rowKeyboardTarget(rows, entry.path, 'parent') ?? entry.path)
+      return
+    }
+    if (key === 'Enter') {
+      event.preventDefault()
+      openEntry(entry)
+      return
+    }
+    if (key === ' ' || key === 'Spacebar') {
+      event.preventDefault()
+      setSelected(new Set([entry.path]))
+      setAnchor(entry.path)
+      return
+    }
+    if (key === 'Home' || key === 'End') {
+      event.preventDefault()
+      const entries = rows.filter(row => row.kind === 'entry')
+      const target = key === 'Home' ? entries[0] : entries[entries.length - 1]
+      if (target !== undefined) focusRow(target.entry.path)
+      return
+    }
+    if ((key === 'F10' && event.shiftKey) || key === 'ContextMenu') {
+      event.preventDefault()
+      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
+        .find(candidate => candidate.dataset.rvsPath === entry.path)
+      const rect = row?.getBoundingClientRect()
+      openMenu({
+        preventDefault: () => undefined,
+        stopPropagation: () => undefined,
+        clientX: rect === undefined ? 0 : rect.left,
+        clientY: rect === undefined ? 0 : rect.bottom,
+      } as unknown as React.MouseEvent, entry)
+    }
+  }
+
+  /**
    * Live row handlers, read through a ref.
    *
    * The rows are `memo`ized on primitive props; handing them a new callback
@@ -1638,6 +1887,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     commitRename: () => undefined,
     cancelRename: () => undefined,
     reference: () => undefined,
+    keyDown: () => undefined,
+    focusPath: () => undefined,
   })
   rowActions.current = {
     select: selectRow,
@@ -1687,6 +1938,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       if (chatTarget.sessionId === undefined) return
       insertRemoteReference(ctx, chatTarget.sessionId, repoRoot ?? root, entry.path, entry.isDir)
     },
+    keyDown: onRowKeyDown,
+    focusPath: (path) => { setFocusedPath(path) },
   }
 
   /**
@@ -1705,6 +1958,26 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     // (the root's own placeholder below only covers the workspace root).
     placeholderOf: (dir) => (offline ? 'offline' : loading.has(dirKey(alias, dir)) ? 'loading' : undefined),
   }), [root, rowsOf, expanded, creating, offline, loading, alias])
+  // Keyboard navigation reads the current flat list synchronously.
+  visibleRowsRef.current = visibleRows
+
+  /**
+   * Keep a Tab stop on screen.
+   *
+   * The roving tabindex puts `tabIndex=0` only on `focusedPath`'s row. Deleting
+   * that row, renaming it, collapsing its parent or switching bindings used to
+   * leave every row at -1: the tree stayed visible but keyboard users could no
+   * longer Tab into it (the pointer was the only way back). Re-home the path to
+   * the first remaining row; an empty tree keeps `undefined`.
+   */
+  useEffect(() => {
+    const next = nextFocusPath(visibleRows, focusedPath)
+    if (next === focusedPath) return
+    setFocusedPath(next)
+    if (next === undefined) return
+    // Do not yank DOM focus while the user is typing elsewhere; this only
+    // restores the roving stop (the row is focusable again).
+  }, [visibleRows, focusedPath])
 
   const renderDir = (dir: string, depth: number): ReactNode => {
     const rows = rowsOf(dir)
@@ -1761,6 +2034,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
               isCut={cutPaths !== undefined && cutPaths.has(row.entry.path)}
               isDropTarget={dropTarget === row.entry.path}
               isRenaming={renaming === row.entry.path}
+              isFocused={focusedPath === row.entry.path}
               chatEnabled={chatEnabled}
               referenceTitle={referenceTitle}
               symlinkTitle={symlinkTitle}
@@ -1777,10 +2051,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     <div className="rvs-pane grow">
       <div className="rvs-header">
         <span className="rvs-title">{t('tab.files')}</span>
-        <IconButton title={t('files.newFile')} onClick={() => setCreating({ dir: root, kind: 'file' })}>
+        <IconButton title={t('files.newFile')} onClick={() => startCreate(root, 'file')} disabled={upload !== undefined}>
           <IconPlus size={14} />
         </IconButton>
-        <IconButton title={t('files.newFolder')} onClick={() => setCreating({ dir: root, kind: 'folder' })}>
+        <IconButton title={t('files.newFolder')} onClick={() => startCreate(root, 'folder')} disabled={upload !== undefined}>
           <IconNewFolder size={14} />
         </IconButton>
         <IconButton title={t('files.collapseAll')} onClick={() => setExpanded(new Set([root]))}>
@@ -1833,6 +2107,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         onChange={(e) => {
           const picked = [...(e.target.files ?? [])]
           e.target.value = ''
+          if (!writeAllowed(transferRef.current)) return
           const dir = uploadInto.current || root
           const blobs = new Map<string, Blob>(picked.map(file => [file.name, file]))
           void runUpload(dir, picked.map(file => ({ rel: file.name, size: file.size })), blobs, [])
@@ -1852,6 +2127,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         onChange={(e) => {
           const picked = [...(e.target.files ?? [])]
           e.target.value = ''
+          if (!writeAllowed(transferRef.current)) return
           const dir = uploadInto.current || root
           const entries: DroppedFile[] = []
           const blobs = new Map<string, Blob>()
@@ -1880,6 +2156,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         onClick={(e) => {
           if (e.target === e.currentTarget) setSelected(new Set())
         }}
+        // The empty area BELOW the tree belongs to the scroll box, not to
+        // .rvs-tree, so a right-click there used to open the browser's own
+        // menu: the explorer's background actions were unreachable.
+        onPointerDown={(e) => { if (e.button === 2 && e.target === e.currentTarget) openMenu(e, undefined) }}
+        onContextMenu={(e) => {
+          if (e.target !== e.currentTarget) return
+          e.preventDefault()
+          if (menu.menu === undefined) openMenu(e, undefined)
+        }}
         // Drop handlers live on the SCROLL container, not on `.rvs-tree`: when
         // the tree is shorter than the pane, the empty space below it belongs to
         // the scroll box, and dropping there (the natural target for "put it in
@@ -1900,6 +2185,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       >
         <div
           className="rvs-tree"
+          role="tree"
+          aria-label={t('tab.files')}
+          aria-multiselectable="true"
           onPointerDown={(e) => { if (e.button === 2) openMenu(e, undefined) }}
           onContextMenu={(e) => {
             e.preventDefault()

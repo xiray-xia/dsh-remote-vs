@@ -105,6 +105,34 @@ export const READ_EXIT = {
 /** Marker that starts one file block in a read reply. */
 const FILE_MARKER = '@@RVS-FILE '
 
+/**
+ * Strict UTF-8 decoder — one instance, reused.
+ *
+ * A file's bytes are only "text" if they decode as UTF-8; anything else used to be
+ * decoded lossily into U+FFFD, which made the panel show mojibake with counts that
+ * were pure fiction AND made every revert fail (the patch's context lines could
+ * never match the real bytes). "Not decodable" is reported as binary instead — the
+ * one honest answer, and the one the undo path already refuses to touch.
+ *
+ * `ignoreBOM: true` is required, despite the confusing name: with the default
+ * (false) the decoder CONSUMES a leading UTF-8 BOM, while the editor's read path
+ * (`sftp.ts` → `Buffer.toString('utf8')`) keeps it. Stripping it here would make
+ * the ledger's text one code point shorter than the file on disk; the patch the
+ * undo path builds from that text then lacks the BOM on the first line and
+ * `git apply -R` rejects it (fail-closed, but the revert is unusable), and the
+ * first-line inline marks shift by one column.
+ */
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+/** Decode strict UTF-8, or undefined when the bytes are not valid UTF-8. */
+function decodeUtf8Strict(bytes: Buffer): string | undefined {
+  try {
+    return strictUtf8.decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
 /** POSIX single-quote one shell word. Throws on NUL, which no shell can carry. */
 function shq(word: string): string {
   if (word.includes('\0')) throw new Error('NUL byte in shell word')
@@ -442,7 +470,15 @@ export function parseReads(stdout: string): Map<string, ReadResult> {
       results.set(path, { text: null, truncated: false, binary: true, absent: false, ...stats })
       continue
     }
-    results.set(path, { text: bytes.toString('utf8'), truncated: false, binary: false, absent: false, ...stats })
+    // Not valid UTF-8 (a legacy-encoded source, a truncated multibyte char, a
+    // non-text payload): report it as binary rather than pretending the lossy
+    // decode is the file's text. See `strictUtf8`.
+    const text = decodeUtf8Strict(bytes)
+    if (text === undefined) {
+      results.set(path, { text: null, truncated: false, binary: true, absent: false, ...stats })
+      continue
+    }
+    results.set(path, { text, truncated: false, binary: false, absent: false, ...stats })
   }
   return results
 }

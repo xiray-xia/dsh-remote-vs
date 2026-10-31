@@ -107,7 +107,7 @@ function HostFormView(props: {
               value={keyPath}
               disabled={props.busy}
               onChange={(e) => setKeyPath(e.target.value)}
-              placeholder={props.initial?.auth === 'key' ? '(unchanged)' : 'C:\\Users\\me\\.ssh\\id_ed25519'}
+              placeholder={props.initial?.auth === 'key' ? t('form.unchanged') : 'C:\\Users\\me\\.ssh\\id_ed25519'}
               style={inputStyle}
             />
           </Field>
@@ -117,7 +117,7 @@ function HostFormView(props: {
               value={passphrase}
               disabled={props.busy}
               onChange={(e) => setPassphrase(e.target.value)}
-              placeholder={props.initial !== undefined ? '(unchanged when empty)' : ''}
+              placeholder={props.initial !== undefined ? t('form.unchangedWhenEmpty') : ''}
               style={inputStyle}
             />
           </Field>
@@ -129,7 +129,7 @@ function HostFormView(props: {
             value={password}
             disabled={props.busy}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder={props.initial?.auth === 'password' ? '(empty keeps stored)' : ''}
+            placeholder={props.initial?.auth === 'password' ? t('form.unchangedWhenEmpty') : ''}
             style={inputStyle}
           />
         </Field>
@@ -170,8 +170,8 @@ export function HostsView(props: {
     api.testHost(alias).then(
       (r) => {
         setBusy(undefined)
-        if (r.ok) say(`${alias}: OK (${r.durationMs} ms)`)
-        else fail(`${alias}: ${r.error ?? 'unknown'}`)
+        if (r.ok) say(t('hosts.testOk').replace('{alias}', alias).replace('{ms}', String(r.durationMs)))
+        else fail(`${alias}: ${r.error ?? t('hosts.unknownError')}`)
       },
       (e: unknown) => { setBusy(undefined); fail(e) },
     )
@@ -205,7 +205,7 @@ export function HostsView(props: {
     if (!window.confirm(t('hosts.confirmDelete'))) return
     setBusy(`del:${alias}`)
     api.deleteHost(alias).then(
-      () => { setBusy(undefined); say(`${alias}: deleted`); props.onChanged() },
+      () => { setBusy(undefined); say(t('hosts.deleted').replace('{alias}', alias)); props.onChanged() },
       (e: unknown) => { setBusy(undefined); fail(e) },
     )
   }
@@ -217,7 +217,7 @@ export function HostsView(props: {
       (report) => {
         setBusy(undefined)
         const skipped = report.skipped.map(s => `${s.alias}(${s.reason})`).join('; ')
-        say(`imported ${report.imported.length}${report.imported.length > 0 ? `: ${report.imported.join(', ')}` : ''}${skipped !== '' ? `; skipped: ${skipped}` : ''}`)
+        say(`${t('hosts.imported').replace('{count}', String(report.imported.length))}${report.imported.length > 0 ? `: ${report.imported.join(', ')}` : ''}${skipped !== '' ? t('hosts.importedSkipped').replace('{list}', skipped) : ''}`)
         props.onChanged()
       },
       (e: unknown) => { setBusy(undefined); fail(e) },
@@ -239,7 +239,7 @@ export function HostsView(props: {
       (h) => {
         setBusy(undefined)
         setEditing(null)
-        say(`${h.alias}: saved`)
+        say(t('hosts.saved').replace('{alias}', h.alias))
         props.onChanged()
       },
       (e: unknown) => { setBusy(undefined); fail(e) },

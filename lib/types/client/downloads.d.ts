@@ -31,6 +31,23 @@ export interface DownloadTask {
 }
 /** Human byte size for the progress line. */
 export declare function formatByteCount(bytes: number): string;
+/**
+ * One line of detail under a task's bar (pure: the dock only renders it).
+ *
+ * KNOWN size includes 0 — a zero-byte file has a size and it is 0. Treating
+ * `total === 0` as "unknown" printed `0 B · size unknown` for every empty file.
+ * An `undefined` total keeps both honest cases: a directory/selection archive
+ * is chunked by design (indeterminate), while a plain file with no total means
+ * a shell or proxy stripped `content-length` (DSH Desktop does that).
+ */
+export declare function downloadDetailText(task: DownloadTask, t: (key: string) => string): string;
+/**
+ * Percent for the bar, or `undefined` while the size is unknown (archives).
+ *
+ * `total === 0` is COMPLETE, not unknown: every one of an empty file's zero
+ * bytes has arrived, so the bar is full instead of a permanent flowing stripe.
+ */
+export declare function downloadPercent(task: DownloadTask): number | undefined;
 /** Store surface: `useSyncExternalStore(subscribe, getSnapshot, getSnapshot)`. */
 export declare const downloadsStore: {
     subscribe(listener: () => void): () => void;

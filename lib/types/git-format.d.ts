@@ -24,6 +24,21 @@ export declare function messageCommand(workdir: string, ref: string): string;
 export declare function statCommand(workdir: string, ref: string): string;
 /** True when stderr reports a non-repository / missing git. */
 export declare function gitFailed(stderr: string): string | undefined;
+/**
+ * Reverse git's C-style quoting of one porcelain path.
+ *
+ * `git status --porcelain` (without `-z`) quotes any path containing whitespace,
+ * a quote, a backslash or a control character, and escapes the specials inside:
+ * `"a\"b.txt"`, `"plain space.txt"`, `"ctl\001name.txt"`. Passing that field on
+ * as if it were the path made every such file unusable in the SCM panel
+ * (open/diff/stage asked for a literal filename with quotes in it) — and a space
+ * in a name is common, not an exotic edge (2026-10 audit, A18-b).
+ *
+ * Unquoted input is returned unchanged. Octal escapes are decoded as BYTES and
+ * only then interpreted as UTF-8: a multi-byte character can arrive as several
+ * `\NNN` escapes and failing to group them would corrupt it.
+ */
+export declare function unquoteGitPath(path: string): string;
 /** Parse `status --porcelain=v1 -b` into branch + file rows. */
 export declare function parseStatus(stdout: string): GitStatus;
 /** Parse the \x1f/\x1e log format into commits. */

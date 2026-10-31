@@ -57,6 +57,25 @@ const CONNECTION_POLL_MS = 5_000
  */
 const RECOVERY_SETTLE_MS = 10_000
 
+/**
+ * Which tabs a recovered link must reload, and how many dirty tabs to warn about.
+ *
+ * Pure so the gate can drive it with a synthetic list: the recovery timer used
+ * to close over the tab array of the render that STARTED it (10 s earlier), so a
+ * tab opened or closed in that window was missed. Only clean file/diff tabs are
+ * reloaded; a dirty tab is the user's unsaved work and must never be replaced.
+ */
+export function planRecoveryReload(
+  tabs: readonly { id: string; dirty: boolean; loading: boolean; kind: string }[],
+): { dirty: number; reload: string[] } {
+  return {
+    dirty: tabs.filter(tab => tab.dirty).length,
+    reload: tabs
+      .filter(tab => !tab.loading && !tab.dirty && (tab.kind === 'file' || tab.kind === 'diff'))
+      .map(tab => tab.id),
+  }
+}
+
 export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNode {
   useBootstrap(props.ctx)
   return (
@@ -73,6 +92,9 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   // The active panel lives in the shared store so other surfaces (the tree's
   // "Find in Folder…", the SCM panel's history shortcut) can switch it.
   const view = store.view
+  /** Latest committed tab list, for timers created by an earlier render. */
+  const tabsRef = useRef(store.tabs)
+  tabsRef.current = store.tabs
   const [showHidden, setShowHidden] = useState<boolean>(() => {
     try {
       return localStorage.getItem(HIDDEN_KEY) === '1'
@@ -207,15 +229,13 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     const timer = window.setTimeout(() => {
       if (connectionRef.current?.state !== 'ok') return
       if (connectionAliasRef.current !== connectionAlias) return
-      const dirty = store.tabs.filter(tab => tab.dirty).length
+      // Read the LATEST committed tabs: this timer fires 10 s after the
+      // effect ran, and a tab opened/closed/changed in between must be seen
+      // (the captured `store` snapshot only knows the list from that render).
+      const plan = planRecoveryReload(tabsRef.current)
       refreshAfterReconnect()
-      for (const tab of store.tabs) {
-        if (tab.loading) continue
-        if (tab.dirty) continue
-        if (tab.kind !== 'file' && tab.kind !== 'diff') continue
-        void store.reloadTab(tab.id)
-      }
-      if (dirty > 0) store.info(t('connection.recoveredDirty'))
+      for (const id of plan.reload) void store.reloadTab(id)
+      if (plan.dirty > 0) store.info(t('connection.recoveredDirty'))
       else store.info(t('connection.recovered'))
     }, RECOVERY_SETTLE_MS)
     return () => window.clearTimeout(timer)

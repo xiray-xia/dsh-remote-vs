@@ -15,6 +15,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -23,6 +24,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { detectLang, makeT } from '../i18n.ts'
 
 // ------------------------------------------------------------------ icons
 
@@ -615,15 +617,43 @@ export function DialogHost(): ReactNode {
   )
 }
 
+/**
+ * Focusable elements inside one dialog, in DOM order.
+ *
+ * The modal is portaled to the END of `<body>`, so without a Tab trap a
+ * keyboard user tabs through the whole page to reach its buttons.
+ */
+function focusables(root: HTMLElement | null): HTMLElement[] {
+  if (root === null) return []
+  return Array.from(root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ))
+}
+
 function ModalCard(props: { request: ModalRequest }): ReactNode {
   const { request } = props
   const [value, setValue] = useState(request.initial)
   const inputRef = useRef<HTMLInputElement>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  /** Focus is returned here when the dialog goes away. */
+  const openerRef = useRef<HTMLElement | null>(
+    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null),
+  )
+  const t = makeT(detectLang())
 
   useEffect(() => {
+    // A prompt starts in its input; a confirmation starts on the safe button.
     if (request.kind === 'prompt') {
       inputRef.current?.focus()
       inputRef.current?.select()
+    } else {
+      cancelRef.current?.focus()
+    }
+    return () => {
+      const opener = openerRef.current
+      if (opener !== null && document.body.contains(opener)) opener.focus()
     }
   }, [request.kind])
 
@@ -637,6 +667,20 @@ function ModalCard(props: { request: ModalRequest }): ReactNode {
         e.preventDefault()
         request.resolve(value)
         closeModal()
+      } else if (e.key === 'Tab') {
+        // Keep focus inside the dialog (first <-> last).
+        const items = focusables(boxRef.current)
+        if (items.length === 0) return
+        const first = items[0] as HTMLElement
+        const last = items[items.length - 1] as HTMLElement
+        const active = document.activeElement
+        if (e.shiftKey && (active === first || active === null || !boxRef.current?.contains(active))) {
+          e.preventDefault()
+          last.focus()
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault()
+          first.focus()
+        }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -654,8 +698,8 @@ function ModalCard(props: { request: ModalRequest }): ReactNode {
 
   return (
     <div className="rvs-portal rvs-modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) cancel() }}>
-      <div className="rvs-modal-box" role="dialog" aria-modal="true">
-        <div className="rvs-modal-title">{request.title}</div>
+      <div ref={boxRef} className="rvs-modal-box" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <div className="rvs-modal-title" id={titleId}>{request.title}</div>
         {request.text !== '' && <div className="rvs-modal-text">{request.text}</div>}
         {request.kind === 'prompt' && (
           <input
@@ -667,15 +711,15 @@ function ModalCard(props: { request: ModalRequest }): ReactNode {
           />
         )}
         <div className="rvs-modal-row">
-          <button type="button" className="rvs-modal-btn" onClick={cancel}>
-            {request.cancelText ?? '取消'}
+          <button ref={cancelRef} type="button" className="rvs-modal-btn" onClick={cancel}>
+            {request.cancelText ?? t('common.cancel')}
           </button>
           <button
             type="button"
             className={request.danger ? 'rvs-modal-btn danger' : 'rvs-modal-btn primary'}
             onClick={ok}
           >
-            {request.okText ?? '确定'}
+            {request.okText ?? t('common.ok')}
           </button>
         </div>
       </div>
@@ -714,6 +758,50 @@ export function ContextMenu(props: {
   const [pos, setPos] = useState({ left: props.x, top: props.y })
   /** When this menu appeared (monotonic): see MENU_OPEN_GRACE_MS. */
   const openedAt = useRef(typeof performance === 'undefined' ? 0 : performance.now())
+  /** Element focus must return to when the menu closes. */
+  const openerRef = useRef<HTMLElement | null>(
+    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null),
+  )
+
+  /** Enabled items in DOM order (arrow navigation skips separators/disabled). */
+  const itemsOf = (): HTMLButtonElement[] => {
+    const box = boxRef.current
+    if (box === null) return []
+    return Array.from(box.querySelectorAll<HTMLButtonElement>('.rvs-menu-item:not([disabled])'))
+  }
+
+  /**
+   * Keyboard access to the menu.
+   *
+   * Opening it focuses the first item; ↑/↓/Home/End move, Enter/Space activate
+   * (native button semantics), Esc closes (the window listener above), and the
+   * previously focused element gets focus back on unmount. Without this the
+   * menu was pointer-only: a keyboard user could open it (Shift+F10) and then
+   * had no way to choose anything and no way to know where focus was.
+   */
+  useEffect(() => {
+    itemsOf()[0]?.focus()
+    return () => {
+      const opener = openerRef.current
+      if (opener !== null && document.body.contains(opener)) opener.focus()
+    }
+  }, [])
+
+  const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const items = itemsOf()
+    if (items.length === 0) return
+    const at = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = e.key === 'Home'
+      ? 0
+      : e.key === 'End'
+        ? items.length - 1
+        : e.key === 'ArrowDown'
+          ? (at + 1) % items.length
+          : (at <= 0 ? items.length - 1 : at - 1)
+    items[next]?.focus()
+  }
 
   useLayoutEffect(() => {
     const box = boxRef.current
@@ -778,12 +866,13 @@ export function ContextMenu(props: {
   if (typeof document === 'undefined') return null
   return createPortal(
     <div className="rvs-portal">
-      <div ref={boxRef} className="rvs-menu" style={{ left: pos.left, top: pos.top }}>
+      <div ref={boxRef} className="rvs-menu" role="menu" style={{ left: pos.left, top: pos.top }} onKeyDown={onMenuKeyDown}>
         {props.entries.map((entry, index) => (
           <div key={`${entry.label}-${index}`}>
             {entry.separated === true && index > 0 && <div className="rvs-menu-sep" />}
             <button
               type="button"
+              role="menuitem"
               className={entry.danger === true ? 'rvs-menu-item danger' : 'rvs-menu-item'}
               disabled={entry.disabled === true}
               onClick={() => {

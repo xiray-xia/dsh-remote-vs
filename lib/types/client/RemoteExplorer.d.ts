@@ -12,6 +12,25 @@
  */
 import { type MutableRefObject, type ReactNode } from 'react';
 import { type RemoteFileEntry } from '../protocol.ts';
+/**
+ * Whether a "show this folder" request still needs to be processed.
+ *
+ * The store keeps the request object after it has been handled, and this effect
+ * re-runs whenever `root`/`loadDir` change (workspace switch, offline flip). No
+ * consumed marker meant switching back to a workspace replayed the OLD reveal:
+ * it re-expanded the ancestor chain and scrolled away from wherever the user was.
+ */
+export declare function shouldConsumeReveal(lastId: number, id: number): boolean;
+/**
+ * Whether a remote WRITE may start.
+ *
+ * Uploads hold one `AbortController` slot and a batch can run for minutes; a
+ * second upload used to overwrite that slot (the first became uncancellable and
+ * the two progress bars overwrote each other), and paste/delete could interleave
+ * with the transfer. Serializing writes through one flag is the smallest fix;
+ * read-only browsing stays allowed.
+ */
+export declare function writeAllowed(transferActive: boolean): boolean;
 /** True when `path` is `prefix` itself or a descendant of it. */
 export declare function pathUnder(path: string, prefix: string): boolean;
 /**
@@ -104,6 +123,26 @@ export declare function buildVisibleRows(input: {
     };
     placeholderOf?: (dir: string) => 'loading' | 'offline' | undefined;
 }): ExplorerRow[];
+/**
+ * Where a keyboard move from `currentPath` lands.
+ *
+ * Pure so the a11y gate can pin the tree navigation without mounting React:
+ * `up`/`down` walk the flat visible rows, `parent` finds the enclosing directory
+ * row (if it is still visible), `child` the first row under a directory.
+ */
+export declare function rowKeyboardTarget(rows: readonly ExplorerRow[], currentPath: string, intent: 'up' | 'down' | 'parent' | 'child'): string | undefined;
+/**
+ * Which row should own the tree's Tab stop.
+ *
+ * The roving tabindex puts `tabIndex={0}` on exactly ONE row (the focused one),
+ * so a focused path that stops existing — the row was deleted, renamed, or its
+ * directory collapsed — leaves every row at -1 and the whole tree unreachable by
+ * keyboard. This keeps a stop alive: an existing focused row wins, otherwise the
+ * first row does, otherwise none (empty tree).
+ *
+ * Pure, so the gate can pin the fallback without mounting React.
+ */
+export declare function nextFocusPath(rows: readonly ExplorerRow[], focusedPath: string | undefined): string | undefined;
 /** Handlers one row needs, held in a ref so a memoized row never re-renders for them. */
 export interface ExplorerRowActions {
     select: (entry: RemoteFileEntry, event: React.MouseEvent) => void;
@@ -118,6 +157,9 @@ export interface ExplorerRowActions {
     commitRename: (entry: RemoteFileEntry, name: string) => void;
     cancelRename: () => void;
     reference: (entry: RemoteFileEntry) => void;
+    /** Keyboard navigation: ↑↓←→/Home/End/Enter/Space/Shift+F10 live in the parent. */
+    keyDown: (entry: RemoteFileEntry, event: React.KeyboardEvent) => void;
+    focusPath: (path: string) => void;
 }
 interface ExplorerRowProps {
     entry: RemoteFileEntry;
@@ -129,6 +171,7 @@ interface ExplorerRowProps {
     isCut: boolean;
     isDropTarget: boolean;
     isRenaming: boolean;
+    isFocused: boolean;
     chatEnabled: boolean;
     /** Precomputed so `t` (whose identity may change with a store publish) is not a prop. */
     referenceTitle: string;

@@ -288,6 +288,16 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   const findOpenRef = useRef(false)
   findOpenRef.current = findOpen
   const [findSeed, setFindSeed] = useState({ text: '', id: 0 })
+  /**
+   * Bumped on every selection change while the find widget is open.
+   *
+   * The widget's `n/N` readout is derived from the caret, but F3 / Shift-F3, a
+   * click or an arrow key move the caret WITHOUT touching the widget, so nothing
+   * used to re-read it: the numbers stayed on the previous match while the caret
+   * had already moved on. Only bumped while open, so a closed widget costs no
+   * renders at all.
+   */
+  const [findTick, setFindTick] = useState(0)
   const [view, setView] = useState<EditorView | undefined>(undefined)
   /** Landing highlight for a jump (null = nothing lit). */
   const [litPosition, setLitPosition] = useState<number | null>(null)
@@ -753,6 +763,11 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
        */
       EditorView.updateListener.of((update) => {
         if (!update.selectionSet) return
+        // Nudge the find widget so its readout follows moves made OUTSIDE it
+        // (F3, a click, an arrow key). Folded into this existing listener rather
+        // than a new extension, and gated on `findOpenRef` so the widget being
+        // closed never costs a render.
+        if (findOpenRef.current) setFindTick(tick => tick + 1)
         const handler = propsRef.current.onViewState
         const tabId = propsRef.current.tabId
         if (handler === undefined || tabId === undefined) return
@@ -934,7 +949,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
      * tokenizer the diff panes use. The console line names which path colored
      * the file, so a screenshot or a pasted line is enough to diagnose.
      */
+    /**
+     * Handle of the delayed `stamp` run (see `armFallback`).
+     *
+     * It used to be untracked, so unmounting between the 250 ms arm and the
+     * 120 ms stamp left it queued: it then measured a DETACHED host (0 colored
+     * spans) and reported `tok 0` for whichever tab was on screen by then — the
+     * exact number README calls "grammar did not fire". Tracked here so cleanup
+     * cancels it, like `armTimer` / `warmTimer`.
+     */
+    let stampTimer: number | undefined
     const stamp = (source: string): void => {
+      // Double guard: React can tear the mount down between the timer being
+      // queued and it running, and `host` is detached by then.
+      if (viewRef.current !== view) return
       const primary = host.querySelectorAll('[class*="rvs-ck-"]').length
       const fallback = host.querySelectorAll('span[class^="rvs-t-"]').length
       const count = primary > 0 ? primary : fallback
@@ -954,7 +982,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           // A disposed view: nothing to color.
         }
       }
-      window.setTimeout(() => stamp(needsFallback ? 'fallback' : 'grammar'), 120)
+      stampTimer = window.setTimeout(() => stamp(needsFallback ? 'fallback' : 'grammar'), 120)
     }
     // Two passes: the first lets CodeMirror's own highlighter settle, the
     // second reports what actually ended up on screen. Both handles are kept
@@ -982,6 +1010,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       if (restoreFrame !== undefined) window.cancelAnimationFrame(restoreFrame)
       window.clearTimeout(armTimer)
       window.clearTimeout(warmTimer)
+      window.clearTimeout(stampTimer)
       popupRef.current.hide()
       unwatchTheme()
       /**
@@ -1025,6 +1054,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           view={view}
           open={findOpen}
           seed={findSeed}
+          tick={findTick}
           anchor={anchor}
           onClose={() => {
             setFindOpen(false)

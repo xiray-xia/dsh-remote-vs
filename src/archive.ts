@@ -11,10 +11,23 @@ import { posix } from 'node:path'
 import { shQuote } from './git-format.ts'
 import { MAX_SELECTION_DOWNLOAD } from './protocol.ts'
 
-/** Download file name for one archived directory. */
+/**
+ * Best-effort normal form of one remote path, shared by the guard, the command
+ * and the download NAME.
+ *
+ * The name used to take its basename from the RAW string while the command
+ * normalized: `/a/b/..` archived `/a` but was saved as `...tar.gz`. One
+ * normalization for both is the only way the file name can be trusted to name
+ * what is inside.
+ */
+function normalizeArchivePath(raw: string): string {
+  return posix.normalize(String(raw).replace(/\\/g, '/')).replace(/\/+$/, '')
+}
+
+/** Download file name for one archived directory (normalized like the command). */
 export function directoryArchiveName(dir: string): string {
-  const trimmed = String(dir).replace(/[\\/]+$/, '')
-  const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  const trimmed = normalizeArchivePath(dir)
+  const at = trimmed.lastIndexOf('/')
   const base = at < 0 ? trimmed : trimmed.slice(at + 1)
   return `${base === '' ? 'root' : base}.tar.gz`
 }
@@ -33,7 +46,7 @@ export function directoryArchiveName(dir: string): string {
  * only the root itself (and anything relative) is refused.
  */
 function archivePath(raw: string): string {
-  const path = posix.normalize(String(raw).replace(/\\/g, '/')).replace(/\/+$/, '')
+  const path = normalizeArchivePath(raw)
   if (path === '' || path === '/') throw new Error('refusing to archive the remote root')
   if (!path.startsWith('/')) throw new Error('remote path must be absolute')
   // Defense in depth: normalize() resolves every `..` in an absolute path, so

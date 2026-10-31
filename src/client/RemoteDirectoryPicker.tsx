@@ -26,6 +26,13 @@ export function RemoteDirectoryPicker(props: {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
   const generation = useRef(0)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const openerRef = useRef<HTMLElement | null>(null)
+  const cancelRef = useRef(props.onCancel)
+  cancelRef.current = props.onCancel
+  const openRef = useRef(props.open)
+  openRef.current = props.open
 
   const browse = async (dir: string): Promise<void> => {
     const gen = ++generation.current
@@ -66,6 +73,51 @@ export function RemoteDirectoryPicker(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, props.alias])
 
+  /**
+   * Keyboard/focus management for the modal.
+   *
+   * Opening focuses the path field; Escape works from ANY focus position (it
+   * used to be an `onKeyDown` on the inner box, so it only fired while focus was
+   * already inside — the usual state right after opening was "outside"); Tab is
+   * trapped; closing puts focus back where it came from.
+   */
+  useEffect(() => {
+    if (!props.open) return
+    openerRef.current = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        cancelRef.current()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const box = boxRef.current
+      if (box === null) return
+      const items = Array.from(box.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ))
+      if (items.length === 0) return
+      const first = items[0] as HTMLElement
+      const last = items[items.length - 1] as HTMLElement
+      const active = document.activeElement
+      if (e.shiftKey && (active === first || active === null || !box.contains(active))) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.clearTimeout(focusTimer)
+      window.removeEventListener('keydown', onKey)
+      const opener = openerRef.current
+      if (opener !== null && document.body.contains(opener)) opener.focus()
+    }
+  }, [props.open])
+
   if (!props.open) return null
 
   const parent = path !== '/' ? path.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/' : undefined
@@ -83,6 +135,7 @@ export function RemoteDirectoryPicker(props: {
       onClick={props.onCancel}
     >
       <div
+        ref={boxRef}
         style={{
           width: 'min(560px, calc(100vw - 32px))',
           maxHeight: 'min(640px, calc(100vh - 32px))',
@@ -96,13 +149,11 @@ export function RemoteDirectoryPicker(props: {
           fontSize: 13,
         }}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') props.onCancel()
-        }}
       >
         <div style={{ fontWeight: 600, marginBottom: 8 }}>{props.title}</div>
         <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
           <input
+            ref={inputRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {

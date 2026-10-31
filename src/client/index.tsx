@@ -97,8 +97,11 @@ export function apply(ctx: Context): void {
       try {
         disposeBetter = sidebar.registerTab({
           id: 'remote-vs:explorer',
-          title: () => '远程',
-          description: () => '远端文件、终端与 Git',
+          // Through the dictionary: this tab is user-visible chrome, and the
+          // literal made it Chinese-only for an English UI (the native fallback
+          // page and every other label already go through `nativeT`).
+          title: () => nativeT('tab.remote'),
+          description: () => nativeT('tab.remoteDesc'),
           icon: (size: number) => <RemoteIcon size={size} />,
           order: 30,
           single: true,

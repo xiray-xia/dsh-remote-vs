@@ -1355,6 +1355,25 @@ export async function discoverRepos(): Promise<string[]> {
 export async function refreshGit(mode: 'join' | 'fresh' = 'fresh'): Promise<void> {
   const { workspace, key } = activeBinding()
   if (workspace === undefined) return
+  /**
+   * An AUTOMATIC read (`join`: bootstrap、切工作区) must not dial a link the Host
+   * already reports as down — the directory tree gates the same way
+   * (`loadDir`/`prefetchDir`), and so do save and undo (`EditorPane.saveActive`,
+   * `undoChange`). An EXPLICIT read (`fresh`: ⟳、写后、重连) still tries: it is
+   * also how a recovered link gets re-proven.
+   *
+   * `undefined` (no status answer yet) must NOT block: bootstrap runs before the
+   * first `/status` poll, and treating "no evidence" as "down" would leave the
+   * panel empty forever.
+   */
+  if (mode === 'join' && connectionStateOf(workspace.alias) === 'error') {
+    // Nothing cached and nothing read yet: the SCM empty state would sit on
+    // "Loading…" forever, so say WHY instead. A cached slice stays untouched —
+    // the connection chip is the indicator, and the panel must not paint a
+    // second, raw-socket error over a list it can still show.
+    if (state.repoRoot === undefined && state.status === undefined) patch({ gitError: t('scm.offlineRead') })
+    return
+  }
   const subdir = state.repoSubdir
   const cacheKey = gitCacheKey(key, subdir)
   const settleMs = gitReadSettleMs()

@@ -117,20 +117,20 @@ export const MULTI_CHANNEL_MIN_BYTES = 4 * 1024 * 1024
 const MEMO_CAP = 512
 
 /**
- * How old an orphaned `.part-*` side file must be before a sweep may remove it.
+ * Fixed segment every side file this plugin creates carries.
  *
- * A failed save/upload removes its own side file, but when the failure IS the
- * dead connection that `unlink` cannot run — so the file stays in the remote
- * directory with nobody to own it. The next successful write into THAT directory
- * sweeps it. The age gate is what keeps the sweep from deleting another Host
- * process's in-flight upload (Desktop and Web can each run a Host against the
- * same remote); six hours is far longer than any plausible single write.
+ * A sweep must never be able to name a file the user owns. Without a reserved
+ * segment, the old shape (`.part-<8 hex>`) also matched a user's own
+ * `foo.part-deadbeef`, and the age bound was the only thing between that file
+ * and an irreversible delete. The segment makes "this name is shaped like ours"
+ * checkable, and the per-process ownership registry below makes the delete
+ * provable instead of guessed.
  */
-const PART_SWEEP_MIN_AGE_MS = 6 * 60 * 60 * 1000
+const PART_MARKER = '.dsh-rvs.part-'
 /** Side files one sweep removes at most, so a burst cannot become a long list. */
 const PART_SWEEP_MAX_PER_DIR = 50
-/** Side-file name shape shared by `write` and `upload` (`.part-<8 hex>`). */
-const PART_NAME_RE = /\.part-[0-9a-f]{8}$/
+/** Side-file name shape shared by `write` and `upload` (marker + 8 hex). */
+const PART_NAME_RE = /\.dsh-rvs\.part-[0-9a-f]{8}$/
 
 /** SFTP status code for "no such file or directory" (ssh2 sets `error.code`). */
 const SFTP_NO_SUCH_FILE = 2
@@ -204,7 +204,18 @@ export class RemoteFiles {
    * regardless of age — they are not orphans.
    */
   private readonly activePartials = new Set<string>()
-  /** alias -> directories whose side file could not be removed (sweep next write). */
+  /**
+   * Side files this process CREATED and could not remove (`alias\0path`).
+   *
+   * This is the ONLY set a sweep may delete from. Deleting a name that merely
+   * LOOKS like a side file is a guess, and guessing wrong destroys the user's
+   * data (the audit's P2-N1: `foo.part-deadbeef` in a directory that once
+   * recorded an orphan, older than the age bound, was irreversibly removed).
+   * A leftover from a previous Host process is therefore never swept either:
+   * junk that stays is recoverable, a deleted user file is not.
+   */
+  private readonly ownedPartials = new Set<string>()
+  /** alias -> directories that may hold an owned side file (sweep on next write). */
   private readonly orphanDirs = new Map<string, Set<string>>()
 
   constructor(private readonly pool: RemotePool) {}
@@ -289,8 +300,8 @@ export class RemoteFiles {
    * Not `writeFile` on the target: that truncates it first, so an interrupted
    * save (a dropped link, a Host restart, a full disk mid-write) left the
    * previous content gone AND the new one half written. The bytes go to a SIDE
-   * file next to the target (`.part-<id>`) and are only moved into place once the
-   * body is complete.
+   * file next to the target (`.dsh-rvs.part-<8 hex>`, see `PART_MARKER`) and are
+   * only moved into place once the body is complete.
    *
    * "Moved into place" must not delete the target first: the old unlink-then-
    * rename pair had a window where a failed rename left NEITHER the old file nor
@@ -320,8 +331,8 @@ export class RemoteFiles {
         // in the same directory as the file it will be renamed onto.
         const target = await resolveWriteTarget(sftp, path)
         const dir = posix.dirname(target.realPath)
-        partial = `${target.realPath}.part-${randomBytes(4).toString('hex')}`
-        this.activePartials.add(dirKey(alias, partial))
+        partial = partialPathOf(target.realPath)
+        this.trackPartial(alias, partial)
         await this.withDirRetry(alias, dir, async () => {
           await this.ensureDir(sftp, alias, dir)
           // A zero-length SFTP WRITE packet is not universally accepted (SFTPv3
@@ -332,6 +343,8 @@ export class RemoteFiles {
         })
         replacing = true
         await replaceFile(sftp, partial, target.realPath)
+        // The side file is now the target: it must never be swept by name again.
+        this.forgetPartial(alias, partial)
         if (target.mode !== undefined) {
           // Best effort: the content is already in place, so a refused setstat
           // must not turn a successful save into a reported failure.
@@ -367,8 +380,8 @@ export class RemoteFiles {
    * first — a drop can name a path several levels below the target — and the
    * source is piped straight into the SFTP write stream.
    *
-   * The bytes go to a SIDE file (`.part-<id>` next to the target) and are
-   * renamed into place only once the body ended cleanly. Writing the real path
+   * The bytes go to a SIDE file (`.dsh-rvs.part-<8 hex>` next to the target) and
+   * are renamed into place only once the body ended cleanly. Writing the real path
    * directly left a half file behind whenever the upload was cancelled, which
    * then looked like a complete file in the explorer (2026-10-20 user report).
    * A cancelled upload removes its side file; when the CONNECTION is what failed
@@ -391,7 +404,7 @@ export class RemoteFiles {
   ): Promise<{ size: number }> {
     const path = remotePath(file)
     const dir = posix.dirname(path)
-    const partial = `${path}.part-${randomBytes(4).toString('hex')}`
+    const partial = partialPathOf(path)
     // No wall-clock deadline: a large body on a slow upload link is healthy for
     // minutes; `streamIntoFile` bounds a dead transfer by progress instead
     // (the old 60 s wrapper turned a healthy 64 MiB upload into a timeout).
@@ -400,12 +413,13 @@ export class RemoteFiles {
         await this.withDirRetry(alias, dir, async () => {
           await this.ensureDir(sftp, alias, dir)
         })
-        this.activePartials.add(dirKey(alias, partial))
+        this.trackPartial(alias, partial)
         const size = await streamIntoFile(sftp, partial, source, maxBytes)
         // Move into place. SFTP v3 `rename` refuses to clobber, so an overwrite
         // removes the old file first — the same window a normal editor save has.
         if (overwrite) await unlinkAsync(sftp, path).catch(() => undefined)
         await renameAsync(sftp, partial, path)
+        this.forgetPartial(alias, partial)
         this.remember(this.knownDirs, dirKey(alias, dir))
         await this.sweepOrphanDirs(sftp, alias, dir)
         return { size }
@@ -646,9 +660,33 @@ export class RemoteFiles {
   private async discardPartial(sftp: SFTPWrapper, alias: string, partial: string): Promise<void> {
     try {
       await unlinkAsync(sftp, partial)
+      this.forgetPartial(alias, partial)
     } catch {
+      // Still ours, still unremovable: keep the exact name on the owned list so
+      // the next sweep in this directory may retry it — and only it.
+      this.rememberOwned(dirKey(alias, partial))
       this.markOrphanDir(alias, posix.dirname(partial))
     }
+  }
+
+  /** Register one side file as ours: in flight now, and sweepable after it fails. */
+  private trackPartial(alias: string, partial: string): void {
+    this.activePartials.add(dirKey(alias, partial))
+    this.rememberOwned(dirKey(alias, partial))
+  }
+
+  /** Add one owned side-file key, evicting the oldest when the set is full. */
+  private rememberOwned(key: string): void {
+    if (!this.ownedPartials.has(key) && this.ownedPartials.size >= MEMO_CAP) {
+      const oldest = this.ownedPartials.values().next().value
+      if (oldest !== undefined) this.ownedPartials.delete(oldest)
+    }
+    this.ownedPartials.add(key)
+  }
+
+  /** The side file reached its target (or was removed): no longer ours to sweep. */
+  private forgetPartial(alias: string, partial: string): void {
+    this.ownedPartials.delete(dirKey(alias, partial))
   }
 
   private markOrphanDir(alias: string, dir: string): void {
@@ -659,14 +697,26 @@ export class RemoteFiles {
   }
 
   /**
-   * Remove `.part-*` files this process left behind in `dir` (age-gated).
+   * Remove the side files THIS process left behind in `dir`.
    *
    * Runs after a SUCCESSFUL write/upload into a directory that recorded an
-   * orphan, so the healthy path pays nothing. Only names matching the exact
-   * side-file shape are touched, in-flight ones are skipped, and anything younger
-   * than `PART_SWEEP_MIN_AGE_MS` is left alone (it may belong to another Host
-   * process writing the same directory). A sweep failure is never the caller's
-   * problem: the record simply survives for the next write.
+   * orphan, so the healthy path pays nothing. Two independent locks keep it off
+   * anything the user owns:
+   *
+   *  1. the name must match the plugin's reserved shape (`.dsh-rvs.part-<8 hex>`);
+   *  2. the exact path must be in `ownedPartials` — a set only `trackPartial`
+   *     writes, i.e. a file this process itself created.
+   *
+   * The shape alone would still be a guess (the audit's P2-N1: a user file
+   * `foo.part-deadbeef` was deleted after the age bound), so the ownership check
+   * is the load-bearing one. A leftover from a PREVIOUS Host process carries the
+   * shape but is not owned, and is therefore never deleted either — including a
+   * side file left by a pre-marker release (`.part-<8 hex>`, which does not even
+   * match the current shape). Junk that stays is recoverable; a deleted user
+   * file is not.
+   *
+   * A sweep failure is never the caller's problem: the record simply survives
+   * for the next write.
    */
   private async sweepOrphanDirs(sftp: SFTPWrapper, alias: string, dir: string): Promise<void> {
     const dirs = this.orphanDirs.get(alias)
@@ -677,20 +727,22 @@ export class RemoteFiles {
     } catch {
       return
     }
-    const cutoff = Date.now() - PART_SWEEP_MIN_AGE_MS
     let swept = 0
     let failed = false
     for (const row of rows) {
       if (!PART_NAME_RE.test(row.filename)) continue
       const path = posix.join(dir, row.filename)
-      if (this.activePartials.has(dirKey(alias, path))) continue
-      if (row.attrs.mtime * 1000 > cutoff) continue
+      const key = dirKey(alias, path)
+      // The ONLY names a sweep may delete are ones this process created.
+      if (!this.ownedPartials.has(key)) continue
+      if (this.activePartials.has(key)) continue
       if (swept >= PART_SWEEP_MAX_PER_DIR) {
         failed = true
         break
       }
       try {
         await unlinkAsync(sftp, path)
+        this.ownedPartials.delete(key)
         swept += 1
       } catch {
         failed = true
@@ -729,6 +781,17 @@ export class RemoteFiles {
 /** One memo key: an alias and an absolute remote path, in one string. */
 function dirKey(alias: string, path: string): string {
   return `${alias}\u0000${path}`
+}
+
+/**
+ * Name of the side file a save/upload of `path` writes through.
+ *
+ * The reserved segment is what makes the name recognisably the plugin's (see
+ * `PART_MARKER`); the 4 random bytes keep two concurrent operations on one
+ * target apart.
+ */
+function partialPathOf(path: string): string {
+  return `${path}${PART_MARKER}${randomBytes(4).toString('hex')}`
 }
 
 function isSymlink(mode: number): boolean {
