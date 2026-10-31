@@ -461,6 +461,20 @@ const zh: Record<string, string> = {
   'changes.undoNoContext': '找不到这处改动所属的主机与仓库，无法撤销。',
   'changes.undoConflict': '这处改动的上下文已经变了，远端拒绝了撤销（文件未被修改）。',
   'changes.undoMissing': '这处改动没有可用的补丁内容，无法撤销。',
+  // -- 连接状态与断线降级
+  'connection.ok': '已连接',
+  'connection.error': '连接异常',
+  'connection.idle': '未连接',
+  'connection.retrying': '重连中…',
+  'connection.retryHint': '点击重试连接',
+  'connection.lastOk': '最近成功',
+  'connection.editorReadOnly': '连接已断开：正在显示缓存内容（只读），恢复后自动刷新。',
+  'connection.editorDirty': '有未保存改动，恢复连接后才能保存。',
+  'connection.saveBlocked': '连接已断开，暂时无法保存；恢复后请重试。',
+  'connection.readFailed': '连接已断开，无法读取该文件；恢复后会自动刷新。',
+  'connection.recovered': '连接已恢复：目录、Git 状态和只读标签已刷新。',
+  'connection.recoveredDirty': '连接已恢复：目录与 Git 已刷新；有未保存改动的标签未自动重载。',
+  'files.offline': '连接已断开，且此目录没有缓存',
 }
 
 const en: Record<string, string> = {
@@ -889,6 +903,20 @@ const en: Record<string, string> = {
   'changes.undoNoContext': 'The host and repository behind this change are unknown, so nothing was reverted.',
   'changes.undoConflict': 'The surroundings of this change moved, so the host refused the revert (the file was not modified).',
   'changes.undoMissing': 'No patch is available for this change, so nothing was reverted.',
+  // -- connection status + degraded (offline read-only) mode
+  'connection.ok': 'Connected',
+  'connection.error': 'Connection issue',
+  'connection.idle': 'Not connected',
+  'connection.retrying': 'Reconnecting…',
+  'connection.retryHint': 'Click to retry the connection',
+  'connection.lastOk': 'Last success',
+  'connection.editorReadOnly': 'Connection lost: showing cached content (read-only); it refreshes automatically when the link is back.',
+  'connection.editorDirty': 'There are unsaved edits; they can be saved once the connection recovers.',
+  'connection.saveBlocked': 'The connection is down, so the file cannot be saved; try again after it recovers.',
+  'connection.readFailed': 'The connection is down, so this file cannot be read; it refreshes automatically when the link is back.',
+  'connection.recovered': 'Connection recovered: directories, git status and clean tabs were refreshed.',
+  'connection.recoveredDirty': 'Connection recovered: directories and git were refreshed; tabs with unsaved edits were left alone.',
+  'files.offline': 'Connection lost, and this folder has no cached listing',
 }
 
 export type Lang = 'zh' | 'en'

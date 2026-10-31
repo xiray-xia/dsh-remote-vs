@@ -288,7 +288,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (method === 'DELETE') {
-          pool.drop(alias)
+          pool.forget(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           if (!store.remove(alias)) {
             writeJson(res, 404, { error: `unknown host alias: ${alias}` })
@@ -304,7 +304,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         try {
-          pool.drop(alias)
+          pool.forget(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           const entry = store.update(alias, body as Partial<HostPayload>)
           writeJson(res, 200, { host: store.summarize(entry) })
@@ -312,6 +312,25 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           const status = (error instanceof Error ? error.message : '').startsWith('unknown host alias') ? 404 : 400
           writeJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }
+      },
+    },
+    // ----------------------------------------------------------- status
+    // Connection health for the browser's status chip. Read-only and dial-free:
+    // it reports what the pool already knows, so polling it never opens a
+    // connection or wakes a sleeping host.
+    {
+      kind: 'exact',
+      path: REMOTE_API.status,
+      handler: (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        writeJson(res, 200, { connections: pool.status() })
       },
     },
     // ------------------------------------------------------------- test

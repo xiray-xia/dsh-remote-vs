@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
+import { ConnectionStatusChip } from './ConnectionStatus.tsx'
+import { isConnectionFailure, useConnectionStatus } from './connection.ts'
 import { sameLocalDir } from './composer.ts'
 import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
@@ -130,6 +132,16 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     && chat.sessionWorkspacePath !== undefined
     && viewedAliasPath !== undefined
     && sameLocalDir(chat.sessionWorkspacePath, viewedAliasPath)
+  /**
+   * The link to this workspace's host is down.
+   *
+   * Tabs keep their loaded content in memory, so the editor still has something
+   * to show — but nothing can be written, and a reload would replace the buffer
+   * with an error. The pane therefore degrades to a read-only view of what it
+   * already has, with a banner that says so (Phase 2 of the connection work).
+   */
+  const connection = useConnectionStatus()
+  const offline = connection?.state === 'error'
 
   // Image data URL cache, keyed by path (remote reads are not free). Bounded —
   // see `rememberRecent` / `dropOversized`.
@@ -313,6 +325,11 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const saveActive = async (): Promise<void> => {
     const tab = activeTab
     if (tab === undefined) return
+    if (offline) {
+      // Writing now can only fail; say why instead of surfacing a socket error.
+      toast(t('connection.saveBlocked'), true)
+      return
+    }
     const text = editorRef.current?.getContent()
     if (text === undefined) {
       // Never let the store fall back to stale text: that destroys the edit.
@@ -395,6 +412,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </span>
             )}
             <span style={{ color: 'var(--rvs-fg3)' }}>{langLabel(langFromPath(activeTab.rel))}</span>
+            {/* Connection health sits where the build stamp does: it is the
+                surface the user is looking at while they work. */}
+            <ConnectionStatusChip compact />
             {/* Build stamp + token count (see tsdown `define.__RVS_BUILD__`).
                 The GUI serves plugin bundles captured when `dsh web` started,
                 so the stamp says WHICH code is running, and the token count
@@ -412,20 +432,20 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
                   {t(tabStatusKey(activeTab))}
                 </span>
-                <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }} disabled={activeTab.loading}>
+                <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }} disabled={offline || activeTab.loading}>
                   <IconRefresh size={13} />
                 </IconButton>
                 <IconButton
                   title={`${t('editor.save')} (Ctrl+S)`}
                   onClick={() => { void saveActive() }}
-                  disabled={activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
+                  disabled={offline || activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
                 >
                   <IconSave size={13} />
                 </IconButton>
               </>
             )}
             {activeTab.kind === 'diff' && (
-              <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }}>
+              <IconButton title={t('scm.reloadDiff')} onClick={() => { void store.reloadTab(activeTab.id) }} disabled={offline}>
                 <IconRefresh size={13} />
               </IconButton>
             )}
@@ -458,7 +478,17 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </div>
             )}
             {activeTab.loading && <div className="rvs-empty"><MiniSpinner /> {t('common.loading')}</div>}
-            {!activeTab.loading && activeTab.error !== undefined && <div className="rvs-banner error">{activeTab.error}</div>}
+            {offline && activeTab.kind === 'file' && activeTab.error === undefined && activeTab.loading === false && (
+              <div className="rvs-banner warn">
+                {t('connection.editorReadOnly')}
+                {activeTab.dirty && ` ${t('connection.editorDirty')}`}
+              </div>
+            )}
+            {!activeTab.loading && activeTab.error !== undefined && (
+              <div className="rvs-banner error">
+                {offline && isConnectionFailure(activeTab.error) ? t('connection.readFailed') : activeTab.error}
+              </div>
+            )}
             {!activeTab.loading && activeTab.error === undefined && activeTab.kind === 'diff' && (
               <DiffView tab={activeTab} visible={props.visible} />
             )}
@@ -497,7 +527,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       savedText={activeTab.baseline}
                       path={activeTab.fullPath}
                       tabId={activeTab.id}
-                      readOnly={activeTab.truncated}
+                      readOnly={activeTab.truncated || offline}
                       visible={props.visible}
                       ctx={store.ctx}
                       sessionId={chat.sessionId}

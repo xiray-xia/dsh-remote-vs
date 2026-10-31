@@ -1,6 +1,8 @@
 import { type ClientChannel, type SFTPWrapper } from 'ssh2';
 import type { RemoteStore } from './store.ts';
-import type { RemoteExecResult } from './protocol.ts';
+import type { RemoteConnectionStatus, RemoteExecResult } from './protocol.ts';
+/** Whether `error` is a transport-level failure worth showing as a link problem. */
+export declare function isConnectionFailure(error: unknown): boolean;
 export interface ExecOptions {
     timeoutMs?: number;
     /**
@@ -45,11 +47,33 @@ export declare class RemotePool {
     private readonly slots;
     /** Per-alias BROWSE SFTP session (see withBrowseSftp). */
     private readonly browsed;
+    /** Per-alias connection health for the browser's status chip (see status). */
+    private readonly health;
     constructor(store: RemoteStore);
     /** Drop one pooled connection (call after host update/delete). */
     drop(alias: string): void;
     /** Close every pooled connection. */
     dispose(): void;
+    /**
+     * Forget one alias's connection HEALTH (host edited/removed), not just its
+     * connection.
+     *
+     * `drop` is also the idle eviction path, so it must keep the health record
+     * (idle-closed is not an error). Only a host mutation discards what the pool
+     * learned about that alias.
+     */
+    forget(alias: string): void;
+    /**
+     * Per-alias connection health for the browser's status indicator.
+     *
+     * Read-only and dial-free: it reports what the pool already knows, so the
+     * indicator's poll never creates a connection as a side effect.
+     */
+    status(): RemoteConnectionStatus[];
+    /** Record a successful dial or transport-level operation. */
+    private markOk;
+    /** Record a connection-level failure the status chip should show. */
+    private markError;
     /** Test a connection without disturbing the pool. */
     test(alias: string): Promise<{
         ok: boolean;

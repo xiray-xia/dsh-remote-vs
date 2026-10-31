@@ -8,6 +8,8 @@
 export const REMOTE_API = {
   hosts: '/api/dsh-remote/hosts',
   test: '/api/dsh-remote/test',
+  /** Per-alias SSH connection health for the client's status indicator. */
+  status: '/api/dsh-remote/status',
   keygen: '/api/dsh-remote/keygen',
   exec: '/api/dsh-remote/exec',
   /** Streaming exec (server-sent events) for the long network verbs. */
@@ -138,6 +140,28 @@ export interface RemoteTimeouts {
   gitMs: number
   /** One SFTP file read (editor, diff sides, document preview). */
   readMs: number
+}
+
+/**
+ * Connection health for one host alias, as the Host's pool sees it.
+ *
+ * The browser never talks SSH itself, so it cannot know whether the link is up;
+ * this is the Host's answer. `idle` is NOT an error: a pooled connection is
+ * closed after 30 idle minutes, and the next operation dials again. `error`
+ * means the last connection-level event failed (dial error, unexpected close,
+ * or a transport-class operation failure) — the next operation will retry.
+ */
+export interface RemoteConnectionStatus {
+  alias: string
+  state: 'ok' | 'error' | 'idle'
+  /** A pooled SSH connection is open right now (not a health promise on its own). */
+  open: boolean
+  /** Last successful dial / transport-level operation, epoch ms. */
+  okAt?: number
+  /** Last connection-level failure, epoch ms. */
+  errorAt?: number
+  /** Human-readable failure the client can show in the status chip. */
+  error?: string
 }
 
 /** Remote OS probe outcome. */

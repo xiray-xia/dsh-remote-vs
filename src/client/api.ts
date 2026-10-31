@@ -12,6 +12,7 @@ import {
   type ImportReport,
   type RemoteChangesDiff,
   type RemoteChangesSummary,
+  type RemoteConnectionStatus,
   type RemoteDeployState,
   type RemoteExecResult,
   type RemoteFileEntry,
@@ -24,6 +25,7 @@ import {
   type RemoteWorkspaceBinding,
 } from '../protocol.ts'
 import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
+import { activeConnectionAlias, isConnectionFailure, noteConnectionFailure } from './connection.ts'
 import { parseSseFrame, takeSseFrames } from './exec-output.ts'
 import {
   branchesCommand,
@@ -62,6 +64,10 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const message = typeof data === 'object' && data !== null && 'error' in data && typeof (data as { error: unknown }).error === 'string'
       ? (data as { error: string }).error
       : `request failed: HTTP ${res.status}`
+    // A transport-class failure is visible in the status chip immediately,
+    // instead of after the next status poll. Business errors (missing file,
+    // permission denied, a failed git command) do not match this rule.
+    if (isConnectionFailure(message)) noteConnectionFailure(activeConnectionAlias(), new RemoteApiError(res.status, message))
     throw new RemoteApiError(res.status, message)
   }
   return data as T
@@ -250,6 +256,8 @@ export const api = {
   deleteHost: (alias: string) =>
     call<{ ok: boolean }>(`${REMOTE_API.hosts}?alias=${encodeURIComponent(alias)}`, { method: 'DELETE' }),
   testHost: (alias: string) => post<{ ok: boolean; error?: string; durationMs: number }>(REMOTE_API.test, { alias }),
+  /** Per-alias SSH connection health (Host pool's view; this is a local poll). */
+  connectionStatus: () => call<{ connections: RemoteConnectionStatus[] }>(REMOTE_API.status).then(r => r.connections),
   bootstrap: (alias: string) => post<{ alias: string; keyPath: string; flipped: boolean; detail: string }>(REMOTE_API.keygen, { alias }),
   // -- files
   fileOp: {

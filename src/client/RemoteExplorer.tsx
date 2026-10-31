@@ -15,6 +15,7 @@ import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
 import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
 import { startDownload, startSelectionDownload } from './downloads.ts'
+import { useConnectionStatus, isConnectionFailure } from './connection.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { ListingRequests } from './listing-requests.ts'
 import { repoRelative, useExplorer } from './store.tsx'
@@ -202,6 +203,9 @@ function trimListings(
 export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () => void; visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, alias, root, repoRoot, marks } = store
+  /** The host link is down: cached rows stay, new listings cannot load. */
+  const connection = useConnectionStatus()
+  const offline = connection?.state === 'error'
   const ctx = store.ctx
   const [listings, setListings] = useState<Record<string, RemoteFileEntry[]>>({})
   /**
@@ -307,7 +311,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     try {
       await listingsApi.request(dir, revisionRef.current, force)
     } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), true)
+      // A transport failure is already on the connection chip, and the cached
+      // rows are still on screen: one toast per background refresh would repeat
+      // the same story until the link is back. Business failures still speak.
+      if (!isConnectionFailure(error)) toast(error instanceof Error ? error.message : String(error), true)
     } finally {
       setLoading(prev => {
         const next = new Set(prev)
@@ -1248,6 +1255,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     const key = dirKey(alias, dir)
     if (rows === undefined && loading.has(key)) {
       return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('common.loading')}</div>
+    }
+    if (rows === undefined && offline) {
+      // Nothing cached for this folder and no link to read it: say that once,
+      // inline, instead of leaving a blank hole (or a toast per attempt).
+      return <div className="rvs-empty" style={{ paddingLeft: 12 + depth * 14 }}>{t('files.offline')}</div>
     }
     return (
       <>

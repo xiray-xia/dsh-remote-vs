@@ -1394,6 +1394,19 @@ export async function afterWrite(): Promise<void> {
   patch({ revision: state.revision + 1 })
 }
 
+/**
+ * The connection came back: re-read everything a disconnect froze.
+ *
+ * `revision` is what makes the explorer re-list the root and every expanded
+ * directory (the cached rows may predate the drop), and the git refresh updates
+ * the status marks they are drawn with. Clean editor tabs are reloaded by the
+ * caller (it owns the tab list); dirty ones must be left to the user.
+ */
+export function refreshAfterReconnect(): void {
+  void refreshGit()
+  patch({ revision: state.revision + 1 })
+}
+
 /** The repository the SCM panel is pointed at, or undefined when none. */
 export function scmTarget(): { alias: string; root: string } | undefined {
   const workspace = currentWorkspace()

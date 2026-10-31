@@ -91,6 +91,17 @@ export interface CodeEditorHandle {
 const fallbackCompartment = new Compartment()
 
 /**
+ * Compartment holding the read-only flag.`n *
+ * It has to be reconfigurable, not baked into the initial state: the link can go
+ * down (or a truncated file can be re-read in full) while the buffer is mounted,
+ * and remounting it to change editability would throw away undo history and the
+ * caret. A Compartment instance may be shared by several EditorStates — each
+ * view keeps its own value for the key, and the effect below dispatches into its
+ * own view only.
+ */
+const readOnlyCompartment = new Compartment()
+
+/**
  * Compartment holding the session-change marks.
  *
  * 初始为空：只有调用方真的传了 `changeSet` 才把整套扩展（行背景 + gutter）装进
@@ -491,6 +502,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     getChangeStale: () => viewRef.current?.state.field(changeStaleField, false) === true,
   }), [])
 
+  /**
+   * Read-only follows the link, live.
+   *
+   * Offline mode degrades the mounted buffer to a viewer; baked-in read-only
+   * state would leave the user typing into a buffer whose save is blocked, and a
+   * remount just to flip it would drop undo history and the caret. The
+   * compartment carries the flag through a reconfigure instead.
+   */
+  useEffect(() => {
+    const view = viewRef.current
+    if (view === undefined) return
+    view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(props.readOnly === true)) })
+  }, [props.readOnly])
+
   // Shown again after being hidden: remeasure layout.
   useEffect(() => {
     if (props.visible === false) return
@@ -630,7 +655,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // `changeMarksCompartment`).
       changeMarksCompartment.of([]),
       EditorView.lineWrapping,
-      EditorState.readOnly.of(propsRef.current.readOnly === true),
+      readOnlyCompartment.of(EditorState.readOnly.of(propsRef.current.readOnly === true)),
       ...langFor(propsRef.current.path),
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return

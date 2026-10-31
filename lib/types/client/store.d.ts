@@ -426,6 +426,15 @@ export declare function discoverRepos(): Promise<string[]>;
 export declare function refreshGit(mode?: 'join' | 'fresh'): Promise<void>;
 /** Refresh everything a working-tree change can invalidate. */
 export declare function afterWrite(): Promise<void>;
+/**
+ * The connection came back: re-read everything a disconnect froze.
+ *
+ * `revision` is what makes the explorer re-list the root and every expanded
+ * directory (the cached rows may predate the drop), and the git refresh updates
+ * the status marks they are drawn with. Clean editor tabs are reloaded by the
+ * caller (it owns the tab list); dirty ones must be left to the user.
+ */
+export declare function refreshAfterReconnect(): void;
 /** The repository the SCM panel is pointed at, or undefined when none. */
 export declare function scmTarget(): {
     alias: string;

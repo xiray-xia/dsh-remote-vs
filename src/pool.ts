@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import type { RemoteStore } from './store.ts'
-import type { RemoteExecResult, RemoteHostEntry } from './protocol.ts'
+import type { RemoteConnectionStatus, RemoteExecResult, RemoteHostEntry } from './protocol.ts'
 
 /** Idle time after which a pooled connection is closed. */
 const IDLE_MS = 30 * 60 * 1000
@@ -130,6 +130,38 @@ interface BrowseChannel {
   idle: ReturnType<typeof setTimeout> | undefined
 }
 
+/**
+ * Connection-level failures the status indicator must show.
+ *
+ * Deliberately about the TRANSPORT, not about the remote's answer: a missing
+ * file, a rejected password prompt or a non-zero git exit are all business
+ * outcomes and must not paint the host as disconnected. `timed out` is in here
+ * because a handshake/channel deadline means the link (or the server behind it)
+ * is not answering, which is exactly what the indicator is for.
+ */
+const CONNECTION_ERROR_RE = /not connected|no response from server|connection lost|connection closed|connection refused|socket hang up|channel open failed|stalled|host .* was disconnected|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|EPIPE/i
+
+/** Whether `error` is a transport-level failure worth showing as a link problem. */
+export function isConnectionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return message !== '' && CONNECTION_ERROR_RE.test(message)
+}
+
+/**
+ * Per-alias connection health, kept OUTSIDE the pooled entry on purpose: a
+ * failed dial deletes the entry, and the indicator still has to say why.
+ *
+ * `idle` is the initial/normal-closed state — the pool is lazy and closes a
+ * connection after 30 idle minutes; the next operation dials again, so calling
+ * that "disconnected" would make the indicator cry wolf.
+ */
+interface Health {
+  state: 'ok' | 'error' | 'idle'
+  okAt?: number
+  errorAt?: number
+  error?: string
+}
+
 export interface ExecOptions {
   timeoutMs?: number
   /**
@@ -192,6 +224,8 @@ export class RemotePool {
   private readonly slots = new Map<string, Slots>()
   /** Per-alias BROWSE SFTP session (see withBrowseSftp). */
   private readonly browsed = new Map<string, BrowseChannel>()
+  /** Per-alias connection health for the browser's status chip (see status). */
+  private readonly health = new Map<string, Health>()
 
   constructor(private readonly store: RemoteStore) {}
 
@@ -217,6 +251,56 @@ export class RemotePool {
   /** Close every pooled connection. */
   dispose(): void {
     for (const alias of [...this.conns.keys()]) this.drop(alias)
+  }
+
+  /**
+   * Forget one alias's connection HEALTH (host edited/removed), not just its
+   * connection.
+   *
+   * `drop` is also the idle eviction path, so it must keep the health record
+   * (idle-closed is not an error). Only a host mutation discards what the pool
+   * learned about that alias.
+   */
+  forget(alias: string): void {
+    this.drop(alias)
+    this.health.delete(alias)
+  }
+
+  /**
+   * Per-alias connection health for the browser's status indicator.
+   *
+   * Read-only and dial-free: it reports what the pool already knows, so the
+   * indicator's poll never creates a connection as a side effect.
+   */
+  status(): RemoteConnectionStatus[] {
+    const aliases = new Set<string>([...this.conns.keys(), ...this.health.keys()])
+    try {
+      for (const host of this.store.list()) aliases.add(host.alias)
+    } catch {
+      // Unreadable store: answer what the pool knows rather than failing the route.
+    }
+    return [...aliases].sort().map((alias) => {
+      const entry = this.health.get(alias)
+      return {
+        alias,
+        state: entry?.state ?? 'idle',
+        open: this.conns.has(alias),
+        ...(entry?.okAt === undefined ? {} : { okAt: entry.okAt }),
+        ...(entry?.errorAt === undefined ? {} : { errorAt: entry.errorAt }),
+        ...(entry?.error === undefined ? {} : { error: entry.error }),
+      }
+    })
+  }
+
+  /** Record a successful dial or transport-level operation. */
+  private markOk(alias: string): void {
+    this.health.set(alias, { state: 'ok', okAt: Date.now() })
+  }
+
+  /** Record a connection-level failure the status chip should show. */
+  private markError(alias: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error ?? '')
+    this.health.set(alias, { state: 'error', errorAt: Date.now(), error: message })
   }
 
   /** Test a connection without disturbing the pool. */
@@ -254,7 +338,13 @@ export class RemotePool {
       }
     }
     try {
-      return await this.runExec(alias, command, opts)
+      const result = await this.runExec(alias, command, opts)
+      // `runExec` answers a command failure as a RESULT, so an `error` field
+      // here means the transport itself broke; a non-zero exit still proves the
+      // link works. `timedOut` is a command budget, not a connection problem.
+      if (result.error !== undefined && isConnectionFailure(result.error)) this.markError(alias, result.error)
+      else this.markOk(alias)
+      return result
     } finally {
       this.releaseSlot(alias)
     }
@@ -479,9 +569,11 @@ export class RemotePool {
         })
       })
       channel.once('close', () => this.release(alias))
+      this.markOk(alias)
       return channel
     } catch (error) {
       this.release(alias)
+      if (isConnectionFailure(error)) this.markError(alias, error)
       throw error
     }
   }
@@ -498,9 +590,11 @@ export class RemotePool {
         })
       })
       channel.once('close', () => this.release(alias))
+      this.markOk(alias)
       return channel
     } catch (error) {
       this.release(alias)
+      if (isConnectionFailure(error)) this.markError(alias, error)
       throw error
     }
   }
@@ -525,8 +619,11 @@ export class RemotePool {
       const sftp = await this.openSession(conn)
       try {
         const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
-        if (limit <= 0) return await fn(sftp)
-        return await withDeadline(fn(sftp), limit, `SFTP operation timed out after ${limit / 1000}s`)
+        const result = limit <= 0
+          ? await fn(sftp)
+          : await withDeadline(fn(sftp), limit, `SFTP operation timed out after ${limit / 1000}s`)
+        this.markOk(alias)
+        return result
       } finally {
         try {
           sftp.end()
@@ -534,6 +631,9 @@ export class RemotePool {
           // Ignore close errors.
         }
       }
+    } catch (error) {
+      if (isConnectionFailure(error)) this.markError(alias, error)
+      throw error
     } finally {
       this.release(alias)
       this.releaseSlot(alias)
@@ -615,7 +715,12 @@ export class RemotePool {
           return undefined
         }
       }
-      return await fn(sessions[0] as SFTPWrapper, addChannel)
+      const result = await fn(sessions[0] as SFTPWrapper, addChannel)
+      this.markOk(alias)
+      return result
+    } catch (error) {
+      if (isConnectionFailure(error)) this.markError(alias, error)
+      throw error
     } finally {
       closed = true
       for (const session of sessions) {
@@ -656,8 +761,11 @@ export class RemotePool {
     const lease = await this.leaseBrowse(alias)
     const limit = opts.timeoutMs ?? SFTP_OP_TIMEOUT_MS
     try {
-      if (limit <= 0) return await fn(lease.sftp)
-      return await withDeadline(fn(lease.sftp), limit, `SFTP operation on ${alias} timed out after ${limit / 1000}s`)
+      const result = limit <= 0
+        ? await fn(lease.sftp)
+        : await withDeadline(fn(lease.sftp), limit, `SFTP operation on ${alias} timed out after ${limit / 1000}s`)
+      this.markOk(alias)
+      return result
     } catch (error) {
       // A request that never answered stays queued inside ssh2, and this session
       // was already handed to other browse operations. Mark it stale: the next
@@ -665,6 +773,9 @@ export class RemotePool {
       // instead of waiting out their own deadlines.
       if (error instanceof DeadlineError) {
         lease.state.stale = true
+        this.markError(alias, error)
+      } else if (isConnectionFailure(error)) {
+        this.markError(alias, error)
       }
       throw error
     } finally {
@@ -1036,18 +1147,26 @@ export class RemotePool {
       (conn) => {
         entry.conn = conn
         entry.connecting = undefined
+        this.markOk(alias)
         conn.on('close', () => {
-          // The server went away: evict so the next op redials.
-          if (this.conns.get(alias) === entry) this.drop(alias)
+          // The server went away: record it for the status chip, then evict so
+          // the next op redials. Our OWN drop() deleted the entry first, so a
+          // normal close (idle eviction, host removal) never lands here.
+          if (this.conns.get(alias) !== entry) return
+          this.markError(alias, new Error('connection closed'))
+          this.drop(alias)
         })
-        conn.on('error', () => {
-          if (this.conns.get(alias) === entry) this.drop(alias)
+        conn.on('error', (error: Error) => {
+          if (this.conns.get(alias) !== entry) return
+          this.markError(alias, error)
+          this.drop(alias)
         })
         this.release(alias)
         return conn
       },
       (error) => {
         this.conns.delete(alias)
+        this.markError(alias, error)
         throw error
       },
     )

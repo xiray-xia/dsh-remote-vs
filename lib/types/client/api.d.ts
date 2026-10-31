@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     constructor(status: number, message: string);
@@ -96,6 +96,8 @@ export declare const api: {
         error?: string;
         durationMs: number;
     }>;
+    /** Per-alias SSH connection health (Host pool's view; this is a local poll). */
+    connectionStatus: () => Promise<RemoteConnectionStatus[]>;
     bootstrap: (alias: string) => Promise<{
         alias: string;
         keyPath: string;

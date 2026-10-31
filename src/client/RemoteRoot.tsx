@@ -10,6 +10,9 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { api } from './api.ts'
+import { ConnectionStatusChip } from './ConnectionStatus.tsx'
+import { applyConnectionStatuses, setActiveConnectionAlias, useConnectionStatus } from './connection.ts'
 import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
@@ -19,7 +22,7 @@ import { HistoryPanel } from './scm/HistoryPanel.tsx'
 import { ScmPanel } from './scm/ScmPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
-import { useBootstrap, useExplorer, followSessionWorkspace, setFollowSession } from './store.tsx'
+import { useBootstrap, useExplorer, followSessionWorkspace, refreshAfterReconnect, setFollowSession } from './store.tsx'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { DialogHost } from './vsc/kit.tsx'
 import {
@@ -37,6 +40,13 @@ type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal
 
 const SPLIT_KEY = 'dsh-remote-vs.split'
 const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
+
+/**
+ * How often the client asks the Host for connection health. A local JSON call
+ * into the same process (no SSH, no dial); 5 s keeps the chip truthful without
+ * being noticeable, and request failures update it sooner than that.
+ */
+const CONNECTION_POLL_MS = 5_000
 
 export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNode {
   useBootstrap(props.ctx)
@@ -116,6 +126,71 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   const go = useCallback((next: RailView): void => {
     store.setView(next)
   }, [store])
+
+  /**
+   * Connection status: point the client view at the workspace's host and poll
+   * the Host pool.
+   *
+   * The poll is a local HTTP call into the Host (no SSH dial, no wake-up), and it
+   * pauses while the page is hidden; the link state itself is only observable
+   * Host-side, so this is the one honest source. Request-level transport
+   * failures update the view immediately (see `api`), so the chip does not lag
+   * a failure by a full interval.
+   */
+  const connectionAlias = store.workspace?.alias ?? ''
+  const connection = useConnectionStatus()
+  useEffect(() => {
+    setActiveConnectionAlias(connectionAlias)
+  }, [connectionAlias])
+  useEffect(() => {
+    if (connectionAlias === '') return
+    let stopped = false
+    const tick = async (): Promise<void> => {
+      if (document.hidden) return
+      try {
+        const connections = await api.connectionStatus()
+        if (!stopped) applyConnectionStatuses(connections)
+      } catch {
+        // The local Host is unreachable; leave the last view alone — the
+        // request-level failure path already marks what it can.
+      }
+    }
+    void tick()
+    const timer = window.setInterval(() => { void tick() }, CONNECTION_POLL_MS)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [connectionAlias])
+
+  /**
+   * Recovered link: refresh what the disconnect left stale.
+   *
+   * Directory listings, git status and CLEAN editor tabs were all read before
+   * the drop. Dirty tabs are deliberately not reloaded (that would throw the
+   * user's edits away) and the user is told so.
+   *
+   * Deps are intentionally just the state: `store` identity changes on every
+   * publish, and re-running this on any publish would re-fire the refresh loop.
+   */
+  const lastConnection = useRef<{ alias: string; state: string | undefined }>({ alias: '', state: undefined })
+  useEffect(() => {
+    const previous = lastConnection.current
+    lastConnection.current = { alias: connectionAlias, state: connection?.state }
+    // A workspace switch is not a recovery: the previous alias's state says
+    // nothing about this one.
+    if (previous.alias !== connectionAlias) return
+    if (previous.state !== 'error' || connection?.state !== 'ok') return
+    const dirty = store.tabs.filter(tab => tab.kind === 'file' && tab.dirty).length
+    refreshAfterReconnect()
+    for (const tab of store.tabs) {
+      if (tab.kind !== 'file' || tab.dirty || tab.loading) continue
+      void store.reloadTab(tab.id)
+    }
+    if (dirty > 0) store.info(t('connection.recoveredDirty'))
+    else store.info(t('connection.recovered'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection?.state])
 
   // Panels are mounted on first visit and then kept alive (see panelFor).
   const [mounted, setMounted] = useState<Set<RailView>>(() => new Set<RailView>([store.view]))
@@ -353,6 +428,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
               <option key={item.id} value={item.id}>{item.name} ({item.alias})</option>
             ))}
           </select>
+          <ConnectionStatusChip />
           {store.repoRoot !== undefined && store.head !== undefined && (
             <span className="rvs-pill" title={store.repoRoot}>
               ⑂ {store.head.detached ? t('scm.detached') : store.head.branch}

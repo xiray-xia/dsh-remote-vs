@@ -270,6 +270,65 @@ body[data-ds-dark-theme] .rvs-root {
   font-size: 11px;
 }
 
+/*
+ * Connection chip: the Host's SSH link health for the workspace on screen.
+ * Lives in the top bar and, compact, in the editor info bar. Only the errored
+ * state is interactive (retry); the others are a status read-out.
+ */
+.rvs-conn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--rvs-fg2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: default;
+}
+
+.rvs-conn.compact {
+  padding: 0 2px;
+  border: none;
+  background: none;
+}
+
+.rvs-conn.clickable {
+  cursor: pointer;
+}
+
+.rvs-conn.clickable:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-conn-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rvs-fg3);
+}
+
+.rvs-conn-ok .rvs-conn-dot {
+  background: var(--rvs-ok, #2ea043);
+}
+
+.rvs-conn-error {
+  color: var(--rvs-danger);
+}
+
+.rvs-conn-error .rvs-conn-dot {
+  background: var(--rvs-danger);
+}
+
+.rvs-conn-label {
+  white-space: nowrap;
+}
+
 .rvs-scroll::-webkit-scrollbar {
   width: 8px;
   height: 8px;
