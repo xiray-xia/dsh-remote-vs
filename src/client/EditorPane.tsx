@@ -8,7 +8,9 @@
  * remote write route.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { api } from './api.ts'
+import { api, fileReadTimeoutMs } from './api.ts'
+import { clientDeadlineFor } from '../timeouts.ts'
+import { diffText, type TextHunk } from '../changes/text-diff.ts'
 import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { ConnectionStatusChip } from './ConnectionStatus.tsx'
 import { isConnectionFailure, useConnectionStatus } from './connection.ts'
@@ -17,6 +19,7 @@ import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberE
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
+import { Btn } from './ui.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
 import { installSaveShortcut } from './vsc/save-shortcut.ts'
@@ -33,6 +36,53 @@ import {
   mimeFor,
   toast,
 } from './vsc/kit.tsx'
+
+/** How many hunks of a conflict diff are rendered before the rest is summarised. */
+const CONFLICT_DIFF_HUNKS = 20
+
+/**
+ * Reject a remote call that never answers.
+ *
+ * The host route has its own caps, but a stuck TCP/SSH round trip would
+ * otherwise leave the conflict-difference button spinning forever with no way to
+ * tell what happened. Same rule (and same shape) the store uses for its reads.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} (${Math.round(ms / 1000)}s)`)), ms)
+    timer.unref?.()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
+}
+
+/** "the remote file changed at …, N bytes" — or that it is gone entirely. */
+function conflictVersion(t: (key: string) => string, conflict: { mtime: number | null; size: number | null }): string {
+  if (conflict.mtime === null) return t('editor.conflictDeleted')
+  const base = t('editor.conflictBody').replace('{time}', new Date(conflict.mtime).toLocaleString())
+  return conflict.size === null ? base : `${base} · ${conflict.size} B`
+}
+
+/**
+ * The note above a conflict diff.
+ *
+ * An EMPTY hunk list has two very different causes — the contents are identical
+ * (only the timestamp moved) or the remote read failed — and rendering neither
+ * one leaves the user staring at a blank box that reads as "no differences".
+ */
+function conflictDiffNote(t: (key: string) => string, payload: { error?: string; hunks: TextHunk[] }): string {
+  if (payload.error !== undefined) return payload.error
+  if (payload.hunks.length === 0) return t('editor.conflictSame')
+  return t('editor.conflictDiffHead')
+}
 
 /** Which i18n key describes the tab's save state. */
 function tabStatusKey(tab: { loading: boolean; saving: boolean; dirty: boolean }): string {
@@ -158,6 +208,20 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   useEffect(() => {
     setTokenCount(undefined)
   }, [activeTab?.id])
+  /**
+   * The "see the difference" payload of a refused save.
+   *
+   * Read on DEMAND (the 409 only carries the version, not the bytes): showing
+   * the remote content requires one more read, and doing that for every save
+   * would pay for a comparison the user mostly never asks for.
+   */
+  const [conflictDiff, setConflictDiff] = useState<{
+    tabId: string
+    remoteMtime: number | null
+    hunks: TextHunk[]
+    /** The remote read itself failed: say so instead of claiming "no changes". */
+    error?: string
+  } | undefined>(undefined)
   useEffect(() => {
     const tab = activeTab
     // A hidden pane may not spend a remote read on a picture nobody can see.
@@ -366,6 +430,76 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   }
 
   /**
+   * Overwrite a remote file this buffer was refused on.
+   *
+   * A separate, explicitly confirmed action: the whole point of the guard is
+   * that nobody loses the other writer's work WITHOUT being told. Once the user
+   * has been told and still chooses their own version, that is their call — but
+   * it is a decision made on screen, never a default.
+   */
+  const overwriteConflict = async (tab: EditorTab): Promise<void> => {
+    /**
+     * The live buffer, from whichever surface owns this tab: the file editor's
+     * CodeMirror mount when it is up, otherwise the tab's own handoff copy —
+     * which is where a DIFF pane keeps its text (its CodeEditor reports every
+     * change through `onBuffer`). An empty tab text is refused rather than
+     * written: for a diff pane that would save an empty file over the part of
+     * the tree the diff was about.
+     */
+    const text = editorRef.current?.getContent() ?? (tab.text === '' ? undefined : tab.text)
+    if (text === undefined) {
+      toast(t('editor.needSource'), true)
+      return
+    }
+    const ok = await confirmDialog({
+      title: t('editor.conflictOverwriteTitle'),
+      text: tab.rel,
+      danger: true,
+      okText: t('editor.conflictOverwrite'),
+    })
+    if (!ok) return
+    setConflictDiff(undefined)
+    await store.saveTab(tab.id, text, { force: true })
+  }
+
+  /**
+   * Compare the remote's CURRENT bytes with the live buffer, in place.
+   *
+   * The 409 carries only the version, not the content, so this costs one read —
+   * paid on demand rather than on every save, because most conflicts are
+   * resolved by "reload" or by re-typing on top of the new version without ever
+   * looking at the difference.
+   */
+  const showConflictDiff = async (tab: EditorTab): Promise<void> => {
+    const local = editorRef.current?.getContent() ?? tab.text
+    try {
+      // Bounded like every other remote read: a Host that never answers must not
+      // leave this button spinning forever with no message.
+      const read = await withDeadline(
+        api.fileOp.read(alias, tab.fullPath),
+        clientDeadlineFor(fileReadTimeoutMs()),
+        t('editor.readTimeout'),
+      )
+      setConflictDiff({
+        tabId: tab.id,
+        remoteMtime: read.mtime,
+        // Remote is the BEFORE side: '+' lines are what this buffer would add on
+        // top of what the other writer left behind.
+        hunks: diffText(read.text ?? '', local).hunks,
+      })
+    } catch (error) {
+      // The remote could not be read (deleted, permission, link down). Say that
+      // instead of showing an empty diff, which would read as "no differences".
+      setConflictDiff({
+        tabId: tab.id,
+        remoteMtime: null,
+        hunks: [],
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  /**
    * Latest `saveActive`, for the window-level shortcut.
    *
    * The listener is installed ONCE and must act on the current render's tab /
@@ -515,6 +649,61 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
             )}
           </div>
           <div className="rvs-body">
+            {/*
+              A REFUSED save: the remote file moved on, so nothing was written.
+              This sits above the buffer (not in a toast) because it is a
+              decision the user has to make before the next Ctrl+S can succeed,
+              and it names the three ways out instead of only the error.
+
+              File AND diff tabs: a working-tree diff's after pane is the real
+              file on the remote and saves to it, so it carries the same guard
+              (see `snapshotDiffBaseline`).
+            */}
+            {(activeTab.kind === 'file' || activeTab.kind === 'diff') && activeTab.conflict !== undefined && (
+              <div className="rvs-banner warn rvs-conflict" role="alert">
+                <div className="rvs-conflict-text">
+                  <strong>{t('editor.conflictTitle')}</strong>{' '}
+                  {conflictVersion(t, activeTab.conflict)}
+                </div>
+                <div className="rvs-conflict-actions">
+                  <Btn onClick={() => { void showConflictDiff(activeTab) }}>{t('editor.conflictDiff')}</Btn>
+                  <Btn onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline}>{t('editor.conflictReload')}</Btn>
+                  <Btn kind="danger" onClick={() => { void overwriteConflict(activeTab) }} disabled={offline}>{t('editor.conflictOverwrite')}</Btn>
+                  <Btn onClick={() => { store.dismissConflict(activeTab.id); setConflictDiff(undefined) }}>{t('common.close')}</Btn>
+                </div>
+              </div>
+            )}
+            {/* The panel only exists while the CONFLICT does: resolving it (reload
+                or overwrite) clears the state, and a diff against the old remote
+                bytes would otherwise keep sitting there looking current. */}
+            {conflictDiff !== undefined && activeTab.conflict !== undefined && conflictDiff.tabId === activeTab.id && (
+              <div className="rvs-conflict-diff" role="region" aria-label={t('editor.conflictDiff')}>
+                <div className="rvs-conflict-diff-head">
+                  {conflictDiffNote(t, conflictDiff)}
+                  {/* Which remote version the comparison is against: the panel is
+                      read on demand, so the file may already have moved again. */}
+                  {conflictDiff.remoteMtime !== null && ` · ${new Date(conflictDiff.remoteMtime).toLocaleString()}`}
+                </div>
+                {conflictDiff.hunks.slice(0, CONFLICT_DIFF_HUNKS).map((hunk, hunkIndex) => (
+                  <div key={`hunk-${hunkIndex}`} className="rvs-conflict-hunk">
+                    <div className="rvs-conflict-hunk-head">{`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`}</div>
+                    {hunk.lines.map((line, lineIndex) => (
+                      <div
+                        key={`line-${lineIndex}`}
+                        className={`rvs-conflict-row${line.startsWith('+') ? ' add' : ''}${line.startsWith('-') ? ' del' : ''}`}
+                      >
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                {conflictDiff.hunks.length > CONFLICT_DIFF_HUNKS && (
+                  <div className="rvs-conflict-more">
+                    {t('editor.conflictMoreHunks').replace('{count}', String(conflictDiff.hunks.length - CONFLICT_DIFF_HUNKS))}
+                  </div>
+                )}
+              </div>
+            )}
             {/*
               Change navigation lives on the editor itself (top-right, floating)
               rather than in the panel: once a file is open, that is where the

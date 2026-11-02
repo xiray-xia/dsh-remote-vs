@@ -552,6 +552,71 @@ body[data-ds-dark-theme] .rvs-root {
   color: var(--rvs-git-m);
 }
 
+/* ------------------------------------------------- save conflict (refused) */
+
+/* The banner is a decision, not a message: it stacks its text over the actions
+   so a narrow sidebar cannot squeeze the buttons into one unreadable row. */
+.rvs-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  white-space: normal;
+}
+
+.rvs-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rvs-conflict-diff {
+  margin: 6px 8px;
+  max-height: 40vh;
+  overflow: auto;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+  background: var(--rvs-hover);
+  color: var(--rvs-fg2);
+  font-family: var(--rvs-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.rvs-conflict-diff-head {
+  position: sticky;
+  top: 0;
+  padding: 4px 8px;
+  background: var(--rvs-panel, var(--rvs-hover));
+  border-bottom: 1px solid var(--rvs-border);
+  font-family: inherit;
+}
+
+.rvs-conflict-hunk-head {
+  padding: 2px 8px;
+  color: var(--rvs-fg3);
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-conflict-row {
+  padding: 0 8px;
+  white-space: pre;
+}
+
+.rvs-conflict-row.add {
+  background: rgba(78, 201, 176, .14);
+  color: var(--rvs-git-a);
+}
+
+.rvs-conflict-row.del {
+  background: rgba(241, 76, 76, .12);
+  color: var(--rvs-git-d);
+}
+
+.rvs-conflict-more {
+  padding: 4px 8px;
+  color: var(--rvs-fg3);
+}
+
 /* --------------------------------------------------------- source control */
 
 .rvs-scm-section {
@@ -3789,4 +3854,296 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-download-meta.done { color: var(--rvs-fg2); }
 .rvs-download-meta.cancelled { color: var(--rvs-git-m); }
 
+/* ----------------------------------------------------------- doctor panel */
 
+/*
+ * Remote-environment report, opened from the host list (which lives in the DSH
+ * Settings dialog, i.e. OUTSIDE `.rvs-root`). Fixed overlay like the input
+ * dialog so the host list behind it does not move, and its own token subset for
+ * the same reason as `.rvs-execpanel`: `var(--rvs-*)` resolves to nothing out
+ * there without it. Three state colors, and `unknown` deliberately looks
+ * neutral (not red, not green): it is ignorance, not a verdict.
+ */
+.rvs-doctor {
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
+  --rvs-git-m: #e2b714;
+  --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .45);
+  color: var(--rvs-fg);
+  font-size: 13px;
+}
+
+.rvs-doctor-card {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 92vw);
+  max-height: min(80vh, 720px);
+  border: 1px solid var(--rvs-border);
+  border-radius: 8px;
+  background: var(--rvs-overlay);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .35);
+}
+
+.rvs-doctor-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-doctor-title {
+  font-weight: 600;
+}
+
+.rvs-doctor-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 12px 10px;
+}
+
+.rvs-doctor-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  color: var(--rvs-fg2);
+}
+
+.rvs-doctor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.rvs-doctor-table th {
+  position: sticky;
+  top: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rvs-border);
+  background: var(--rvs-overlay);
+  color: var(--rvs-fg2);
+  font-weight: 600;
+  text-align: left;
+}
+
+.rvs-doctor-table td {
+  padding: 5px 8px;
+  border-top: 1px solid var(--rvs-border);
+  vertical-align: top;
+}
+
+.rvs-doctor-item {
+  white-space: nowrap;
+  color: var(--rvs-fg2);
+}
+
+.rvs-doctor-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-doctor-badge.ok { color: var(--rvs-ok, #2ea043); }
+.rvs-doctor-badge.missing { color: var(--rvs-git-m, #e2b714); }
+.rvs-doctor-badge.unknown { color: var(--rvs-fg3); }
+
+.rvs-doctor-detail {
+  color: var(--rvs-fg3);
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+  word-break: break-word;
+  user-select: text;
+}
+
+.rvs-doctor-hint {
+  flex: none;
+  padding: 8px 12px;
+  border-top: 1px solid var(--rvs-border);
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+
+
+
+/* ------------------------------------------------------ Ctrl+P quick open */
+
+.rvs-qo-mask {
+  /* PORTALED to <body>, i.e. OUTSIDE `.rvs-root` where these tokens are
+     declared — without this block every var() below resolves to nothing: the
+     active row paints transparent (keyboard selection invisible), the directory
+     column stops dimming, and error/warning copy comes out the same colour as
+     ordinary text (so "index failed" looks like "no match"). Keep this subset in
+     sync with `.rvs-root`; it lists exactly the tokens the `.rvs-qo*` rules use. */
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-active: var(--dsw-alias-interactive-bg-active, rgba(77, 107, 254, .22));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  --rvs-input: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
+  --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
+  --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-git-m: #e2b714;
+  --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  position: fixed;
+  inset: 0;
+  /* The modal layer (100000), so toasts (100001) still paint above it. */
+  z-index: 100000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, .38);
+  backdrop-filter: blur(2px);
+  animation: rvsFade .12s ease;
+}
+
+/**
+ * Opaque base first, skin overlay on top: the overlay token is frequently
+ * translucent, and using it alone let the panel's text bleed through the sheet
+ * (the same fix the menu/modal layer needed).
+ */
+.rvs-qo {
+  width: min(680px, calc(100vw - 40px));
+  max-height: min(62vh, 560px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 10px;
+  background-color: Canvas;
+  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
+  color: var(--rvs-fg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .42);
+  font-size: 12.5px;
+  overflow: hidden;
+  animation: rvsPop .12s ease;
+}
+
+.rvs-qo-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-qo-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font: inherit;
+  outline: none;
+}
+
+.rvs-qo-input:focus {
+  border-color: var(--rvs-brand);
+}
+
+.rvs-qo-hint {
+  flex: none;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-qo-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.rvs-qo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.rvs-qo-row:hover {
+  background: var(--rvs-hover);
+}
+
+/* Declared AFTER :hover so a hovered active row keeps the active colour. */
+.rvs-qo-row.active {
+  background: var(--rvs-active);
+}
+
+.rvs-qo-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--rvs-fg3);
+  font-size: 11.5px;
+}
+
+.rvs-qo-name {
+  flex: none;
+  color: var(--rvs-fg);
+  font-family: var(--rvs-mono);
+  font-size: 12px;
+}
+
+.rvs-qo-hit {
+  padding: 0;
+  border-radius: 2px;
+  background: rgba(77, 107, 254, .32);
+  color: inherit;
+  font-weight: 600;
+}
+
+.rvs-qo-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 72px;
+  overflow-y: auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--rvs-border);
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+.rvs-qo-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rvs-qo-note.error {
+  color: var(--rvs-danger);
+}
+
+.rvs-qo-note.warn {
+  color: var(--rvs-git-m);
+}

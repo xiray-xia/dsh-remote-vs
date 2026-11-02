@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import type { RemotePool } from './pool.ts';
-import type { RemoteFileEntry, RemoteRead } from './protocol.ts';
+import type { RemoteFileEntry, RemoteRead, RemoteWriteConflict, RemoteWriteResult } from './protocol.ts';
 /** Single-read cap (matches the fs-ssh 8 MiB window). */
 export declare const READ_CAP: number;
 /**
@@ -14,6 +14,27 @@ export declare const READ_CAP: number;
 export declare const LIST_ENTRY_CAP = 20000;
 /** Largest single upload accepted (matches the client-side planner cap). */
 export declare const UPLOAD_MAX_BYTES: number;
+/**
+ * The remote file changed after the bytes the caller saved against were read.
+ *
+ * Carries what is there NOW so the route can answer 409 with the current
+ * version instead of a bare message — the client shows "changed at …, N bytes"
+ * and offers overwrite / reload / see-the-difference without a second round
+ * trip. A missing target is a conflict too (`mtime`/`size` null): the file this
+ * buffer was loaded from is gone, so writing would recreate something a person
+ * or another tool deliberately removed.
+ *
+ * The mtime comparison is SFTP's own (second granularity), so this narrows the
+ * window rather than closing it: two writes to the same inode inside one second
+ * share an mtime. `expectSize` covers the common "same second, different
+ * length" case and nothing more. It is a guard against silent loss, not a
+ * strong consistency protocol — the docs say so.
+ */
+export declare class WriteConflictError extends Error {
+    readonly path: string;
+    readonly conflict: RemoteWriteConflict;
+    constructor(path: string, mtime: number | null, size: number | null);
+}
 /**
  * How long one download stream may make no progress before it is failed.
  *
@@ -126,9 +147,10 @@ export declare class RemoteFiles {
      *    Owner/group cannot be preserved without a privileged chown, so a save
      *    keeps the bytes and the mode but takes the SSH user's ownership.
      */
-    write(alias: string, file: string, content: string, encoding?: 'utf8' | 'base64'): Promise<{
-        size: number;
-    }>;
+    write(alias: string, file: string, content: string, encoding?: 'utf8' | 'base64', guard?: {
+        expectMtime?: number | undefined;
+        expectSize?: number | undefined;
+    }): Promise<RemoteWriteResult>;
     /**
      * Stream one upload into a remote file, atomically.
      *

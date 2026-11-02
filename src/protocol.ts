@@ -238,12 +238,54 @@ export interface RemoteFileEntry {
 export interface RemoteRead {
   /** File size in bytes. */
   size: number
+  /**
+   * Modification time in ms — the optimistic-lock baseline for a save.
+   *
+   * Read with the bytes in the same SFTP round trip, so the pair describes ONE
+   * version of the file. The editor stores it and sends it back on save; the
+   * Host refuses the write when the remote file has a different mtime, because
+   * that means someone else (an agent through the transparent route, a
+   * terminal, another editor) wrote it after this buffer was loaded and
+   * accepting the save would destroy their work without a word.
+   */
+  mtime: number
   /** True when the content is not UTF-8 text (base64 holds the bytes). */
   binary: boolean
   text?: string | undefined
   base64?: string | undefined
   /** True when size exceeded READ_CAP (content holds the first window). */
   truncated: boolean
+}
+
+/** Result of one remote file write, including the version it left behind. */
+export interface RemoteWriteResult {
+  /** Bytes written. */
+  size: number
+  /**
+   * mtime of the NEW content in ms: the baseline for the next save.
+   *
+   * `null` when the post-write stat could not be read. The save still SUCCEEDED
+   * (the bytes are in place), so this is not an error — it only means the next
+   * save has no baseline to check and must go through unguarded. Saying so is
+   * the whole point: a fabricated timestamp would make every later save of that
+   * tab conflict with itself.
+   */
+  mtime: number | null
+}
+
+/**
+ * The remote file changed since the baseline the caller saved against.
+ *
+ * Deliberately its own shape (not a generic failure): the client has to offer
+ * "overwrite / reload / see the difference" instead of showing a red toast and
+ * dropping the user's edit. `mtime` and `size` describe what is there NOW, so
+ * the client can say "the file changed at … and is N bytes" without another
+ * round trip; both are null when the file is gone (an external delete is a
+ * conflict too — saving towards it would recreate a file someone removed).
+ */
+export interface RemoteWriteConflict {
+  mtime: number | null
+  size: number | null
 }
 
 /** Result of one non-interactive command execution. */

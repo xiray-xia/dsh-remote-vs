@@ -16,6 +16,7 @@ import { applyConnectionStatuses, isConnectionRecovery, setActiveConnectionAlias
 import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
+import { QuickOpen } from './QuickOpen.tsx'
 import { RemoteExplorer } from './RemoteExplorer.tsx'
 import { SearchView } from './SearchView.tsx'
 import { HistoryPanel } from './scm/HistoryPanel.tsx'
@@ -153,6 +154,55 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   /** The trusted "this panel is live" bit: host visibility AND actually painted. */
   const live = props.visible && onScreen
   const panelLive = (id: RailView): boolean => live && view === id
+
+  /**
+   * Ctrl+P / Cmd+P quick open.
+   *
+   * Fires only while THIS panel is genuinely on screen (`live`, the measured
+   * bit above) and the store has booted: a local conversation page must keep
+   * the browser's own Ctrl+P, and the better-sidebar mount passes no `visible`
+   * prop at all — a gate built on `props.visible` alone would be dead there.
+   *
+   * `preventDefault()` is the whole point of the handler: without it the
+   * browser opens its print dialog on top of the modal. The toggle keeps the
+   * "press it again to leave" habit.
+   *
+   * In the TERMINAL, ^P belongs to the shell (readline's "previous command", and
+   * vim/less have their own meanings). xterm has already sent the keystroke by
+   * the time it bubbles to `window`, so opening the modal here would fire two
+   * actions for one press — the shell gets ^P AND a modal appears. The terminal
+   * therefore keeps the key; `preventDefault()` still runs so the browser's
+   * print dialog cannot appear behind it.
+   */
+  const [quickOpen, setQuickOpen] = useState(false)
+  const storeReady = store.ready
+  useEffect(() => {
+    const onQuickOpenKey = (event: KeyboardEvent): void => {
+      if (!live || !storeReady) return
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.altKey || event.shiftKey) return
+      if (event.key !== 'p' && event.key !== 'P') return
+      event.preventDefault()
+      // Auto-repeat would flash the modal on a held key.
+      if (event.repeat) return
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && focused.closest('.xterm') !== null) return
+      setQuickOpen(open => !open)
+    }
+    window.addEventListener('keydown', onQuickOpenKey)
+    return () => window.removeEventListener('keydown', onQuickOpenKey)
+  }, [live, storeReady])
+
+  /**
+   * Leaving the panel closes the modal.
+   *
+   * It is portaled to <body>, so nothing about the sidebar's own unmount/hide
+   * would take it off screen: without this it would keep floating over a
+   * completely different surface after the user switched tabs.
+   */
+  useEffect(() => {
+    if (!live) setQuickOpen(false)
+  }, [live])
 
   const go = useCallback((next: RailView): void => {
     store.setView(next)
@@ -455,6 +505,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   return (
     <div className="rvs-root" ref={attachRoot}>
       <DownloadDock t={t} />
+      {quickOpen && live && <QuickOpen onClose={() => setQuickOpen(false)} />}
       <div className="rvs-rail">
         {railButton('explorer', t('tab.files'), <IconCode size={17} />)}
         {railButton('search', t('tab.search'), <IconSearch size={17} />)}

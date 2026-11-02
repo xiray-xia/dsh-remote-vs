@@ -73,6 +73,29 @@ export interface EditorTab {
    * guard silent) — the exact silent-loss path the handoff exists to avoid.
    */
   baseline?: string
+  /**
+   * The remote VERSION this buffer was loaded from / last saved to.
+   *
+   * Sent back on save as an optimistic lock: the Host refuses the write when the
+   * remote file has a different mtime (or size), because that means a person or
+   * an agent wrote it after this buffer was read and saving would destroy their
+   * work with a cheerful "saved". Kept here rather than in the editor because it
+   * must survive a surface handoff and a tab switch.
+   *
+   * `undefined` means NO baseline (a file created by this session, or a write
+   * whose post-save stat failed): the save then goes through unguarded, exactly
+   * as before this feature — the guard protects a known history, it must never
+   * invent one.
+   */
+  remoteMtime?: number
+  /** Size that belonged to `remoteMtime` (the second half of the same baseline). */
+  remoteSize?: number
+  /**
+   * Set when a save was REFUSED because the remote file moved on, carrying what
+   * is there now. The pane turns this into an offer — overwrite / reload / see
+   * the difference — instead of a red toast the user cannot act on.
+   */
+  conflict?: { mtime: number | null; size: number | null }
   dirty: boolean
   saving: boolean
   binary: boolean
@@ -239,6 +262,117 @@ const WS_KEY = 'dsh-remote-vs.files.ws'
 const VIEW_KEY = 'dsh-remote-vs.view'
 /** Per-workspace repository sub-directory, keyed by workspace id. */
 const REPO_SUBDIR_KEY = 'dsh-remote-vs.repo.subdir'
+/**
+ * Per-workspace open file tabs, so a page reload does not lose the workbench.
+ *
+ * PATHS ONLY. The remote source itself never reaches browser storage — the
+ * README promises exactly that ("no cross-refresh content cache"), and a
+ * "restore the tabs" feature is the most tempting place to break it: keeping
+ * `text` here would put remote files on disk and would be one more copy to keep
+ * fresh. Paths are enough to reopen them, and a stale path fails harmlessly
+ * (the file open reports it and the tab is dropped).
+ */
+const TABS_KEY = 'dsh-remote-vs.tabs'
+/**
+ * How many tabs one reload reopens.
+ *
+ * Each restored tab costs one remote read, and a page reload happens on every
+ * plugin upgrade / `dsh web` restart — a workbench with thirty open files must
+ * not turn that into thirty concurrent reads against six channel slots.
+ */
+const TAB_RESTORE_LIMIT = 12
+/** Parallel reads while restoring (deliberately below the 6-channel budget). */
+const TAB_RESTORE_CONCURRENCY = 2
+
+/** One workspace's persisted workbench. */
+interface StoredTabSet {
+  /** Absolute remote paths, in strip order. */
+  paths: string[]
+  /** The path of the active tab, when there was one. */
+  active?: string
+}
+
+/** Every workspace's persisted workbench, keyed by binding id. */
+type StoredTabs = Record<string, StoredTabSet>
+
+/**
+ * Read the stored tab sets.
+ *
+ * Strict on shape and lenient on junk: a half-written or hand-edited entry must
+ * degrade to "nothing to restore" instead of throwing on page load (module-level
+ * state that throws here would take the whole panel down before it renders).
+ */
+function readStoredTabs(): StoredTabs {
+  try {
+    const raw = localStorage.getItem(TABS_KEY)
+    if (raw === null) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const out: StoredTabs = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== 'object' || value === null) continue
+      const entry = value as { paths?: unknown; active?: unknown }
+      if (!Array.isArray(entry.paths)) continue
+      const paths = entry.paths.filter((item): item is string => typeof item === 'string' && item !== '')
+      if (paths.length === 0) continue
+      out[key] = typeof entry.active === 'string' ? { paths, active: entry.active } : { paths }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** The signature of what got persisted last, so publishes do not rewrite it. */
+let persistedTabsSignature = ''
+/** The restore happens at most once per page load. */
+let tabsRestored = false
+/**
+ * Persistence is armed only once the restore has finished (or decided there was
+ * nothing to restore).
+ *
+ * Before that, the strip is legitimately EMPTY: the bootstrap publishes
+ * (hosts/workspaces/git) run before any tab is reopened, and writing that empty
+ * set would delete the very list the restore is about to read. The guard is
+ * about that one window, not about "never store an empty workbench" — closing
+ * every tab afterwards DOES remove the entry, which is what keeps a deleted tab
+ * from coming back on the next reload.
+ */
+let tabsPersistReady = false
+
+/**
+ * Persist the current file tabs for the current workspace.
+ *
+ * Called from every publish (a tab opened / closed / switched re-renders the
+ * strip, and that is exactly when the persisted set changes). The signature
+ * keeps a keystroke-driven publish from touching localStorage, whose writes are
+ * synchronous and would otherwise land on the typing path.
+ *
+ * Only FILE tabs are stored: a diff / commit tab is a view of git state that is
+ * cheap to reopen from the SCM panel, and restoring one without its repository
+ * context would open a tab that cannot load.
+ */
+function persistTabsIfChanged(): void {
+  const workspace = currentWorkspace()
+  if (workspace === undefined) return
+  const paths = state.tabs.filter(tab => tab.kind === 'file').map(tab => tab.fullPath)
+  const activeTab = state.tabs.find(tab => tab.id === state.activeTabId)
+  const active = activeTab?.kind === 'file' ? activeTab.fullPath : undefined
+  const signature = `${workspace.id}\u0000${active ?? ''}\u0000${paths.join('\u0000')}`
+  if (signature === persistedTabsSignature) return
+  // See `tabsPersistReady`: an empty strip before the restore has run is the
+  // bootstrap's transient state, not a user closing their last tab.
+  if (!tabsPersistReady && paths.length === 0) return
+  persistedTabsSignature = signature
+  try {
+    const all = readStoredTabs()
+    if (paths.length === 0) delete all[workspace.id]
+    else all[workspace.id] = active === undefined ? { paths } : { paths, active }
+    localStorage.setItem(TABS_KEY, JSON.stringify(all))
+  } catch {
+    // Private mode / quota: the workbench simply does not come back.
+  }
+}
 
 function readWorkspaceId(): string {
   try {
@@ -518,7 +652,14 @@ export interface ExplorerValue {
    * @returns true only when the write really succeeded — the caller uses it to
    *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
    */
-  saveTab: (id: string, content: string) => Promise<boolean>
+  saveTab: (id: string, content: string, options?: { force?: boolean }) => Promise<boolean>
+  /**
+   * Forget the pending save-conflict banner for one tab (the user dismissed it).
+   *
+   * The buffer and the dirty flag are untouched: dismissing only hides the
+   * offer, it never decides anything on the user's behalf.
+   */
+  dismissConflict: (id: string) => void
   reloadTab: (id: string) => Promise<void>
   info: (text: string) => void
   fail: (text: string) => void
@@ -630,6 +771,7 @@ function build(): ExplorerValue {
     markChangeStale,
     undoChange,
     saveTab,
+    dismissConflict,
     reloadTab,
     info,
     fail,
@@ -638,6 +780,10 @@ function build(): ExplorerValue {
 
 function publish(): void {
   snapshot = build()
+  // Every mutation ends here, and a tab opened / closed / activated is such a
+  // mutation — so this is the one place the stored workbench cannot fall behind
+  // (an explicit call at each of the dozen tab sites would eventually miss one).
+  persistTabsIfChanged()
   for (const listener of listeners) listener()
 }
 
@@ -839,12 +985,143 @@ export function refreshAll(): void {
       // other, and its cached slice is what keeps the panel from "Loading…".
       const resolved = activeBinding().key
       if (resolved !== key) adoptCachedGit(resolved)
+      // Bring the previous page's workbench back AFTER the workspace table is
+      // known: the stored sets are keyed by binding id, and a tab can only be
+      // reopened against the workspace that owns it.
+      restoreStoredTabs()
       void refreshGit('join')
     },
     (error: unknown) => {
       patch({ ready: true, error: error instanceof RemoteApiError ? error.message : String(error) })
     },
   )
+}
+
+/** `file:` tab id for one path on one host (the one place that shape is built). */
+function tabIdOf(alias: string, fullPath: string): string {
+  return `file:${alias}:${fullPath}`
+}
+
+/**
+ * Open one stored path and wait until the read settles.
+ *
+ * `openFile` is fire-and-forget by design (every caller is a click), but a
+ * restore has to know whether it worked — that is what separates "restored 5"
+ * from "3 files are gone" — and it must not put a dozen reads in flight at
+ * once. Waiting for the tab to leave `loading` is the only signal available
+ * without changing that public contract.
+ *
+ * THREE outcomes, and the distinction is the point: a slow read (a thin link, a
+ * huge file, a cold cache) is NOT a missing file. Treating a short wait as
+ * failure closed the tab and dropped its path from storage, so "slow" turned
+ * into "gone" — the exact "encode the uncertain as a negative" failure this
+ * project keeps paying for. Only a tab that finished WITH an error is missing;
+ * one that is still loading when the wait ends is unknown and left untouched,
+ * so the next reload tries again.
+ */
+type StoredTabOutcome = 'restored' | 'missing' | 'unknown'
+
+/** How long to watch one restoring read before calling its outcome unknown. */
+const TAB_RESTORE_WAIT_MS = 150_000
+/** Poll interval while watching a restoring read. */
+const TAB_RESTORE_POLL_MS = 50
+
+async function openStoredTab(alias: string, fullPath: string): Promise<StoredTabOutcome> {
+  openFile(fullPath)
+  const id = tabIdOf(alias, fullPath)
+  const attempts = Math.ceil(TAB_RESTORE_WAIT_MS / TAB_RESTORE_POLL_MS)
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const tab = state.tabs.find(item => item.id === id)
+    if (tab === undefined) return 'missing'
+    if (!tab.loading) return tab.error === undefined ? 'restored' : 'missing'
+    await new Promise(resolve => setTimeout(resolve, TAB_RESTORE_POLL_MS))
+  }
+  // Still loading: the read owns its own deadline, so this is "could not tell
+  // within a generous window", not "does not exist".
+  return 'unknown'
+}
+
+/** Reopen `paths` two at a time, reporting what came back and dropping only the misses. */
+async function reopenTabs(
+  alias: string,
+  paths: readonly string[],
+): Promise<{ restored: number; missing: number; unknown: number }> {
+  const queue = [...paths]
+  let restored = 0
+  let missing = 0
+  let unknown = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const next = queue.shift()
+      if (next === undefined) return
+      const outcome = await openStoredTab(alias, next)
+      if (outcome === 'restored') {
+        restored += 1
+        continue
+      }
+      if (outcome === 'unknown') {
+        // Leave both the tab and the stored path alone: it may still be loading,
+        // and closing it would turn a slow read into "this file is gone".
+        unknown += 1
+        continue
+      }
+      missing += 1
+      // Close the tab this restore created. The user did not open it this time,
+      // so leaving a red error tab in the strip is noise they never asked for;
+      // the toast counts it instead. (`closeTab` on an absent id is a no-op.)
+      closeTab(tabIdOf(alias, next))
+    }
+  }
+  await Promise.all(Array.from({ length: TAB_RESTORE_CONCURRENCY }, () => worker()))
+  return { restored, missing, unknown }
+}
+
+/**
+ * Reopen the file tabs this browser had for the current workspace.
+ *
+ * Runs once per page load, for the CURRENT workspace only: switching workspaces
+ * keeps its existing contract (the strip is cleared and the user is told so
+ * first), and re-running this on every `refreshAll` would fight that clear
+ * rather than complement it.
+ *
+ * A tab that no longer loads (deleted, renamed, no permission) is dropped and
+ * COUNTED — silently restoring "6 of 9" would leave the user looking for three
+ * tabs they think they had.
+ *
+ * Only PATHS are restored. Caret and scroll position are not persisted: the
+ * README's privacy stance is "paths only, never content", and a caret stored
+ * weeks ago would point into a file that has since changed.
+ */
+export function restoreStoredTabs(): void {
+  if (tabsRestored) return
+  tabsRestored = true
+  const workspace = currentWorkspace()
+  const stored = workspace === undefined ? undefined : readStoredTabs()[workspace.id]
+  if (workspace === undefined || stored === undefined || stored.paths.length === 0) {
+    // Nothing to reopen: arm persistence now, or the first real tab would be
+    // stored but a later "close all" could never remove it.
+    tabsPersistReady = true
+    return
+  }
+  const paths = stored.paths.slice(0, TAB_RESTORE_LIMIT)
+  const activePath = stored.active
+  void (async () => {
+    try {
+      const { restored, missing, unknown } = await reopenTabs(workspace.alias, paths)
+      if (activePath !== undefined) {
+        const id = tabIdOf(workspace.alias, activePath)
+        if (state.tabs.some(tab => tab.id === id)) patch({ activeTabId: id })
+      }
+      if (restored > 0) toast(t('editor.tabsRestored').replace('{count}', String(restored)), false)
+      if (missing > 0) toast(t('editor.tabsRestoreMissing').replace('{count}', String(missing)), true)
+      // Slow is not missing: say so, and keep the tab for the next reload.
+      if (unknown > 0) toast(t('editor.tabsRestoreUnknown').replace('{count}', String(unknown)), false)
+    } finally {
+      // From here on the strip is the user's, not the bootstrap's: an empty one
+      // means they closed everything.
+      tabsPersistReady = true
+    }
+  })()
 }
 
 /** Switch the sidebar panel (persisted across reloads). */
@@ -1304,6 +1581,17 @@ export function selectedWorkspaceId(): string {
  */
 export function editorTabs(): readonly EditorTab[] {
   return state.tabs
+}
+
+/**
+ * The active tab's id.
+ *
+ * A plain getter rather than a hook, for the same reason `editorTabs` is one:
+ * the restore path lives outside React, and the gates that verify it need to see
+ * what the strip would consider current without mounting a component.
+ */
+export function activeEditorTabId(): string | undefined {
+  return state.activeTabId
 }
 
 /**
@@ -1907,6 +2195,9 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
         text: read.binary ? '' : (read.text ?? ''),
         // The disk side of the dirty comparison (see EditorTab.baseline).
         ...(read.binary ? {} : { baseline: read.text ?? '' }),
+        // The version these bytes came from: the save guard's baseline.
+        remoteMtime: read.mtime,
+        remoteSize: read.size,
       })
     } catch (error) {
       patchTab(id, { loading: false, error: error instanceof Error ? error.message : String(error) })
@@ -1987,10 +2278,11 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
   }
   const root = state.repoRoot
   const id = `diff:${workspace.alias}:${root}:${rel}:${staged ? 'staged' : 'worktree'}`
+  const diffPath = `${root.replace(/\/+$/, '')}/${rel}`
   upsertTab({
     id,
     kind: 'diff',
-    fullPath: `${root.replace(/\/+$/, '')}/${rel}`,
+    fullPath: diffPath,
     rel,
     loading: true,
     error: undefined,
@@ -2020,11 +2312,25 @@ export function openDiff(rel: string, staged: boolean, untracked = false): void 
         // The after pane is a prefix when the working-tree read hit the cap:
         // it must be read-only, or saving it would truncate the real file.
         truncated: payload.truncated === true,
+        /**
+         * The working-tree version this pane was read from — the save baseline,
+         * taken from the SAME read rather than from a later stat (a second stat
+         * could describe a version the user never saw, so the guard would accept
+         * bytes read before that change). Absent for staged/commit diffs, which
+         * are read-only.
+         */
+        ...(payload.mtime === undefined ? {} : { remoteMtime: payload.mtime, remoteSize: payload.size }),
       })
     } catch (error) {
       patchTab(id, { loading: false, error: error instanceof Error ? error.message : String(error) })
     }
   })()
+}
+
+/** Apply a diff payload's baseline (see `DiffPayload.mtime`). */
+function applyDiffBaseline(id: string, payload: { mtime?: number; size?: number }): void {
+  if (payload.mtime === undefined) return
+  patchTab(id, { remoteMtime: payload.mtime, remoteSize: payload.size })
 }
 
 /**
@@ -2118,9 +2424,23 @@ export function updateTab(id: string, next: Partial<EditorTab>): void {
 interface SaveSlot {
   running: boolean
   /** The newest content waiting; a later request REPLACES it (last press wins). */
-  pending: string | undefined
+  pending: SaveRequest | undefined
   /** Callers waiting for the pending write; they get ITS outcome. */
   waiters: ((ok: boolean) => void)[]
+}
+
+/** One queued save: the bytes to write plus whether the user forced it. */
+interface SaveRequest {
+  content: string
+  /**
+   * Explicit "overwrite the changed remote file" (answered a conflict prompt).
+   *
+   * A merged request is one burst of the SAME intent, so the newest request's
+   * force flag wins with its content: a forced save that coalesces a later
+   * unforced one is still the user's overwrite decision, and the reverse
+   * (unforced replacing forced) means they went back to the guarded path.
+   */
+  force: boolean
 }
 
 const saveSlots = new Map<string, SaveSlot>()
@@ -2172,7 +2492,7 @@ function saveTargetOf(id: string): { alias: string; fullPath: string; rel: strin
  * editor held, so "your edit is on disk" stays true (and a burst whose last
  * write failed reports false to all of them).
  */
-export async function saveTab(id: string, content: string): Promise<boolean> {
+export async function saveTab(id: string, content: string, options: { force?: boolean } = {}): Promise<boolean> {
   // Never fall back to the tab's loaded text. `tab.text` is only ever written
   // by a load/reload or by the surface handoff (`captureLiveBuffer`), never as
   // a fallback for a caller without a live buffer, so substituting it here
@@ -2193,23 +2513,24 @@ export async function saveTab(id: string, content: string): Promise<boolean> {
    * regression and keep the dirty flag for no reason.
    */
   patchTab(id, { saving: true, text: content })
+  const request: SaveRequest = { content, force: options.force === true }
   const slot = saveSlotOf(id)
   if (slot.running) {
-    slot.pending = content
+    slot.pending = request
     return new Promise<boolean>(resolve => { slot.waiters.push(resolve) })
   }
-  return runSaveSlot(id, slot, content)
+  return runSaveSlot(id, slot, request)
 }
 
 /** Drain one tab's queue: one write, then at most one pending, then settle all. */
-async function runSaveSlot(id: string, slot: SaveSlot, first: string): Promise<boolean> {
+async function runSaveSlot(id: string, slot: SaveSlot, first: SaveRequest): Promise<boolean> {
   slot.running = true
   let ok = true
-  let content: string | undefined = first
+  let request: SaveRequest | undefined = first
   try {
-    while (content !== undefined) {
-      ok = await performSave(id, content)
-      content = slot.pending
+    while (request !== undefined) {
+      ok = await performSave(id, request.content, request.force)
+      request = slot.pending
       slot.pending = undefined
     }
   } finally {
@@ -2225,12 +2546,38 @@ async function runSaveSlot(id: string, slot: SaveSlot, first: string): Promise<b
   return ok
 }
 
-/** One queued write. Everything it needs is re-read when it actually runs. */
-async function performSave(id: string, text: string): Promise<boolean> {
+/**
+ * One queued write. Everything it needs is re-read when it actually runs.
+ *
+ * The write carries the remote VERSION this tab was based on, and the Host
+ * refuses it when the file moved on since. That refusal is the whole point of
+ * this function's guard: this project's normal way of working is a human and an
+ * agent editing the same remote tree, and a save that silently overwrote an
+ * agent's last write was the one data-loss path with no recovery (the changes
+ * panel would only notice the file afterwards, with the other side already
+ * gone).
+ *
+ * @param force - the user answered the conflict prompt with "overwrite": the
+ *   write then goes through unguarded. It is an explicit decision made on
+ *   screen, not a default.
+ */
+async function performSave(id: string, text: string, force: boolean): Promise<boolean> {
   const target = saveTargetOf(id)
   if (target === undefined) return false
+  const tab = state.tabs.find(item => item.id === id)
+  /**
+   * The lock, built from the version this buffer was loaded from or last saved
+   * to. No baseline (`undefined`) means the guard cannot say anything truthful
+   * about this file, so it stays silent instead of blocking a legitimate save.
+   */
+  const guard = !force && tab !== undefined && tab.remoteMtime !== undefined
+    ? {
+        expectMtime: tab.remoteMtime,
+        ...(tab.remoteSize === undefined ? {} : { expectSize: tab.remoteSize }),
+      }
+    : undefined
   try {
-    await api.fileOp.write(target.alias, target.fullPath, text)
+    const written = await api.fileOp.write(target.alias, target.fullPath, text, guard)
     /**
      * The remote file now holds `text`, so that becomes the disk-side dirty
      * baseline (a later remount compares against it).
@@ -2256,15 +2603,52 @@ async function performSave(id: string, text: string): Promise<boolean> {
     const liveEditor = isLiveEditorFor(id)
     const current = state.tabs.find(item => item.id === id)
     const newer = current !== undefined && current.text !== text
-    patchTab(id, { baseline: text, ...(liveEditor || newer ? {} : { dirty: false }) })
+    patchTab(id, {
+      baseline: text,
+      // The version just written becomes the next save's baseline. A Host that
+      // could not read it back answers null: the next save is then unguarded,
+      // which is honest, rather than "conflicting" with a made-up timestamp.
+      remoteMtime: written.mtime ?? undefined,
+      remoteSize: written.size,
+      // Whatever conflict was on screen is answered by this successful write.
+      conflict: undefined,
+      ...(liveEditor || newer ? {} : { dirty: false }),
+    })
     markLiveEditorSaved(id, text)
     toast(`${t('editor.saved')} · ${target.rel}`, false)
     await afterWrite()
     return true
   } catch (error) {
+    /**
+     * A REFUSED save, not a failed one: the remote file moved on. Nothing was
+     * written, so the buffer, its dirty flag and the baseline all stay exactly
+     * as they were — the user is shown what is there now and decides.
+     *
+     * Deliberately NOT going through `afterWrite()`: re-listing the tree here
+     * would repaint a panel behind the decision the user is about to make.
+     */
+    if (error instanceof RemoteApiError && error.conflict !== undefined) {
+      patchTab(id, { conflict: error.conflict })
+      toast(`${t('editor.conflictBlocked')} · ${target.rel}`, true)
+      return false
+    }
     toast(error instanceof Error ? error.message : String(error), true)
     return false
   }
+}
+
+/**
+ * Drop the pending save-conflict banner for one tab.
+ *
+ * Hiding the offer is NOT a decision: the buffer stays dirty and the baseline
+ * stays untouched, so the next save is guarded exactly as this one was. Only a
+ * forced save or a reload can settle a conflict for real — anything else would
+ * be deciding for the user which version of their file to keep.
+ */
+export function dismissConflict(id: string): void {
+  const tab = state.tabs.find(item => item.id === id)
+  if (tab?.conflict === undefined) return
+  patchTab(id, { conflict: undefined })
 }
 
 /**
@@ -2300,6 +2684,13 @@ export async function reloadTab(id: string): Promise<void> {
         truncated: read.truncated,
         dirty: false,
         ...(read.binary ? {} : { baseline: read.text ?? '' }),
+        // A reload REPLACES the version this tab was based on, so the next save
+        // is guarded against the bytes the user actually saw. Leaving the old
+        // mtime here would make the very next save conflict with itself.
+        remoteMtime: read.mtime,
+        remoteSize: read.size,
+        // Whatever conflict was pending is answered by this reload.
+        conflict: undefined,
       })
       // Only now: the new text must already be in the tab when the editor remounts.
       patchTab(id, { reloadNonce: (tab.reloadNonce ?? 0) + 1 })
@@ -2323,6 +2714,9 @@ export async function reloadTab(id: string): Promise<void> {
       truncated: payload.truncated === true,
       dirty: false,
     })
+    // The diff now shows the CURRENT working tree, so the save baseline has to
+    // follow it — a stale one would make the next save conflict with itself.
+    applyDiffBaseline(id, payload)
   } catch (error) {
     patchTab(id, { error: error instanceof Error ? error.message : String(error) })
   }

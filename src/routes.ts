@@ -16,7 +16,7 @@ import { REMOTE_API, MAX_SELECTION_DOWNLOAD, selectionDownloadName, type ExecStr
 import type { HostPayload, RemoteStore } from './store.ts'
 import type { RemotePool } from './pool.ts'
 import type { RemoteWorlds } from './p2/worlds.ts'
-import { RemoteFiles, attachmentHeader } from './sftp.ts'
+import { RemoteFiles, WriteConflictError, attachmentHeader } from './sftp.ts'
 import { directoryArchiveCommand, directoryArchiveName, selectionArchiveCommand } from './archive.ts'
 import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
@@ -710,7 +710,33 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
             case 'write': {
               if (typeof body.path !== 'string' || typeof body.content !== 'string') throw new BadRequestError('path and content are required')
               const encoding = body.encoding === 'base64' ? 'base64' : 'utf8'
-              writeJson(res, 200, await files.write(alias, body.path, body.content, encoding))
+              /**
+               * Optional optimistic lock. `expectMtime` is the version the client
+               * loaded; when present the Host refuses a file that changed since.
+               * Requests without it (helpers, deploy, the agent's write tool)
+               * keep the old unconditional semantics — the guard protects a
+               * human's buffer, it must not make programmatic writes fail.
+               */
+              const expectMtime = body.expectMtime
+              const expectSize = body.expectSize
+              /**
+               * A malformed baseline is a CALLER mistake, not "no baseline".
+               *
+               * Silently dropping it would turn `{expectMtime: "123"}` (a client
+               * bug, a serializer change) into an UNGUARDED write — the exact
+               * overwrite the caller was asking to be protected from, reported as
+               * a success.
+               */
+              if (expectMtime !== undefined && (typeof expectMtime !== 'number' || !Number.isFinite(expectMtime))) {
+                throw new BadRequestError('expectMtime must be a finite number')
+              }
+              if (expectSize !== undefined && (typeof expectSize !== 'number' || !Number.isFinite(expectSize))) {
+                throw new BadRequestError('expectSize must be a finite number')
+              }
+              const guard = typeof expectMtime === 'number'
+                ? { expectMtime, ...(typeof expectSize === 'number' ? { expectSize } : {}) }
+                : undefined
+              writeJson(res, 200, await files.write(alias, body.path, body.content, encoding, guard))
               return
             }
             case 'mkdir': {
@@ -735,6 +761,18 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
               writeJson(res, 400, { error: `unknown op: ${body.op}` })
           }
         } catch (error) {
+          /**
+           * A save the remote side refused because the file moved on.
+           *
+           * 409, not 502: the operation did not fail, it was DECLINED — and the
+           * client needs the current version to offer overwrite / reload / see
+           * the difference. Collapsing this into the generic remote-error path
+           * is how a silent overwrite becomes a red toast nobody can act on.
+           */
+          if (error instanceof WriteConflictError) {
+            writeJson(res, 409, { error: error.message, code: 'conflict', conflict: error.conflict })
+            return
+          }
           // Caller mistakes are 400; only the remote side deserves 502.
           const status = error instanceof BadRequestError ? 400 : 502
           writeJson(res, status, { error: error instanceof Error ? error.message : String(error) })

@@ -23,6 +23,8 @@ import {
   type RemoteRoutingStatus,
   type RemoteTimeouts,
   type RemoteWorkspaceBinding,
+  type RemoteWriteConflict,
+  type RemoteWriteResult,
 } from '../protocol.ts'
 import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
 import { activeConnectionAlias, currentConnection, isConnectionFailure, noteConnectionFailure } from './connection.ts'
@@ -59,12 +61,36 @@ export class RemoteApiError extends Error {
    * the operation still fails for the user with its readable reason.
    */
   deadline?: boolean
+  /**
+   * The remote file moved on since the version this buffer was based on.
+   *
+   * Carried as DATA, not prose: the editor has to offer overwrite / reload /
+   * see-the-difference, and that needs what is there now (`mtime`, `size`)
+   * without another round trip. The status is 409 for exactly this case — a
+   * plain 502 would read as "the host failed", which is the opposite of what
+   * happened (the Host successfully protected the file).
+   */
+  conflict?: RemoteWriteConflict
   constructor(
     readonly status: number,
     message: string,
   ) {
     super(message)
   }
+}
+
+/**
+ * Validate a 409 payload before believing it is a save conflict.
+ *
+ * A conflict the client cannot read (an older Host, a proxy that rewrote the
+ * body) must fall back to the generic error path rather than produce a
+ * half-populated prompt.
+ */
+function isWriteConflict(value: unknown): value is RemoteWriteConflict {
+  if (typeof value !== 'object' || value === null) return false
+  const shape = value as { mtime?: unknown; size?: unknown }
+  const measured = (field: unknown): boolean => field === null || (typeof field === 'number' && Number.isFinite(field))
+  return measured(shape.mtime) && measured(shape.size)
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -79,10 +105,15 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     // Fall through to the status check with a generic message.
   }
   if (!res.ok) {
-    const body = typeof data === 'object' && data !== null ? data as { error?: unknown; code?: unknown } : undefined
+    const body = typeof data === 'object' && data !== null
+      ? data as { error?: unknown; code?: unknown; conflict?: unknown }
+      : undefined
     const message = typeof body?.error === 'string' ? body.error : `request failed: HTTP ${res.status}`
     const failure = new RemoteApiError(res.status, message)
     if (body?.code === 'deadline') failure.deadline = true
+    // A refused save is not a link failure: keep its payload so the caller can
+    // ask the user what to do with the current version.
+    if (body?.code === 'conflict' && isWriteConflict(body.conflict)) failure.conflict = body.conflict
     // Classify the ERROR (not its text): the deadline flag has to be seen here,
     // or a slow request is mistaken for a dead link.
     if (isConnectionFailure(failure)) {
@@ -249,6 +280,8 @@ export function uploadFile(options: {
         // Keep the status-based message below.
       }
       if (xhr.status >= 200 && xhr.status < 300) {
+        // The bytes are on the remote host now: the quick-open index is stale.
+        noteRemoteWrite()
         const size = typeof body === 'object' && body !== null && typeof (body as { size?: unknown }).size === 'number'
           ? (body as { size: number }).size
           : options.blob.size
@@ -283,6 +316,85 @@ export interface PushReportView {
   detail: string
 }
 
+/**
+ * How many remote WRITES this client session has issued.
+ *
+ * The quick-open file index is memory-only, so it has no filesystem watcher to
+ * tell it the tree changed; a write is the only signal there is. A counter is
+ * the smallest possible coupling: the writer does not know who caches, and a
+ * reader compares the number it saw when it built (see `quickopen-model.ts`) — a
+ * mismatch means rebuild.
+ *
+ * Bumped when the write actually LANDED (a rejected or conflicted write changed
+ * nothing and must not cost a rebuild), which is why the call sites sit on the
+ * success path.
+ *
+ * What bumps it:
+ * - the panel's own file writes: `fileOp.write/mkdir/rm/rename` and uploads;
+ * - the SCM verbs that change the WORKING TREE, detected in {@link execChangesWorktree}
+ *   because those commands are built and issued outside this module
+ *   (`scm/actions.ts`): discard (`restore` / `clean -fd`, which deletes untracked
+ *   files), branch switches (`checkout` / `switch`), `reset`, `stash apply|pop`,
+ *   patch/merge verbs and `pull`.
+ *
+ * Known boundary (deliberate, not an oversight): writes that do not come through
+ * either of those paths — a command typed in the remote terminal, or one the
+ * model runs through its own tooling — are invisible here. They are picked up on
+ * the next panel write, the next SCM worktree verb, or a page reload.
+ */
+let remoteWriteSeq = 0
+
+/** Record one landed remote write (see {@link remoteWriteSequence}). */
+export function noteRemoteWrite(): void {
+  remoteWriteSeq += 1
+}
+
+/** The counter a cached listing must match to still be considered fresh. */
+export function remoteWriteSequence(): number {
+  return remoteWriteSeq
+}
+
+/**
+ * Git verbs that change the WORKING TREE, so a file index built before them may
+ * list paths that no longer exist (or miss ones that now do).
+ *
+ * Deliberately narrow, and it reads the INDEX-ONLY variants out on purpose:
+ * - `restore --staged` (unstage) and `apply --cached` (stage a hunk) touch the
+ *   index only, so the file set is unchanged — invalidating on those would
+ *   rebuild the index after every stage click;
+ * - `stash drop` and `git branch -d` leave the worktree alone;
+ * - read verbs (`status`, `log`, `diff`, `show`, `rev-parse`, `stash list`,
+ *   `ls-files`, …) run constantly.
+ * What DOES invalidate: discards (`restore`/`clean -fd`, which deletes untracked
+ * files), branch switches (`checkout`/`switch`), `reset`, `stash` apply/pop and
+ * `stash push`/`save`, patch/merge verbs (`apply` without `--cached`, `am`,
+ * `merge`, `rebase`, `cherry-pick`, `revert`) and `pull`.
+ */
+const WORKTREE_WRITE_COMMAND =
+  /\bgit\b[^\n]*?\s(?:restore(?!\s+--staged)|clean|checkout|switch|reset|merge|rebase|cherry-pick|revert|pull|am|apply(?!\s+--(?:cached|index))|stash\s+(?:apply|pop|push|save))\b/
+
+/**
+ * Does this remote command change the working tree?
+ *
+ * Exported so the gate can drive it directly: the SCM verbs do not pass through
+ * `api.fileOp`, so this predicate is the only thing that makes discard/checkout/
+ * stash invalidate the quick-open index at all.
+ */
+export function execChangesWorktree(command: string): boolean {
+  return WORKTREE_WRITE_COMMAND.test(command)
+}
+
+/** Bump the counter for one landed command that changed the working tree. */
+function afterRemoteCommand(command: string): void {
+  if (execChangesWorktree(command)) noteRemoteWrite()
+}
+
+/** Promise helper: bump the counter when a write request resolved. */
+function afterRemoteWrite<T>(value: T): T {
+  noteRemoteWrite()
+  return value
+}
+
 export const api = {
   // -- hosts
   getHosts: () => call<{ hosts: RemoteHostSummary[] }>(REMOTE_API.hosts).then(r => r.hosts),
@@ -306,17 +418,40 @@ export const api = {
     stat: (alias: string, path: string) =>
       post<{ entry: RemoteFileEntry }>(REMOTE_API.files, { op: 'stat', alias, path }).then(r => r.entry),
     read: (alias: string, path: string) => post<RemoteRead>(REMOTE_API.files, { op: 'read', alias, path }),
-    write: (alias: string, path: string, content: string) =>
-      post<{ size: number }>(REMOTE_API.files, { op: 'write', alias, path, content, encoding: 'utf8' }),
-    mkdir: (alias: string, path: string) => post<{ ok: boolean }>(REMOTE_API.files, { op: 'mkdir', alias, path }),
+    /**
+     * Write one file, optionally guarded by the version it was based on.
+     *
+     * `guard` is the save-conflict lock: the Host refuses (409, `code:
+     * 'conflict'`) when the remote file no longer matches, and the caller gets a
+     * `RemoteApiError` carrying `conflict`. Omitting it keeps the old
+     * unconditional write, which is what every programmatic caller wants.
+     */
+    write: (alias: string, path: string, content: string, guard?: { expectMtime?: number; expectSize?: number }) =>
+      post<RemoteWriteResult>(REMOTE_API.files, {
+        op: 'write',
+        alias,
+        path,
+        content,
+        encoding: 'utf8',
+        ...(guard ?? {}),
+      }).then(afterRemoteWrite),
+    mkdir: (alias: string, path: string) =>
+      post<{ ok: boolean }>(REMOTE_API.files, { op: 'mkdir', alias, path }).then(afterRemoteWrite),
     rm: (alias: string, path: string, recursive: boolean) =>
-      post<{ ok: boolean }>(REMOTE_API.files, { op: 'rm', alias, path, recursive }),
+      post<{ ok: boolean }>(REMOTE_API.files, { op: 'rm', alias, path, recursive }).then(afterRemoteWrite),
     rename: (alias: string, from: string, to: string) =>
-      post<{ ok: boolean }>(REMOTE_API.files, { op: 'rename', alias, from, to }),
+      post<{ ok: boolean }>(REMOTE_API.files, { op: 'rename', alias, from, to }).then(afterRemoteWrite),
   },
   // -- exec
   exec: (alias: string, command: string, timeoutMs?: number) =>
-    post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs }),
+    post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs })
+      .then((result) => {
+        // A worktree-changing git verb (discard / checkout / stash apply …) runs
+        // through here rather than `fileOp`, so it is the one place an index
+        // cache can learn about it (see `execChangesWorktree`).
+        if (result.success) afterRemoteCommand(command)
+        return result
+      }),
   /**
    * Streaming exec: the network verbs' live log.
    *
@@ -366,6 +501,9 @@ export const api = {
       }
     }
     if (exit === undefined) throw new RemoteApiError(502, 'stream ended without an exit frame')
+    // The streaming path carries `pull`/`sync`, which merge into the worktree:
+    // same invalidation as the unary path above.
+    if (exit.success) afterRemoteCommand(command)
     return {
       success: exit.success,
       exitCode: exit.exitCode,

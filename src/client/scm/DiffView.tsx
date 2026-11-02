@@ -500,7 +500,17 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     if (text === undefined) return
     setEditBuffer(text)
     store.updateTab(tab.id, { text })
-    await store.saveTab(tab.id, text)
+    const saved = await store.saveTab(tab.id, text)
+    /**
+     * Only a LANDED write is followed by a reload.
+     *
+     * The old code reloaded on every outcome, so a permission error, a full disk
+     * or a dropped link replaced the buffer with the remote bytes and said
+     * nothing — the user's edit was gone without a confirmation. A refused save
+     * now shows its own banner (overwrite / reload / difference); any other
+     * failure shows its toast and keeps the buffer.
+     */
+    if (!saved) return
     await store.reloadTab(tab.id)
   }
 

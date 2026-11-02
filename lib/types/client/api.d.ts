@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     /**
@@ -21,6 +21,16 @@ export declare class RemoteApiError extends Error {
      * the operation still fails for the user with its readable reason.
      */
     deadline?: boolean;
+    /**
+     * The remote file moved on since the version this buffer was based on.
+     *
+     * Carried as DATA, not prose: the editor has to offer overwrite / reload /
+     * see-the-difference, and that needs what is there now (`mtime`, `size`)
+     * without another round trip. The status is 409 for exactly this case — a
+     * plain 502 would read as "the host failed", which is the opposite of what
+     * happened (the Host successfully protected the file).
+     */
+    conflict?: RemoteWriteConflict;
     constructor(status: number, message: string);
 }
 /** Query for one remote terminal socket. */
@@ -101,6 +111,18 @@ export interface PushReportView {
     action: 'pushed' | 'skipped-same' | 'failed';
     detail: string;
 }
+/** Record one landed remote write (see {@link remoteWriteSequence}). */
+export declare function noteRemoteWrite(): void;
+/** The counter a cached listing must match to still be considered fresh. */
+export declare function remoteWriteSequence(): number;
+/**
+ * Does this remote command change the working tree?
+ *
+ * Exported so the gate can drive it directly: the SCM verbs do not pass through
+ * `api.fileOp`, so this predicate is the only thing that makes discard/checkout/
+ * stash invalidate the quick-open index at all.
+ */
+export declare function execChangesWorktree(command: string): boolean;
 export declare const api: {
     getHosts: () => Promise<RemoteHostSummary[]>;
     createHost: (payload: HostForm) => Promise<RemoteHostSummary>;
@@ -125,9 +147,18 @@ export declare const api: {
         list: (alias: string, path: string) => Promise<RemoteFileEntry[]>;
         stat: (alias: string, path: string) => Promise<RemoteFileEntry>;
         read: (alias: string, path: string) => Promise<RemoteRead>;
-        write: (alias: string, path: string, content: string) => Promise<{
-            size: number;
-        }>;
+        /**
+         * Write one file, optionally guarded by the version it was based on.
+         *
+         * `guard` is the save-conflict lock: the Host refuses (409, `code:
+         * 'conflict'`) when the remote file no longer matches, and the caller gets a
+         * `RemoteApiError` carrying `conflict`. Omitting it keeps the old
+         * unconditional write, which is what every programmatic caller wants.
+         */
+        write: (alias: string, path: string, content: string, guard?: {
+            expectMtime?: number;
+            expectSize?: number;
+        }) => Promise<RemoteWriteResult>;
         mkdir: (alias: string, path: string) => Promise<{
             ok: boolean;
         }>;

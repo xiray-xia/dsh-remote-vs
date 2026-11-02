@@ -315,7 +315,15 @@ export function remoteWriteTool(deps: RemoteToolsDeps): ReturnType<typeof define
     },
     async execute(args) {
       const files = new RemoteFiles(deps.pool)
-      return files.write(args.alias as string, args.path as string, args.content as string, 'utf8')
+      const written = await files.write(args.alias as string, args.path as string, args.content as string, 'utf8')
+      /**
+       * Exactly the declared shape. `write` also reports the version it left
+       * behind (the editor's save guard reads it), but the model has no use for
+       * a timestamp and this schema refuses undeclared keys — DSH rejects such a
+       * result BEFORE the model ever sees it, which would make this tool
+       * uncallable rather than merely verbose.
+       */
+      return { size: written.size }
     },
   })
 }

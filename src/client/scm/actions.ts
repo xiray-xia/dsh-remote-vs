@@ -241,6 +241,18 @@ export interface DiffPayload {
    * write the truncated prefix back over the real file.
    */
   truncated?: boolean
+  /**
+   * The working-tree VERSION `newText` was read from (mtime in ms + size).
+   *
+   * The after pane of a working-tree diff is editable and saving it writes the
+   * real file, so it needs the same save-conflict baseline the file editor gets.
+   * It has to come from the SAME read that produced `newText` — a separate stat
+   * would describe whatever the file became afterwards, and the guard would then
+   * accept bytes the user never saw (or refuse a version they did see).
+   * Absent for staged/commit diffs, which are read-only.
+   */
+  mtime?: number
+  size?: number
 }
 
 /** Load a file's diff with both full revisions. */
@@ -248,7 +260,7 @@ export async function loadDiff(alias: string, root: string, path: string, staged
   if (untracked) {
     const read = await api.fileOp.read(alias, joinRemote(root, path))
     if (read.binary) return { diff: '', oldText: '', newText: '', unsupported: true }
-    return { diff: '', oldText: '', newText: read.text ?? '', unsupported: false, truncated: read.truncated }
+    return { diff: '', oldText: '', newText: read.text ?? '', unsupported: false, truncated: read.truncated, mtime: read.mtime, size: read.size }
   }
   const diffOut = await run(alias, diffCommand(root, { staged, path }))
   const diff = diffOut.stdout
@@ -259,6 +271,8 @@ export async function loadDiff(alias: string, root: string, path: string, staged
   const oldText = await tryRun(alias, fileAtRevCommand(root, oldRev, path))
   let newText = ''
   let truncated = false
+  let mtime: number | undefined
+  let size: number | undefined
   if (staged) {
     newText = await tryRun(alias, fileAtRevCommand(root, ':0', path))
   } else {
@@ -267,13 +281,23 @@ export async function loadDiff(alias: string, root: string, path: string, staged
       if (read.binary) return { diff, oldText, newText: '', unsupported: true }
       newText = read.text ?? ''
       truncated = read.truncated
+      // The after pane's save baseline, from THIS read.
+      mtime = read.mtime
+      size = read.size
     } catch {
       // Deleted on the worktree: the right side is empty by definition.
       newText = ''
     }
   }
   // `git show` appends nothing; a missing blob means "new file" ('').
-  return { diff, oldText: stripTrailingNewline(oldText), newText: stripTrailingNewline(newText), unsupported: false, truncated }
+  return {
+    diff,
+    oldText: stripTrailingNewline(oldText),
+    newText: stripTrailingNewline(newText),
+    unsupported: false,
+    truncated,
+    ...(mtime === undefined ? {} : { mtime, size }),
+  }
 }
 
 /** `git show` output keeps the trailing newline the file content does not need. */

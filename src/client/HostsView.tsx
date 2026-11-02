@@ -4,6 +4,7 @@
 import { useState, type ReactNode } from 'react'
 import type { RemoteDeployState, RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api, type HostForm } from './api.ts'
+import { DoctorPanel } from './DoctorPanel.tsx'
 import { Btn, Field, Notice, Row, hairline, inputStyle } from './ui.tsx'
 
 function err(e: unknown): string {
@@ -155,6 +156,8 @@ export function HostsView(props: {
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const [editing, setEditing] = useState<string | 'new' | null>(null)
+  /** Alias whose environment report is open; the panel mounts and probes. */
+  const [doctor, setDoctor] = useState<string | null>(null)
 
   const say = (message: string): void => {
     setNotice(message)
@@ -294,6 +297,9 @@ export function HostsView(props: {
             <Btn onClick={() => runPush(h.alias)} disabled={disabled}>
               {busy === `push:${h.alias}` ? t('hosts.pushing') : t('hosts.push')}
             </Btn>
+            <Btn onClick={() => { setDoctor(h.alias); setNotice(undefined); setError(undefined) }} disabled={disabled}>
+              {t('doctor.open')}
+            </Btn>
             <Btn onClick={() => { setEditing(editing === h.alias ? null : h.alias); setNotice(undefined); setError(undefined) }} disabled={disabled}>
               {t('hosts.edit')}
             </Btn>
@@ -304,6 +310,9 @@ export function HostsView(props: {
           )}
         </div>
       ))}
+      {doctor !== null && (
+        <DoctorPanel key={doctor} t={t} alias={doctor} onClose={() => setDoctor(null)} />
+      )}
       {editing === 'new' && (
         <HostFormView t={t} busy={disabled} onSave={saveForm} onCancel={() => setEditing(null)} />
       )}

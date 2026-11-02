@@ -28,6 +28,32 @@ export interface EditorTab {
      * guard silent) — the exact silent-loss path the handoff exists to avoid.
      */
     baseline?: string;
+    /**
+     * The remote VERSION this buffer was loaded from / last saved to.
+     *
+     * Sent back on save as an optimistic lock: the Host refuses the write when the
+     * remote file has a different mtime (or size), because that means a person or
+     * an agent wrote it after this buffer was read and saving would destroy their
+     * work with a cheerful "saved". Kept here rather than in the editor because it
+     * must survive a surface handoff and a tab switch.
+     *
+     * `undefined` means NO baseline (a file created by this session, or a write
+     * whose post-save stat failed): the save then goes through unguarded, exactly
+     * as before this feature — the guard protects a known history, it must never
+     * invent one.
+     */
+    remoteMtime?: number;
+    /** Size that belonged to `remoteMtime` (the second half of the same baseline). */
+    remoteSize?: number;
+    /**
+     * Set when a save was REFUSED because the remote file moved on, carrying what
+     * is there now. The pane turns this into an offer — overwrite / reload / see
+     * the difference — instead of a red toast the user cannot act on.
+     */
+    conflict?: {
+        mtime: number | null;
+        size: number | null;
+    };
     dirty: boolean;
     saving: boolean;
     binary: boolean;
@@ -269,7 +295,16 @@ export interface ExplorerValue {
      * @returns true only when the write really succeeded — the caller uses it to
      *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
      */
-    saveTab: (id: string, content: string) => Promise<boolean>;
+    saveTab: (id: string, content: string, options?: {
+        force?: boolean;
+    }) => Promise<boolean>;
+    /**
+     * Forget the pending save-conflict banner for one tab (the user dismissed it).
+     *
+     * The buffer and the dirty flag are untouched: dismissing only hides the
+     * offer, it never decides anything on the user's behalf.
+     */
+    dismissConflict: (id: string) => void;
     reloadTab: (id: string) => Promise<void>;
     info: (text: string) => void;
     fail: (text: string) => void;
@@ -282,6 +317,23 @@ export declare function repoRelative(repoRoot: string | undefined, fullPath: str
 export declare function bootstrap(ctx: Context): void;
 /** Reload hosts + workspace bindings and the routing status. */
 export declare function refreshAll(): void;
+/**
+ * Reopen the file tabs this browser had for the current workspace.
+ *
+ * Runs once per page load, for the CURRENT workspace only: switching workspaces
+ * keeps its existing contract (the strip is cleared and the user is told so
+ * first), and re-running this on every `refreshAll` would fight that clear
+ * rather than complement it.
+ *
+ * A tab that no longer loads (deleted, renamed, no permission) is dropped and
+ * COUNTED — silently restoring "6 of 9" would leave the user looking for three
+ * tabs they think they had.
+ *
+ * Only PATHS are restored. Caret and scroll position are not persisted: the
+ * README's privacy stance is "paths only, never content", and a caret stored
+ * weeks ago would point into a file that has since changed.
+ */
+export declare function restoreStoredTabs(): void;
 /** Switch the sidebar panel (persisted across reloads). */
 export declare function setView(view: RailView): void;
 /** One-shot request from the explorer: "search this folder". */
@@ -412,6 +464,14 @@ export declare function selectedWorkspaceId(): string;
  * assert what the store actually holds without rendering a component.
  */
 export declare function editorTabs(): readonly EditorTab[];
+/**
+ * The active tab's id.
+ *
+ * A plain getter rather than a hook, for the same reason `editorTabs` is one:
+ * the restore path lives outside React, and the gates that verify it need to see
+ * what the strip would consider current without mounting a component.
+ */
+export declare function activeEditorTabId(): string | undefined;
 /**
  * Point git at a directory inside the workspace. Repositories often live in a
  * sub-directory of the binding (`/srv/app` holding `/srv/app/web/.git`), and
@@ -597,7 +657,18 @@ export declare function updateTab(id: string, next: Partial<EditorTab>): void;
  * editor held, so "your edit is on disk" stays true (and a burst whose last
  * write failed reports false to all of them).
  */
-export declare function saveTab(id: string, content: string): Promise<boolean>;
+export declare function saveTab(id: string, content: string, options?: {
+    force?: boolean;
+}): Promise<boolean>;
+/**
+ * Drop the pending save-conflict banner for one tab.
+ *
+ * Hiding the offer is NOT a decision: the buffer stays dirty and the baseline
+ * stays untouched, so the next save is guarded exactly as this one was. Only a
+ * forced save or a reload can settle a conflict for real — anything else would
+ * be deciding for the user which version of their file to keep.
+ */
+export declare function dismissConflict(id: string): void;
 /**
  * Re-read one tab (file content or diff payload).
  *

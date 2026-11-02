@@ -92,6 +92,18 @@ export interface DiffPayload {
      * write the truncated prefix back over the real file.
      */
     truncated?: boolean;
+    /**
+     * The working-tree VERSION `newText` was read from (mtime in ms + size).
+     *
+     * The after pane of a working-tree diff is editable and saving it writes the
+     * real file, so it needs the same save-conflict baseline the file editor gets.
+     * It has to come from the SAME read that produced `newText` — a separate stat
+     * would describe whatever the file became afterwards, and the guard would then
+     * accept bytes the user never saw (or refuse a version they did see).
+     * Absent for staged/commit diffs, which are read-only.
+     */
+    mtime?: number;
+    size?: number;
 }
 /** Load a file's diff with both full revisions. */
 export declare function loadDiff(alias: string, root: string, path: string, staged: boolean, untracked?: boolean): Promise<DiffPayload>;

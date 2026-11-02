@@ -7,7 +7,7 @@ import type { ServerResponse } from 'node:http'
 import { posix } from 'node:path'
 import type { OpenMode, SFTPWrapper, Stats } from 'ssh2'
 import type { RemotePool } from './pool.ts'
-import type { RemoteFileEntry, RemoteRead } from './protocol.ts'
+import type { RemoteFileEntry, RemoteRead, RemoteWriteConflict, RemoteWriteResult } from './protocol.ts'
 import { DeadlineError } from './timeouts.ts'
 
 /** Single-read cap (matches the fs-ssh 8 MiB window). */
@@ -25,6 +25,35 @@ export const LIST_ENTRY_CAP = 20000
 
 /** Largest single upload accepted (matches the client-side planner cap). */
 export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+/**
+ * The remote file changed after the bytes the caller saved against were read.
+ *
+ * Carries what is there NOW so the route can answer 409 with the current
+ * version instead of a bare message — the client shows "changed at …, N bytes"
+ * and offers overwrite / reload / see-the-difference without a second round
+ * trip. A missing target is a conflict too (`mtime`/`size` null): the file this
+ * buffer was loaded from is gone, so writing would recreate something a person
+ * or another tool deliberately removed.
+ *
+ * The mtime comparison is SFTP's own (second granularity), so this narrows the
+ * window rather than closing it: two writes to the same inode inside one second
+ * share an mtime. `expectSize` covers the common "same second, different
+ * length" case and nothing more. It is a guard against silent loss, not a
+ * strong consistency protocol — the docs say so.
+ */
+export class WriteConflictError extends Error {
+  readonly conflict: RemoteWriteConflict
+  constructor(
+    readonly path: string,
+    mtime: number | null,
+    size: number | null,
+  ) {
+    super(`remote file changed since it was opened: ${path}`)
+    this.name = 'WriteConflictError'
+    this.conflict = { mtime, size }
+  }
+}
 
 /**
  * How long one download stream may make no progress before it is failed.
@@ -262,17 +291,29 @@ export class RemoteFiles {
   async read(alias: string, file: string): Promise<RemoteRead> {
     const path = remotePath(file)
     return this.pool.withBrowseSftp(alias, async (sftp) => {
-      const attrs = await lstatAsync(sftp, path).catch(async (error: unknown) => {
+      /**
+       * Resolve to the REAL file first, exactly the way `write` does.
+       *
+       * A bare `lstat` describes a SYMBOLIC LINK (its own mtime, and the link
+       * target string's length as the size) while the bytes read through the path
+       * come from the target — so the mtime/size pair the editor stores as its
+       * save baseline described a different thing than the save would compare,
+       * and the first save of every symlinked file conflicted with itself
+       * forever (reloading re-read the link's mtime again). Resolving here makes
+       * read and write agree on which version they are talking about; the link
+       * itself is untouched, which is what "writes through symlinks" means.
+       */
+      const target = await resolveWriteTarget(sftp, path).catch(async (error: unknown) => {
         // The stat fails first for a path that is not there, so without this the
         // caller got a bare "No such file" naming no path, while `list` and
         // `write` already said which one.
         throw (await explainSftpFailure(sftp, path, 'file', error)) ?? error
       })
-      // Checked from the stat that was already needed, rather than after a
-      // failed read: asking the server to read a directory yields nothing but
-      // "Failure", and this pre-check costs no extra round trip.
-      if (isDir(attrs.mode)) throw new Error(`not a file: ${path} is a directory`)
-      const size = attrs.size
+      // A dangling link resolves to a name with no version: nothing to read.
+      if (target.size === undefined || target.mtime === undefined) {
+        throw new Error(`no such file: ${path}`)
+      }
+      const size = target.size
       // A zero-byte file has no window to read, and asking SFTP for zero bytes
       // is NOT a no-op: ssh2's `read()` rejects `off >= buf.length` with a
       // SYNC throw ("offset is out of bounds"), which escapes the promise
@@ -280,13 +321,15 @@ export class RemoteFiles {
       // SFTP session open — repeating it exhausts the server's MaxSessions and
       // makes SSH look dead. Empty is answered from the stat alone.
       if (size <= 0) {
-        return { size: 0, binary: false, text: '', truncated: false }
+        return { size: 0, mtime: target.mtime, binary: false, text: '', truncated: false }
       }
       const window = Math.min(size, READ_CAP)
-      const buffer = await readWindow(sftp, path, 0, window)
+      const buffer = await readWindow(sftp, target.realPath, 0, window)
       const binary = buffer.includes(0)
       return {
         size,
+        // From the SAME stat as `size`, so the two describe one version.
+        mtime: target.mtime,
         binary,
         ...(binary ? { base64: buffer.toString('base64') } : { text: buffer.toString('utf8') }),
         truncated: size > READ_CAP,
@@ -319,17 +362,43 @@ export class RemoteFiles {
    *    Owner/group cannot be preserved without a privileged chown, so a save
    *    keeps the bytes and the mode but takes the SSH user's ownership.
    */
-  async write(alias: string, file: string, content: string, encoding: 'utf8' | 'base64' = 'utf8'): Promise<{ size: number }> {
+  async write(
+    alias: string,
+    file: string,
+    content: string,
+    encoding: 'utf8' | 'base64' = 'utf8',
+    guard?: { expectMtime?: number | undefined; expectSize?: number | undefined },
+  ): Promise<RemoteWriteResult> {
     const path = remotePath(file)
     const data = encoding === 'base64' ? Buffer.from(content, 'base64') : Buffer.from(content, 'utf8')
     return this.pool.withSftp(alias, async (sftp) => {
       /** Set once the target may be mid-swap: such failures are never reworded. */
       let replacing = false
       let partial: string | undefined
+      /** The new version's mtime; null when it could not be read back. */
+      let mtime: number | null = null
+      /** The new version's size, from the same stat as `mtime` when possible. */
+      let writtenSize = data.length
       try {
         // Resolve the link BEFORE naming the side file: the side file has to sit
         // in the same directory as the file it will be renamed onto.
         const target = await resolveWriteTarget(sftp, path)
+        /**
+         * The optimistic lock, checked against the SAME stat that resolved the
+         * target — before a side file is even named, so a refused save touches
+         * nothing at all.
+         *
+         * A missing target conflicts when the caller HAD a baseline: the file
+         * these bytes were loaded from is gone (a terminal `rm`, an agent's
+         * rename), and writing would silently resurrect it. Without a baseline
+         * the caller is creating the file and has nothing to compare.
+         */
+        if (guard !== undefined && guard.expectMtime !== undefined) {
+          const changed = target.mtime === undefined
+            || target.mtime !== guard.expectMtime
+            || (guard.expectSize !== undefined && target.size !== guard.expectSize)
+          if (changed) throw new WriteConflictError(target.realPath, target.mtime ?? null, target.size ?? null)
+        }
         const dir = posix.dirname(target.realPath)
         partial = partialPathOf(target.realPath)
         this.trackPartial(alias, partial)
@@ -352,9 +421,25 @@ export class RemoteFiles {
             console.warn(`[dsh-remote-vs] saved ${target.realPath} but could not restore its mode`)
           })
         }
+        // Read the version back: the caller stores it as the NEXT save's
+        // baseline. A failure here is not a save failure (the bytes landed), so
+        // it downgrades to `null` — an unguarded next save — rather than
+        // pretending a timestamp. `size` comes from the SAME stat as `mtime`:
+        // reporting `data.length` next to a stat-derived mtime would let the two
+        // halves of one baseline describe two different moments.
+        const after = await lstatAsync(sftp, target.realPath).catch(() => undefined)
+        if (after !== undefined) {
+          mtime = after.mtime * 1000
+          writtenSize = after.size
+        }
         this.remember(this.knownDirs, dirKey(alias, posix.dirname(path)))
         await this.sweepOrphanDirs(sftp, alias, dir)
       } catch (error) {
+        // The conflict must reach the route with its own fields: neither the
+        // partial-sweep path nor `explainSftpFailure` may relabel it (the
+        // target may legitimately be absent, which that helper words as
+        // "no such file").
+        if (error instanceof WriteConflictError) throw error
         if (partial !== undefined) await this.discardPartial(sftp, alias, partial)
         // A failure after the swap started carries the real reason (a rename
         // status, a permission error). `explainSftpFailure` would relabel it "no
@@ -367,7 +452,7 @@ export class RemoteFiles {
       } finally {
         if (partial !== undefined) this.activePartials.delete(dirKey(alias, partial))
       }
-      return { size: data.length }
+      return { size: writtenSize, mtime }
     })
   }
 
@@ -1560,14 +1645,22 @@ function setstatAsync(sftp: SFTPWrapper, path: string, attrs: { mode: number }):
  * A missing final target is not an error — saving through a dangling link (or
  * creating a new file) writes the target, exactly like `open('w')` did.
  */
-async function resolveWriteTarget(sftp: SFTPWrapper, path: string): Promise<{ realPath: string; mode: number | undefined }> {
+async function resolveWriteTarget(
+  sftp: SFTPWrapper,
+  path: string,
+): Promise<{ realPath: string; mode: number | undefined; size: number | undefined; mtime: number | undefined }> {
   let current = path
   for (let hop = 0; hop <= MAX_LINK_HOPS; hop += 1) {
     let attrs: Stats
     try {
       attrs = await lstatAsync(sftp, current)
     } catch (error) {
-      if ((error as { code?: number }).code === SFTP_NO_SUCH_FILE) return { realPath: current, mode: undefined }
+      // A missing final target is not an error by itself (the save may be
+      // creating the file); the VERSION is simply unknown, which is what the
+      // save-conflict guard reads as "there was nothing to be based on".
+      if ((error as { code?: number }).code === SFTP_NO_SUCH_FILE) {
+        return { realPath: current, mode: undefined, size: undefined, mtime: undefined }
+      }
       throw error
     }
     if (isSymlink(attrs.mode)) {
@@ -1577,7 +1670,10 @@ async function resolveWriteTarget(sftp: SFTPWrapper, path: string): Promise<{ re
       continue
     }
     if (isDir(attrs.mode)) throw new Error(`not a file: ${current} is a directory`)
-    return { realPath: current, mode: attrs.mode & 0o777 }
+    // mtime/size are the save guard's baseline: they must come from the SAME
+    // stat that decides whether this path is writable, or the guard would check
+    // a version that this call never looked at.
+    return { realPath: current, mode: attrs.mode & 0o777, size: attrs.size, mtime: attrs.mtime * 1000 }
   }
   throw new Error(`too many symbolic links: ${path}`)
 }
