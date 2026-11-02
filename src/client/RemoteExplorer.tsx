@@ -115,6 +115,24 @@ export function writeAllowed(transferActive: boolean): boolean {
   return !transferActive
 }
 
+/**
+ * Whether the write ENTRIES (new file/folder, upload, paste, delete) are
+ * disabled right now.
+ *
+ * @param transferActive - is a write batch currently holding the slot?
+ *
+ * This is a named function, not an inline expression, because the expression it
+ * replaces was a double negative that inverted itself:
+ * `!writeAllowed(upload === undefined)` passes `true` ("busy") exactly when
+ * nothing is uploading, so the whole write menu was greyed out while idle and
+ * came alive during an upload — while the toolbar's own buttons, which test
+ * `upload !== undefined` directly, disagreed with it on the same screen. Two
+ * surfaces, one state, opposite answers.
+ */
+export function writeEntriesDisabled(transferActive: boolean): boolean {
+  return !writeAllowed(transferActive)
+}
+
 /** True when `path` is `prefix` itself or a descendant of it. */
 export function pathUnder(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`)
@@ -1658,8 +1676,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const openMenu = (event: React.MouseEvent, entry: RemoteFileEntry | undefined): void => {
     event.preventDefault()
     event.stopPropagation()
-    /** One write batch at a time (see `writeAllowed`). */
-    const transferBusy = !writeAllowed(upload === undefined)
+    /** One write batch at a time (see `writeEntriesDisabled`). */
+    const transferBusy = writeEntriesDisabled(upload !== undefined)
     if (entry !== undefined && !selected.has(entry.path)) {
       setSelected(new Set([entry.path]))
       setAnchor(entry.path)

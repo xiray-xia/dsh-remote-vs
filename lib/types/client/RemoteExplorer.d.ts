@@ -31,6 +31,21 @@ export declare function shouldConsumeReveal(lastId: number, id: number): boolean
  * read-only browsing stays allowed.
  */
 export declare function writeAllowed(transferActive: boolean): boolean;
+/**
+ * Whether the write ENTRIES (new file/folder, upload, paste, delete) are
+ * disabled right now.
+ *
+ * @param transferActive - is a write batch currently holding the slot?
+ *
+ * This is a named function, not an inline expression, because the expression it
+ * replaces was a double negative that inverted itself:
+ * `!writeAllowed(upload === undefined)` passes `true` ("busy") exactly when
+ * nothing is uploading, so the whole write menu was greyed out while idle and
+ * came alive during an upload — while the toolbar's own buttons, which test
+ * `upload !== undefined` directly, disagreed with it on the same screen. Two
+ * surfaces, one state, opposite answers.
+ */
+export declare function writeEntriesDisabled(transferActive: boolean): boolean;
 /** True when `path` is `prefix` itself or a descendant of it. */
 export declare function pathUnder(path: string, prefix: string): boolean;
 /**
