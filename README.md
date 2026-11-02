@@ -192,11 +192,12 @@ dsh_remote_vs/
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
 │       └── i18n.ts / theme.ts / ui.tsx # 双语词典/主题信号/共享样式
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
-├── docs/                   # 本地工作文档（不推送 GitHub）
-│   ├── P2-PLAN.md          # P2 架构/分期/验收矩阵（含逐项状态）
-│   └── MAINTENANCE.md      # 本地私有（.gitignore），不入库：DSH 升级影响面 + helper 升级流程
+├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
+│   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.15.1）
+│   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
-└── lib/                    # 构建产物（gitignored，link 安装后重启即生效）
+└── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
 ```
 
 `vendor/dsh-remote-helpers/`（入库）是 helper 种子：插件启动时自动铺到
@@ -314,7 +315,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
   - 断线：在途不重放；新调用自动重连；连接状态由顶部栏/编辑器信息栏指示器显式显示，断线期间编辑器与已缓存目录**只读可见**（见「连接状态与离线只读」）
 - 验证：`npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`
   （真远端 + 真 Cordis + 真路由类，61/61；P0 路由与 GUI 需重启 Host 后冒烟）
-- 详见 `docs/P2-PLAN.md`（§8 验收矩阵逐项状态）
+- 详见本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）
 
 ## Helper 自编译（P1）
 
@@ -338,7 +339,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 - 密码 / 私钥口令以明文保存在 `dsh-remote.json`（0600），与现有 SSH 插件同一信任模型。
 - 推送物逐包验 sha256（tarball 进、binary 出，双重校验）；helper 安装目录与工作区分开；sidecar 的 `version`、平台与 tarball 路径都走白名单校验（不内插未校验字符串到远端 shell 行），安装失败会保留上一版。
 - 主机配置写入走 fsync + 变更戳复核（读-改-写窗口内被别的进程改过会重放，而不是静默覆盖）。
-- 远端会话可读显式本机绝对路径（工具 spill 文件契约要求）；同模型信任下可接受，见 `docs/P2-PLAN.md` §4 备注。
+- 远端会话可读显式本机绝对路径（工具 spill 文件契约要求）；同模型信任下可接受，属已知取舍，本地维护文档有记录。
 
 ## 开发
 
@@ -397,7 +398,7 @@ node .spike/letter-check.mjs     # 状态字母：未跟踪 ? 与冲突 U 不再
 > 失败时才触发，所以「调用点 57」与「跑出来 55」本来就该差 2）。
 
 真机回归仍是 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`。
-DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 45 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
+DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 49 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
 
 ## 开源许可
 

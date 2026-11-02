@@ -207,11 +207,12 @@ dsh_remote_vs/
 │       ├── RemoteDirectoryPicker.tsx# remote directory browser dialog
 │       └── i18n.ts / theme.ts / ui.tsx # bilingual dictionary/theme signal/shared styles
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
-├── docs/                   # local-only working docs (never pushed to GitHub)
-│   ├── P2-PLAN.md          # P2 architecture/phases/acceptance matrix (with per-item status)
-│   └── MAINTENANCE.md      # local-only (.gitignore), not shipped: DSH upgrade impact + helper procedure
+├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
+│   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.15.1)
+│   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
-└── lib/                    # build output (gitignored, restart after link install to take effect)
+└── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
 ```
 
 `vendor/dsh-remote-helpers/` (committed) holds helper seeds: at startup the plugin spreads them into
@@ -355,7 +356,7 @@ over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one H
   - Disconnects: in-flight calls are not replayed; new calls reconnect automatically; the link state is shown explicitly in the top bar / editor info bar, and while it is down the editor and cached directories stay **read-only visible** (see "Connection status and offline read-only")
 - Verify: `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`
   (real remote + real Cordis + real router classes, 61/61; P0 routing and GUI need a Host restart + smoke pass)
-- Details: `docs/P2-PLAN.md` (§8 acceptance matrix with per-item status)
+- Details: the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist)
 
 ## Self-built helper (P1)
 
@@ -377,7 +378,7 @@ Upstream never published helper binaries (all Release assets are empty), so this
 - Passwords / key passphrases are stored in plaintext in `dsh-remote.json` (0600) — same trust model as the existing SSH plugin.
 - Pushed artifacts are sha256-verified both ways (tarball in, binary out); the helper install dir is separate from workspaces; the sidecar's `version`, platform and tarball path are whitelist-validated (no unvalidated string is interpolated into a remote shell line), and a failed install keeps the previous version.
 - Host config writes are fsync'd and re-checked against a stamp (a concurrent Desktop/Web edit inside the read-modify-write window is replayed instead of silently overwritten).
-- Remote sessions may read explicit local absolute paths (the tool spill-file contract requires it); acceptable under the same model trust — see `docs/P2-PLAN.md` §4 note.
+- Remote sessions may read explicit local absolute paths (the tool spill-file contract requires it); acceptable under the same model trust — a known trade-off recorded in the local maintenance notes.
 
 ## Development
 
@@ -444,7 +445,7 @@ tsc, to the bundler and to jsdom — this fixture is the only place they reprodu
 > exactly why "57 call sites" and "55 checks run" differ by 2).
 
 The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
-Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 45 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
+Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 49 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
 
 ## License
 

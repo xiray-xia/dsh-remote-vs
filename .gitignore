@@ -15,15 +15,19 @@ dist/
 # config). Everything used only to develop and verify it stays on disk:
 #   .spike/    real-host and jsdom probes
 #   scripts/   the self-check gates (`node scripts/check-*.mjs`)
-#   docs/MAINTENANCE.md, docs/P2-PLAN.md, docs/CODE-REVIEW*.md, CODE-REVIEW*.md
+#   docs/      local working docs (everything except docs/media/)
+#   CODE-REVIEW*.md
 .spike/
 scripts/
-# Local-only working docs (never push to GitHub; see MAINTENANCE §1)
-docs/P2-PLAN.md
-docs/MAINTENANCE.md
+# Local-only working docs (never push to GitHub; see MAINTENANCE §9).
+# Directory-level rule on purpose: a NEW local doc must not leak internal
+# identifiers just because someone forgot to add it here. `docs/media/` holds
+# the screenshots the README links, so it ships.
+docs/*
+!docs/media/
+!docs/media/**
 # Review reports are local artifacts: they describe defects as they were
 # BEFORE the fixes, i.e. a map of weaknesses for anyone reading a public
 # repository. Keep them on disk, never in the tree.
 CODE-REVIEW*.md
-docs/CODE-REVIEW*.md
 tsconfig.scratch.json
