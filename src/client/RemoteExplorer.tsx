@@ -1261,7 +1261,25 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       return
     }
     transferRef.current = true
-    const plan = withDroppedDirs(planUpload(entries), extraDirs)
+    /**
+     * The plan runs BEFORE the transfer's own try/finally, so a throw here used
+     * to leave the write lock ON: `transferRef` stayed true and the upload bar
+     * stayed up, which disables every write entry (new file/folder, upload,
+     * paste, and DELETE) with nothing on screen explaining why — and it stayed
+     * that way until the page was reloaded. Release the lock on the way out so a
+     * bad batch is a toast, not a permanently greyed-out menu.
+     */
+    let plan: ReturnType<typeof withDroppedDirs>
+    try {
+      plan = withDroppedDirs(planUpload(entries), extraDirs)
+    } catch (error) {
+      uploadAbort.current = undefined
+      transferRef.current = false
+      setUpload(undefined)
+      setBusy(false)
+      toast(error instanceof Error ? error.message : String(error), true)
+      return
+    }
     dropLog('plan', { files: plan.files.length, dirs: plan.dirs.length, skipped: plan.skipped.length })
     if (plan.files.length === 0 && plan.dirs.length === 0) {
       if (plan.skipped.length > 0) toast(t('files.uploadSkipped'), true)
@@ -2110,7 +2128,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
           if (!writeAllowed(transferRef.current)) return
           const dir = uploadInto.current || root
           const blobs = new Map<string, Blob>(picked.map(file => [file.name, file]))
+          // A rejection here would be an unhandled one (this is not the drop
+          // path, which does catch): the picker must report its failure the same
+          // way the drop does.
           void runUpload(dir, picked.map(file => ({ rel: file.name, size: file.size })), blobs, [])
+            .catch((error: unknown) => { toast(error instanceof Error ? error.message : String(error), true) })
         }}
       />
       <input
