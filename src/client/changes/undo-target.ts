@@ -13,11 +13,11 @@
  * - **cross-session**: the panel's session and the marks' session must agree, so
  *   switching conversations cannot leave session A's patch aimed at session B's
  *   coordinates;
- * - **cross-binding (same alias)**: two bindings can share one host alias
- *   (`ssh_xiray_new` carries P710 and Z700). The alias is not an identity; the
- *   `bindingId` is, and the file path must sit under the recorded ledger root —
- *   otherwise a revert computed for one checkout can land in an identical sibling
- *   one, where git's context check would happily accept it;
+ * - **cross-binding (same alias)**: two bindings can share one host alias — one
+ *   machine may hold two checkouts of the same tree. The alias is not an
+ *   identity; the `bindingId` is, and the file path must sit under the recorded
+ *   ledger root — otherwise a revert computed for one checkout can land in an
+ *   identical sibling one, where git's context check would happily accept it;
  * - **stale binding**: a binding edited or moved keeps its id but changes its
  *   alias/root; the recorded snapshot no longer matches, so the revert refuses
  *   instead of guessing.
