@@ -22,9 +22,11 @@ import { useExplorer } from '../store.tsx'
 import { applyHunk, GitOpError } from './actions.ts'
 import { diffCounts, hunkAtRow, stepHunk } from './diff-model.ts'
 import type { DiffRow } from '../../protocol.ts'
+import { GIT_CAP } from '../../git-ops.ts'
 import { api } from '../api.ts'
 import { CodeEditor, type CodeEditorHandle } from '../CodeEditor.tsx'
-import { sameLocalDir } from '../composer.ts'
+import { buildReviewPrompt, diffByteLength, pickReviewMode, reviewScopeOf } from '../ai-review.ts'
+import { appendToDraft, canInsertDraft, sameLocalDir } from '../composer.ts'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import { langFromPath, tokenizeDocument, type Token } from '../vsc/tokenize.ts'
 import {
@@ -421,6 +423,26 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     && viewedAliasPath !== undefined
     && sameLocalDir(chat.sessionWorkspacePath, viewedAliasPath)
 
+  /**
+   * Why the "AI review" button cannot run, or `undefined` when it can.
+   *
+   * Three different absences, three different sentences, checked from the most
+   * fundamental down:
+   *  - `store.ctx`: the shared store boots asynchronously, so before it lands
+   *    there is nothing to write into at all;
+   *  - `chatEnabled`: the same binding gate the selection popup uses — a prompt
+   *    that names a remote path means nothing in a session that does not live in
+   *    this binding;
+   *  - `canInsertDraft`: the conversation service is a SOFT, version-dependent
+   *    read. A host that does not expose it must say so up front instead of
+   *    failing on click with the "composer is busy" sentence, which would name
+   *    the wrong cause.
+   */
+  let reviewBlocked: string | undefined
+  if (store.ctx === undefined) reviewBlocked = t('scm.aiReviewNoContext')
+  else if (!chatEnabled || chat.sessionId === undefined) reviewBlocked = t('scm.aiReviewNoSession')
+  else if (!canInsertDraft(store.ctx, chat.sessionId)) reviewBlocked = t('scm.aiReviewNoChannel')
+
   // Seed the editable buffer the first time the "变更后" pane is shown.
   useEffect(() => {
     if (mode !== 'after' || tab.staged || tab.text !== '' || tab.loading) return
@@ -514,6 +536,56 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     await store.reloadTab(tab.id)
   }
 
+  /**
+   * Append an AI-review prompt for THIS tab's diff to the composer draft (F6).
+   *
+   * v1 stops at the DRAFT on purpose: `appendToDraft` is the only delivery
+   * channel used here — no `submit`/`send` call — so the user always sees the
+   * exact prompt (and can edit or discard it) before anything costs a turn. The
+   * host does expose submit facades (see `docs/.feasibility/review.md` §2);
+   * wiring them is a separate, opt-in feature.
+   *
+   * The prompt is built on CLICK, not during render: `diffByteLength` encodes
+   * the whole diff and the prompt can be tens of kilobytes, which must not be
+   * recomputed per frame while the user scrolls the diff.
+   */
+  const reviewWithAi = (): void => {
+    const ctx = store.ctx
+    const sessionId = chat.sessionId
+    if (reviewBlocked !== undefined || ctx === undefined || sessionId === undefined) {
+      toast(reviewBlocked ?? t('scm.aiReviewNoSession'), true)
+      return
+    }
+    // Byte accounting, not `diff.length`: `GIT_CAP` is a `head -c` BYTE cap and
+    // the exec result does not flag the truncation (see `ai-review.ts`).
+    const diff = tab.diff?.diff ?? ''
+    const bytes = diffByteLength(diff)
+    const capped = bytes >= GIT_CAP
+    const mode = pickReviewMode({ bytes, hasDiff: diff !== '', capped })
+    const prompt = buildReviewPrompt({
+      alias: store.alias,
+      root: store.repoRoot ?? store.root,
+      rel: tab.rel,
+      fullPath: tab.fullPath,
+      scope: reviewScopeOf(tab.staged, tab.ref),
+      ...(tab.ref === undefined ? {} : { commitRef: tab.ref }),
+      diff,
+      mode,
+      capped,
+      lang,
+    })
+    if (!appendToDraft(ctx, sessionId, prompt)) {
+      toast(t('scm.aiReviewFailed'), true)
+      return
+    }
+    // One sentence per shape, because the three mean different things and the
+    // "large diff" wording would be a lie for a file that has no diff at all
+    // (untracked / new: the prompt asks the model to read the file itself).
+    if (mode === 'full') toast(t('scm.aiReviewAdded'))
+    else if (mode === 'summary') toast(t('scm.aiReviewAddedSummary'))
+    else toast(t('scm.aiReviewAddedRead'))
+  }
+
   if (tab.error !== undefined) {
     return (
       <div className="rvs-diff">
@@ -578,6 +650,18 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
           </span>
         )}
         {busy && <MiniSpinner />}
+        {/* F6: hand THIS diff to the on-screen session as a review prompt. It
+            only fills the composer draft (see `reviewWithAi`); the title carries
+            the exact reason whenever the binding gate refuses. The glyph is
+            text because the icon set has no "AI" mark — the same precedent as
+            the search options' `Aa` / `.*` glyphs in `kit.tsx`. */}
+        <IconButton
+          title={reviewBlocked ?? t('scm.aiReview')}
+          onClick={reviewWithAi}
+          disabled={reviewBlocked !== undefined}
+        >
+          <span className="rvs-glyph" aria-hidden="true" style={{ fontSize: 12 }}>AI</span>
+        </IconButton>
         <IconButton title={t('scm.reloadDiff')} onClick={() => { void reload() }} disabled={busy}>
           <IconRefresh size={13} />
         </IconButton>

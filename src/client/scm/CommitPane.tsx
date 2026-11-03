@@ -30,6 +30,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import type { Lang } from '../i18n.ts'
+import { buildCommitReviewPrompt, diffByteLength, pickReviewMode } from '../ai-review.ts'
+import { appendToDraft, canInsertDraft, sameLocalDir } from '../composer.ts'
+import { GIT_CAP } from '../../git-ops.ts'
+import { useExplorer } from '../store.tsx'
+import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import {
   ContextMenu,
   FileIcon,
@@ -474,6 +479,61 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
   }
   const blockRefs = useRef(new Map<string, HTMLElement>())
   const menu = useContextMenu()
+
+  // ------------------------------------------------- AI review (whole commit)
+  /**
+   * Hand THIS commit to the on-screen session as one review prompt (F6 v2).
+   *
+   * Same delivery rule as the single-file button in `DiffView`: draft only,
+   * never sent, and the same three reasons a click is refused. The patch is
+   * ALREADY in memory here (the 差异 tab renders with it), so this costs no
+   * extra remote round trip; `patchTruncated` comes from the loader that
+   * computed the byte cap — the one place that knows the read was cut.
+   */
+  const store = useExplorer()
+  const chat = useRemoteChatTarget(store.ctx)
+  const viewedAliasPath = store.workspace === undefined ? undefined : store.aliasPaths[store.workspace.id]
+  const chatEnabled = chat.sessionId !== undefined
+    && chat.sessionWorkspacePath !== undefined
+    && viewedAliasPath !== undefined
+    && sameLocalDir(chat.sessionWorkspacePath, viewedAliasPath)
+  let reviewBlocked: string | undefined
+  if (store.ctx === undefined) reviewBlocked = t('scm.aiReviewNoContext')
+  else if (!chatEnabled || chat.sessionId === undefined) reviewBlocked = t('scm.aiReviewNoSession')
+  else if (!canInsertDraft(store.ctx, chat.sessionId)) reviewBlocked = t('scm.aiReviewNoChannel')
+  else if (props.patch === undefined || props.patch === '') reviewBlocked = t('history.aiReviewNoPatch')
+  const reviewCommit = (): void => {
+    const ctx = store.ctx
+    const sessionId = chat.sessionId
+    if (reviewBlocked !== undefined || ctx === undefined || sessionId === undefined) {
+      toast(reviewBlocked ?? t('scm.aiReviewNoSession'), true)
+      return
+    }
+    const patch = props.patch ?? ''
+    // Bytes, not `.length`: the patch is a capped BYTE read (see `ai-review.ts`).
+    const bytes = diffByteLength(patch)
+    const capped = props.patchTruncated || bytes >= GIT_CAP
+    const mode = pickReviewMode({ bytes, hasDiff: patch !== '', capped })
+    const prompt = buildCommitReviewPrompt({
+      alias: store.alias,
+      root: store.repoRoot ?? store.root,
+      hash: props.commit.hash,
+      subject: props.commit.subject,
+      body: props.body,
+      files: props.files ?? [],
+      patch,
+      mode,
+      capped,
+      lang: props.lang,
+    })
+    if (!appendToDraft(ctx, sessionId, prompt)) {
+      toast(t('scm.aiReviewFailed'), true)
+      return
+    }
+    if (mode === 'full') toast(t('scm.aiReviewAdded'))
+    else if (mode === 'summary') toast(t('scm.aiReviewAddedSummary'))
+    else toast(t('scm.aiReviewAddedRead'))
+  }
   const resolvedFocus = props.focusPath === undefined ? undefined : blockForPath(model, props.focusPath)
   const currentPath = resolvedFocus ?? paths[0]
   const currentIndex = currentPath === undefined ? -1 : paths.indexOf(currentPath)
@@ -557,6 +617,17 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
           disabled={props.patch === undefined || props.patch === ''}
         >
           <IconCopy size={13} />
+        </IconButton>
+        {/* F6 v2: review the WHOLE commit (every file in one prompt) — the
+            history pane's counterpart of the single-file button in `DiffView`.
+            Text glyph for the same reason as there: the icon set has no "AI"
+            mark, and the `Aa` / `.*` marks set the precedent. */}
+        <IconButton
+          title={reviewBlocked ?? t('history.aiReview')}
+          onClick={reviewCommit}
+          disabled={reviewBlocked !== undefined}
+        >
+          <span className="rvs-glyph" aria-hidden="true" style={{ fontSize: 12 }}>AI</span>
         </IconButton>
       </div>
       <div className="rvs-pscroll rvs-scroll">

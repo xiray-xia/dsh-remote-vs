@@ -16,6 +16,7 @@ import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
 import { startDownload, startSelectionDownload } from './downloads.ts'
 import { useConnectionStatus, isConnectionFailure } from './connection.ts'
+import { createDragExpander, type DragExpander } from './drag-expand.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { ListingRequests } from './listing-requests.ts'
 import { repoRelative, useExplorer } from './store.tsx'
@@ -656,6 +657,34 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const uploadAbort = useRef<AbortController | undefined>(undefined)
   /** True while a remote WRITE batch is in flight (upload/paste/delete serialization). */
   const transferRef = useRef(false)
+  /**
+   * `expanded` readable SYNCHRONOUSLY by the window-capture drag listeners.
+   *
+   * Those listeners live outside React's tree and are re-attached per binding,
+   * so reading the state value from inside them would be one render stale; the
+   * spring-load decision ("is this directory already open?") has to answer for
+   * the tree as the pointer sees it.
+   */
+  const expandedRef = useRef<Set<string>>(expanded)
+  expandedRef.current = expanded
+  /** The latest {@link springOpen}; the expander below is created once and reads through. */
+  const springOpenRef = useRef<(dir: string) => void>(() => undefined)
+  /**
+   * Spring-loaded folders (see `drag-expand.ts`): one instance per mounted
+   * panel. Both drag paths feed it — the row's own `onDragOver` (our rows =
+   * move) and the window-capture `dragover` (OS files = upload) — because those
+   * are two different event deliveries, not one.
+   */
+  const dragExpand = useRef<DragExpander | undefined>(undefined)
+  if (dragExpand.current === undefined) {
+    dragExpand.current = createDragExpander(
+      (dir) => springOpenRef.current(dir),
+      {
+        set: (callback, ms) => window.setTimeout(callback, ms),
+        clear: (handle) => window.clearTimeout(handle),
+      },
+    )
+  }
   /** Last handled "show this folder" request id (see `shouldConsumeReveal`). */
   const lastRevealId = useRef(0)
   const menu = useContextMenu()
@@ -701,12 +730,19 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     },
   ), [alias])
 
-  const loadDir = useCallback(async (dir: string, force = false): Promise<void> => {
-    if (alias === '') return
+  /**
+   * List one directory into the tree cache.
+   *
+   * @returns whether the listing landed. Callers that act on the RESULT (the
+   *   spring-loaded expand, which has to collapse a directory it could not read)
+   *   need it; the many refresh callers ignore it.
+   */
+  const loadDir = useCallback(async (dir: string, force = false, silent = false): Promise<boolean> => {
+    if (alias === '') return false
     // While the link is down, a listing can only produce a 45 s SSH dial (and a
     // spinner over the "no cache" placeholder). Cached rows stay; recovery
     // re-lists through the revision bump, so skipping here loses nothing.
-    if (offline) return
+    if (offline) return false
     const key = dirKey(alias, dir)
     // NOTE: a cached listing is deliberately NOT reused as the only source. The
     // tree relies on every caller re-listing after a write (`force` = start a
@@ -719,13 +755,19 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       next.add(key)
       return next
     })
+    let listed = false
     try {
       await listingsApi.request(dir, revisionRef.current, force)
+      listed = true
     } catch (error) {
       // A transport failure is already on the connection chip, and the cached
       // rows are still on screen: one toast per background refresh would repeat
-      // the same story until the link is back. Business failures still speak.
-      if (!isConnectionFailure(error)) toast(error instanceof Error ? error.message : String(error), true)
+      // the same story until the link is back. Business failures still speak —
+      // except on a SILENT read (spring-loaded expand while the pointer rests
+      // on a directory): that listing was never requested by a click, so a
+      // toast would interrupt with an error the user cannot act on. The real
+      // open of the same directory still explains itself.
+      if (!silent && !isConnectionFailure(error)) toast(error instanceof Error ? error.message : String(error), true)
     } finally {
       setLoading(prev => {
         const next = new Set(prev)
@@ -733,6 +775,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         return next
       })
     }
+    return listed
   }, [alias, listingsApi, offline])
 
   /**
@@ -882,9 +925,19 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     alive.current = true
     return () => {
       alive.current = false
+      dragExpand.current?.reset()
       if (prefetchTimer.current !== undefined) window.clearTimeout(prefetchTimer.current)
     }
   }, [])
+
+  /**
+   * A binding change invalidates every drag candidate: `expanded` is re-keyed to
+   * the new workspace, so a countdown armed on the old tree could open a path
+   * that does not even exist on the host now bound.
+   */
+  useEffect(() => {
+    dragExpand.current?.reset()
+  }, [alias, root])
 
   /**
    * One directory's visible, sorted rows, cached for the life of one
@@ -933,6 +986,49 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     })
     if (!isOpen) void loadDir(entry.path)
   }
+
+  /**
+   * Spring-open one directory under a resting drag (see `drag-expand.ts`).
+   *
+   * The listing is read FORCE — a file is about to land in this directory, so a
+   * cached listing could hide the very file the drop is about to clash with —
+   * and SILENT, because a speculative read must not paint a failure toast the
+   * user never asked for. Opening an already-open directory is a no-op: the
+   * expander only arms on closed rows, and a second open would restart the
+   * listing for nothing.
+   *
+   * A FAILED read collapses the directory again. Leaving it open would show an
+   * empty folder (indistinguishable from a real empty one) and — worse — the
+   * directory then sits in `expanded`, so every later revision bump re-lists it
+   * WITHOUT the silent flag and repeats the same error toast on every write.
+   */
+  const springOpen = useCallback((dir: string): void => {
+    if (dir === '' || offline) return
+    setExpanded(prev => {
+      if (prev.has(dir)) return prev
+      const next = new Set(prev)
+      next.add(dir)
+      return next
+    })
+    void loadDir(dir, true, true).then((listed) => {
+      if (listed) return
+      // A concurrent NON-silent re-list (a revision bump, or the user opening
+      // the same row) may have SUCCEEDED while this speculative read failed;
+      // collapsing then would fold a directory the tree can actually show. Only
+      // collapse while the cache still holds nothing for it.
+      if (listingsRef.current[dirKey(alias, dir)] !== undefined) return
+      setExpanded(prev => {
+        if (!prev.has(dir)) return prev
+        const next = new Set(prev)
+        next.delete(dir)
+        return next
+      })
+    })
+  }, [alias, offline, loadDir])
+  // Written during render on purpose: an idempotent latest-value ref, exactly
+  // like `revisionRef` below. The expander outlives every render, so a captured
+  // copy would call into a stale `offline`/`loadDir` pair.
+  springOpenRef.current = springOpen
 
   /** Open one path: previews for images, diffs for changed text files. */
   const openEntry = useCallback((entry: RemoteFileEntry): void => {
@@ -1589,19 +1685,59 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       event.stopPropagation()
       if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'
     }
+    /**
+     * The DIRECTORY row under the pointer, or undefined.
+     *
+     * Same hit stack as `dropDirFromEvent` (the shell paints a full-screen
+     * "drop here" overlay during a file drag, so `event.target` is that
+     * overlay, never the row), but this one answers "which closed directory is
+     * the pointer resting on" for spring-loading. A FILE row answers undefined:
+     * a drop there lands in its parent directory, which is already open.
+     */
+    const hoverDirOf = (event: DragEvent): string | undefined => {
+      const point = pointerOf(event)
+      if (point === undefined) return undefined
+      for (const element of document.elementsFromPoint(point.x, point.y)) {
+        const row = element.closest('[data-rvs-path]')
+        if (row === null) continue
+        const path = row.getAttribute('data-rvs-path') ?? ''
+        if (path === '') continue
+        return row.getAttribute('data-rvs-dir') === '1' ? path : undefined
+      }
+      return undefined
+    }
+    /**
+     * Feed the spring-load expander from an OS-file drag.
+     *
+     * `dragover` fires continuously while the pointer rests, which is exactly
+     * the signal the expander wants: it ignores a repeat for the row already
+     * counting down and only restarts when the pointer moves to another row.
+     * RESET rather than `leave` on a file row or the pane background: the
+     * pointer left the candidate and there is no path to name it by here.
+     */
+    const trackHover = (event: DragEvent): void => {
+      const dir = hoverDirOf(event)
+      if (dir !== undefined && !expandedRef.current.has(dir)) dragExpand.current?.hover(dir)
+      else dragExpand.current?.reset()
+    }
     const onDragEnter = (event: DragEvent): void => {
       if (!isFileDrag(event.dataTransfer) || !overPane(event)) return
       claim(event)
       setDropTarget(root)
       setDropHint(root)
+      trackHover(event)
     }
     const onDragOver = (event: DragEvent): void => {
       if (!isFileDrag(event.dataTransfer) || !overPane(event)) return
       claim(event)
       setDropTarget(root)
       setDropHint(root)
+      trackHover(event)
     }
     const onDrop = (event: DragEvent): void => {
+      // The gesture is over whichever way it ends: no spring-load may fire
+      // after the drop it was preparing for.
+      dragExpand.current?.reset()
       dropLog('drop', {
         types: event.dataTransfer === null ? null : [...event.dataTransfer.types],
         overPane: overPane(event),
@@ -1621,10 +1757,32 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       })
     }
     const onDragLeave = (event: DragEvent): void => {
-      // Only when the pointer actually left the pane: the overlay's own
-      // dragleave fires for unrelated targets and used to clear the hint
-      // mid-drag.
-      if (overPane(event)) return
+      // Two different events share this name, and only the first is a leave:
+      //  - the pointer moved to another element (relatedTarget is set). The
+      //    shell's drag overlay fires these for unrelated targets and they used
+      //    to clear the hint mid-drag, so they are ignored.
+      //  - the drag ENDED without a drop (Esc, or a drop refused elsewhere)
+      //    while the pointer is still inside the pane: overPane() is true and
+      //    relatedTarget is null. A drag that started in ANOTHER document (the
+      //    OS file manager) never sends `dragend` here — its source node is not
+      //    in this document — so this is the ONLY event that can end that
+      //    gesture, and it must clear the countdown (otherwise the folder opens
+      //    650 ms after the user cancelled).
+      if (overPane(event) && event.relatedTarget !== null) return
+      dragExpand.current?.reset()
+      setDropTarget(undefined)
+      setDropHint(undefined)
+    }
+    /**
+     * The end of a drag whose SOURCE is in this document (our tree rows): a
+     * drop, Esc, or a drop outside the pane. OS-file drags end in
+     * `onDragLeave` instead (see there). Clearing `dragPaths` matters because a
+     * cancelled move leaves the old selection in it, and the next drag would
+     * then treat a stale row as its move source.
+     */
+    const onDragEnd = (): void => {
+      dragExpand.current?.reset()
+      dragPaths.current = []
       setDropTarget(undefined)
       setDropHint(undefined)
     }
@@ -1632,11 +1790,14 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     window.addEventListener('dragover', onDragOver, true)
     window.addEventListener('drop', onDrop, true)
     window.addEventListener('dragleave', onDragLeave, true)
+    window.addEventListener('dragend', onDragEnd, true)
     return () => {
+      dragExpand.current?.reset()
       window.removeEventListener('dragenter', onDragEnter, true)
       window.removeEventListener('dragover', onDragOver, true)
       window.removeEventListener('drop', onDrop, true)
       window.removeEventListener('dragleave', onDragLeave, true)
+      window.removeEventListener('dragend', onDragEnd, true)
     }
     // `uploadFromDataTransfer` closes over the current alias/root/plan state, so
     // the listeners are re-attached whenever that identity would change.
@@ -1944,7 +2105,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     dragOver: (entry, e) => {
       // An OS file drag targets this row's DIRECTORY: a drop on a file row
       // means "put it beside that file" (what the user means when they aim at a
-      // file in the list).
+      // file in the list). The real handling of an OS drag lives in the
+      // window-capture listener below; this branch keeps React's own path sane.
       if (isFileDrag(e.dataTransfer)) {
         e.preventDefault()
         e.stopPropagation()
@@ -1952,15 +2114,38 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         setDropHint(entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/'))
         return
       }
-      if (!entry.isDir) return
       const source = dragPaths.current[0]
-      if (source === undefined) return
-      if (entry.path === source || entry.path.startsWith(`${source}/`)) return
-      e.preventDefault()
-      setDropTarget(entry.path)
+      // `text/plain` is what our own `onDragStart` sets (`ExplorerRowView`) and
+      // what a DOM drag of a row therefore carries. Requiring it keeps a stale
+      // source — left behind by a cancelled move before `onDragEnd` clears it —
+      // from turning an unrelated text drag over the tree into a "move" target.
+      const legalTarget = entry.isDir
+        && source !== undefined
+        && e.dataTransfer !== null
+        && [...e.dataTransfer.types].includes('text/plain')
+        && entry.path !== source
+        && !entry.path.startsWith(`${source}/`)
+      if (legalTarget) {
+        e.preventDefault()
+        setDropTarget(entry.path)
+        // Spring-loaded folders: a CLOSED directory under a resting drag opens
+        // after the delay; an already-open one has nothing left to reveal.
+        if (expanded.has(entry.path)) dragExpand.current?.reset()
+        else dragExpand.current?.hover(entry.path)
+        return
+      }
+      // Any other row disarms the countdown: the pointer is not resting on a
+      // directory it could open (a move into itself is refused above too).
+      dragExpand.current?.reset()
     },
-    dragLeave: (entry) => { setDropTarget(current => (current === entry.path ? undefined : current)) },
+    dragLeave: (entry) => {
+      dragExpand.current?.leave(entry.path)
+      setDropTarget(current => (current === entry.path ? undefined : current))
+    },
     dropOn: (entry, e) => {
+      // The drop is the end of the gesture even when it is refused: never let
+      // the countdown open a folder after its own drop landed.
+      dragExpand.current?.reset()
       if (isFileDrag(e.dataTransfer)) {
         const into = entry.isDir ? entry.path : (entry.path.split('/').slice(0, -1).join('/') || '/')
         handleDrop(into, e)

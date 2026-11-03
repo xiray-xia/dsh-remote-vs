@@ -274,6 +274,24 @@ function inputFor(
 }
 
 /**
+ * Whether this session has a usable draft-insert channel right now.
+ *
+ * A PREFLIGHT for surfaces that must not offer an action they cannot complete
+ * (the diff view's "review this diff with AI" button): the conversation service
+ * is a soft, version-dependent read (see {@link conversationOf}), so on a host
+ * that does not expose it the button has to say so up front instead of failing
+ * on click with a message about a busy composer — a wrong cause is worse than no
+ * button.
+ *
+ * Read-only and side-effect free on purpose: it never calls
+ * `input.for()` (resolving the facade could materialise a per-session input
+ * shell), so it can run on every render of the owning view.
+ */
+export function canInsertDraft(ctx: Context, sessionId: string): boolean {
+  return sessionScope(ctx, sessionId) !== undefined && conversationOf(ctx) !== undefined
+}
+
+/**
  * Mint one reference chip through the host's public `insertReference` facade —
  * the same method the native `@` picker's event listener calls, so the
  * composer shows a compact chip while the model receives `reference.text`.
