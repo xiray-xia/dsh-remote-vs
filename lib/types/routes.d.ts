@@ -5,6 +5,7 @@ import type { RemoteStore } from './store.ts';
 import type { RemotePool } from './pool.ts';
 import type { RemoteWorlds } from './p2/worlds.ts';
 import { TerminalSessionRegistry } from './terminal.ts';
+import { ForwardManager } from './forward.ts';
 import type { SessionChanges } from './changes/recorder.ts';
 /**
  * Wrap one archive command in a remote-side deadline.
@@ -37,6 +38,12 @@ export interface RemoteRoutesDeps {
     timeouts?: () => RemoteTimeouts;
     /** Session change ledger, when the host half mounted one. */
     changes?: SessionChanges;
+    /**
+     * Live local port forwards. Absent only in route-only probes (the gates build
+     * `makeRoutes` with the minimum they need): the port routes then answer 503
+     * instead of pretending the feature exists.
+     */
+    forwards?: ForwardManager;
 }
 export declare function makeRoutes(deps: RemoteRoutesDeps): {
     routes: WebRoute[];

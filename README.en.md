@@ -6,7 +6,7 @@
 
 SSH host management inside the DSH Host process + helper push pipeline + a **VS Code-style remote
 workbench** (explorer / search / source control / commit graph with its commit-details pane / multi-tab editor / floating editor /
-side-by-side diff / multiple terminals). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
+side-by-side diff / multiple terminals / port forwarding). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
 there is an extra standalone "Remote" tab, otherwise it falls back to a native right-Sidebar "Remote"
 page (same content, self-opened from the guide, per-session instances). The editor is ALSO mounted into
 the conversation view slot as a "远程编辑器" (remote editor) tab next to "对话 / 轨迹", so the code area is
@@ -108,6 +108,7 @@ extra configuration is needed.
 | Jump | Clicking a search hit opens the file at that line, centres it and **lights the landing line** (fades after ~2.6s); repeat jumps in the same file work |
 | Terminals | Tabbed multi-terminal (`+` to create, `✕`/middle-click to close behind a confirm), across hosts; session ids are persisted so a page refresh reattaches to the running shells, and a session is kept for **10 minutes after its last socket goes away** (enough for a refresh or a browser-tab switch) before the remote shell is closed; **a socket drop (as opposed to a shell exit) keeps the session and offers a one-click reattach** (the same session id reattaches, and the Host still reclaims it after the 10-minute TTL above), and only a real exit clears it |
 | Workspaces | Binding list + routing-mode dropdown + the dual-mode (local / remote) new-workspace wizard; **unbinding asks first** (sessions and history stay readable, new remote calls are refused) |
+| Port forwarding | A sidebar **"Ports"** page: lists the remote host's listening TCP ports (`ss`, falling back to `netstat`) and forwards any of them to a local port in one click, with the local URL for copying/opening. Manual rules ("remote address:port → local port, which may be auto-assigned") are supported too. **The local listener binds `127.0.0.1` only** (`ssh -L` semantics — never exposed to the LAN); each rule has its own channel budget and never consumes one of the six exec/SFTP slots. An SSH drop or the idle eviction does not kill the listener: the next local connection simply re-dials. Rules live in the browser (restored after a reload) and every one can be stopped; disabling the plugin, deleting the host, or unloading it releases the local ports. When the remote has neither `ss` nor `netstat`, or the probe times out or is interrupted, the panel says "cannot enumerate" instead of showing an empty list |
 
 ### Hosts and transport
 
@@ -149,6 +150,8 @@ dsh_remote_vs/
 │   ├── importers.ts        # ssh_config / dsh-ssh.json parsing importers
 │   ├── routes.ts           # /api/dsh-remote/* route table + terminal WebSocket upgrade
 │   ├── terminal.ts         # PTY session registry (reconnect-on-refresh/disconnect cleanup)
+│   ├── forward.ts          # local port-forward manager (direct-tcpip channels / one listener per rule / budgets)
+│   ├── listen-ports.ts     # remote listening-port probe (ss/netstat command + pure parser)
 │   ├── tools.ts            # the 5 Agent tool definitions
 │   ├── http.ts / loopback.ts # JSON body IO + loopback trust fence
 │   ├── git-format.ts       # git command builders + pure frontend parsing (zero Host additions)
@@ -204,7 +207,7 @@ dsh_remote_vs/
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # remote @refs/selection-to-chat
 │       ├── ai-review.ts    # AI review prompt builder (single diff / whole commit, byte tiers, pure)
 │       ├── api.ts          # typed fetch wrapper over /api/dsh-remote
-│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / Dialog
+│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
 │       ├── SettingsHosts.tsx        # settings occupants (host mgmt/binding list, self-fetching)
 │       ├── DirectoryFlow.tsx        # native entry occupant (local dual-mode/remote wizard)
 │       ├── RemoteDirectoryPicker.tsx# remote directory browser dialog
@@ -212,7 +215,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.16.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.17.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
@@ -382,6 +385,7 @@ Upstream never published helper binaries (all Release assets are empty), so this
 - Pushed artifacts are sha256-verified both ways (tarball in, binary out); the helper install dir is separate from workspaces; the sidecar's `version`, platform and tarball path are whitelist-validated (no unvalidated string is interpolated into a remote shell line), and a failed install keeps the previous version.
 - Host config writes are fsync'd and re-checked against a stamp (a concurrent Desktop/Web edit inside the read-modify-write window is replayed instead of silently overwritten).
 - Remote sessions may read explicit local absolute paths (the tool spill-file contract requires it); acceptable under the same model trust — a known trade-off recorded in the local maintenance notes.
+- **Port forwards bind `127.0.0.1` only**: another local process can reach one, which is exactly the `ssh -L` trust boundary (the local user account). The target is dialed **from the remote host**, so it can reach that host's private network; "open in browser" always builds an `http://` URL — a forwarded HTTPS service needs the scheme edited by hand.
 
 ## Development
 

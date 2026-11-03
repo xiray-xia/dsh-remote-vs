@@ -34,6 +34,10 @@ export const REMOTE_API = {
   sessionCwd: '/api/dsh-remote/session-cwd',
   /** What one live session changed on its remote host (the review panel). */
   changes: '/api/dsh-remote/changes',
+  /** Local TCP forwards (`ssh -L` semantics) for the port panel. */
+  forwards: '/api/dsh-remote/forwards',
+  /** Remote listening TCP sockets for the port panel (one bounded probe). */
+  listenPorts: '/api/dsh-remote/listen-ports',
 } as const
 
 /**
@@ -555,4 +559,76 @@ export interface GitShow {
   subject: string
   body: string
   stat: string
+}
+
+/**
+ * One request to forward a local TCP port to a target reachable from the
+ * remote host — the port panel's manual rule and its one-click "forward this
+ * discovered port" button both send exactly this shape.
+ *
+ * The local listener is ALWAYS bound to 127.0.0.1 (never 0.0.0.0): a forward is
+ * `ssh -L`, so anything the user's machine can reach through it is what ssh -L
+ * grants — exposing it on the LAN is not part of this feature.
+ */
+export interface RemoteForwardRequest {
+  /** Host alias the tunnel runs through. */
+  alias: string
+  /** Target address AS THE REMOTE HOST RESOLVES IT (`127.0.0.1` by default). */
+  remoteHost: string
+  /** Target port on that address. */
+  remotePort: number
+  /**
+   * Requested local port, or 0/omitted to let the OS assign one.
+   *
+   * The panel asks for 0 by default: picking a fixed port invites EADDRINUSE
+   * from whatever else the developer runs locally.
+   */
+  localPort?: number
+}
+
+/** One live local forward, as the port panel renders it. */
+export interface RemoteForwardState {
+  /** Stable rule id (`alias|remoteHost|remotePort|localPort-as-requested`). */
+  id: string
+  alias: string
+  remoteHost: string
+  remotePort: number
+  /** The port actually bound (resolved when the request asked for 0). */
+  localPort: number
+  /** URL to copy / open; loopback HTTP is the overwhelmingly common case. */
+  localUrl: string
+  /** `error` means the last connection attempt failed; the listener is alive. */
+  state: 'listening' | 'error'
+  /** Currently open TCP connections through this rule. */
+  connections: number
+  /** Cumulative bytes in each direction (diagnostic, not a quota). */
+  bytesIn: number
+  bytesOut: number
+  /** Last connect/bind failure, human-readable. */
+  lastError?: string
+  startedAt: number
+}
+
+/** One listening TCP socket on the remote host. */
+export interface RemoteListenPort {
+  /** Bind address exactly as the remote tool printed it (`0.0.0.0`, `::`, `*`, `127.0.0.1`). */
+  addr: string
+  port: number
+  /** Process name when the remote tool revealed it (usually only own processes). */
+  process?: string
+}
+
+/**
+ * The remote listening-port probe's answer.
+ *
+ * `tool` says what actually ran: `none` means the host has neither `ss` nor
+ * `netstat` (an honest "cannot enumerate", not "no ports"), and `unknown`
+ * means the probe did not answer at all. The panel must render those as an
+ * explanation, never as an empty list.
+ */
+export interface RemoteListenPortsResult {
+  tool: 'ss' | 'netstat' | 'none' | 'unknown'
+  ports: RemoteListenPort[]
+  /** Why the probe could not be used, when it could not. */
+  error?: string
 }

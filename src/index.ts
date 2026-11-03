@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import { RemoteStore } from './store.ts'
 import type { RemoteTimeouts } from './protocol.ts'
 import { RemotePool } from './pool.ts'
+import { ForwardManager } from './forward.ts'
 import { seedHelperCache } from './deploy.ts'
 import { makeRoutes } from './routes.ts'
 import {
@@ -321,6 +322,28 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   })
   ctx.effect(() => () => { changes.dispose() }, 'dsh-remote-vs: changes ledger')
 
+  /**
+   * Local port forwards (`ssh -L`) — resident listeners with their own
+   * lifecycle, on purpose.
+   *
+   * A forward's listener must survive `sync()` erasing and re-registering the
+   * route table (a settings edit must not kill a tunnel), so the manager is not
+   * created inside `makeRoutes`; the routes only see its CRUD face. Its effect
+   * is registered BEFORE the routes effect, so unload closes routes first, then
+   * the forwards (their channels still need a live pool), and the pool last.
+   */
+  const forwards = new ForwardManager({
+    pool,
+    log: (level, message) => {
+      try {
+        if (level === 'warn') ctx.logger.warn(`[remote-vs] forwards: ${message}`)
+        else ctx.logger.info(`[remote-vs] forwards: ${message}`)
+      } catch {
+        // Logging must never break a forward.
+      }
+    },
+  })
+
   const { routes, upgrade, terminalSessions } = makeRoutes({
     store,
     pool,
@@ -328,6 +351,7 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     ctx,
     timeouts: resolveTimeoutsNow,
     changes,
+    forwards,
   })
 
   /**
@@ -348,6 +372,14 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
    * pool), and the pool is disposed last.
    */
   ctx.effect(() => () => { terminalSessions.dispose() }, 'dsh-remote-vs: terminal sessions')
+
+  /**
+   * Forwards close after routes (no new local connection can arrive once the
+   * route table is gone) and BEFORE the pool is disposed (a channel close still
+   * needs a live connection). Registered before `sync()` creates the routes
+   * effect, so the reverse-order cleanup above holds.
+   */
+  ctx.effect(() => () => { forwards.dispose() }, 'dsh-remote-vs: port forwards')
 
   let disposeRoutes: (() => void) | undefined
 
@@ -375,7 +407,14 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
       disposeTools = undefined
     }
     const value = resolve()
-    if (!value.enabled) return
+    if (!value.enabled) {
+      // Turning the plugin off must release the local ports too: with the
+      // routes gone there is no panel left to stop a tunnel, and a listener
+      // nobody can reach would keep its 127.0.0.1 port bound until restart.
+      // `stopAll` (not `dispose`) keeps the manager reusable when re-enabled.
+      forwards.stopAll()
+      return
+    }
     if (value.announceToAgent) {
       disposeSection = ctx.systemPrompt.section({
         name: 'plugin:dsh-remote-vs',

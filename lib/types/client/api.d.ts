@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteHostSummary, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     /**
@@ -229,6 +229,34 @@ export declare const api: {
     terminalClose: (id: string) => Promise<{
         ok: boolean;
     }>;
+    /**
+     * Live forwards, narrowed to one host when an alias is given.
+     *
+     * A purely LOCAL read: the Host already holds the tunnels, so the panel can
+     * poll this every few seconds without spending a single remote command.
+     */
+    forwards: (alias?: string) => Promise<RemoteForwardState[]>;
+    /**
+     * Open one forward.
+     *
+     * 400 = the request is not a valid rule, 409 = the local port is taken, 502 =
+     * the tunnel could not be established (a refused `direct-tcpip` included) —
+     * all three arrive as a `RemoteApiError` whose `message` is the Host's own
+     * explanation, which is what the panel shows.
+     */
+    startForward: (request: RemoteForwardRequest) => Promise<RemoteForwardState>;
+    /** Close one forward by its rule id. */
+    stopForward: (id: string) => Promise<{
+        ok: boolean;
+    }>;
+    /**
+     * One bounded probe of the remote host's listening TCP sockets.
+     *
+     * Costs one remote exec, so the panel asks rarely; `tool: 'none' | 'unknown'`
+     * is an honest "cannot enumerate" answer and must not be rendered as "none
+     * found" (see `RemoteListenPortsResult`).
+     */
+    listenPorts: (alias: string) => Promise<RemoteListenPortsResult>;
     git: {
         status(alias: string, path: string): Promise<GitStatus>;
         log(alias: string, path: string, max: number, branch?: string): Promise<GitCommit[]>;

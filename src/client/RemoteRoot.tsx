@@ -16,6 +16,7 @@ import { applyConnectionStatuses, isConnectionRecovery, setActiveConnectionAlias
 import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
+import { PortsView, IconPlug } from './PortsView.tsx'
 import { QuickOpen } from './QuickOpen.tsx'
 import { RemoteExplorer } from './RemoteExplorer.tsx'
 import { SearchView } from './SearchView.tsx'
@@ -37,7 +38,7 @@ import {
   MiniSpinner,
 } from './vsc/kit.tsx'
 
-type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'workspaces'
+type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'workspaces'
 
 const SPLIT_KEY = 'dsh-remote-vs.split'
 const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
@@ -429,6 +430,10 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         // The terminal draws its own header + tab strip, so it takes the whole
         // slot (no extra padding wrapper).
         return <TerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} request={store.terminalRequest} />
+      case 'ports':
+        // Same shape as the terminal: its own header (host picker + refresh) and
+        // its own scroller, so no viewpad wrapper either.
+        return <PortsView t={t} hosts={store.hosts} visible={panelLive('ports')} />
       case 'workspaces':
         return (
           <div className="rvs-viewpad" style={{ height: '100%' }}>
@@ -515,6 +520,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         {editorInStack && store.tabs.length > 0
           && railButton('editor', store.activeTab?.rel.split('/').pop() ?? t('tab.editor'), <IconDiff size={17} />, store.tabs.length)}
         {railButton('terminal', t('tab.terminal'), <IconTerminal size={17} />)}
+        {railButton('ports', t('tab.ports'), <IconPlug size={17} />)}
         {railButton('workspaces', t('tab.workspaces'), <IconServer size={17} />, store.workspaces.length)}
       </div>
       <div className="rvs-column" ref={columnRef}>

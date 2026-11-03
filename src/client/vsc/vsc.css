@@ -3982,6 +3982,188 @@ body[data-ds-dark-theme] .rvs-execpanel {
 
 
 
+/* ------------------------------------------------------------ port forwards */
+
+/**
+ * The port panel: one form above two lists, all inside the sidebar column.
+ *
+ * The column can be dragged very narrow, so nothing here may assume a width: an
+ * address/URL is ONE unbreakable token (`overflow-wrap: anywhere`), the action
+ * row wraps instead of overflowing, and the form stacks vertically — a
+ * three-input row is unusable at the panel's default width.
+ */
+.rvs-ports-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 8px 14px;
+}
+
+/**
+ * The restore-failure banner: one sentence plus the "forget these rules"
+ * action, side by side when there is room and stacked when the column is very
+ * narrow (the action must never squeeze the explanation into a sliver).
+ */
+.rvs-ports-restore {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rvs-ports-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 8px;
+}
+
+.rvs-ports-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rvs-ports-label {
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+/* `.rvs-input` carries `flex: 1`; in a COLUMN flex parent that would stretch
+   the field's HEIGHT, so the input fills the width and keeps its own height. */
+.rvs-ports-input {
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.rvs-ports-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rvs-ports-section {
+  margin-top: 12px;
+  border-top: 1px solid var(--rvs-border);
+}
+
+.rvs-ports-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px;
+  color: var(--rvs-fg2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.rvs-ports-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--rvs-hover);
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+
+.rvs-ports-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 6px 7px;
+  border-radius: 6px;
+}
+
+.rvs-ports-row:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-ports-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rvs-ports-addr {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--rvs-fg);
+  font-family: var(--rvs-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.rvs-ports-proc {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+/* State is never colour-only: the dot carries the state word as its label. */
+.rvs-ports-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rvs-fg3);
+}
+
+.rvs-ports-dot.listening {
+  background: var(--rvs-ok, #2ea043);
+}
+
+.rvs-ports-dot.error {
+  background: var(--rvs-danger);
+}
+
+.rvs-ports-conn {
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-ports-err {
+  color: var(--rvs-danger);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rvs-ports-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The "open" affordance is a real link styled as a header button. */
+.rvs-ports-open {
+  text-decoration: none;
+}
+
+.rvs-ports-hint {
+  margin-top: 4px;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 /* ------------------------------------------------------ Ctrl+P quick open */
 
 .rvs-qo-mask {
@@ -4147,3 +4329,4 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-qo-note.warn {
   color: var(--rvs-git-m);
 }
+

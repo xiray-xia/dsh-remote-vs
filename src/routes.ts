@@ -22,6 +22,8 @@ import { bootstrap } from './keygen.ts'
 import { helperAvailability, probe, pushPipeline } from './deploy.ts'
 import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport } from './importers.ts'
 import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts'
+import { ForwardManager, validateForwardRequest } from './forward.ts'
+import { LISTEN_PORTS_TIMEOUT_MS, listenPortsCommand, parseListenPorts } from './listen-ports.ts'
 import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 
@@ -184,6 +186,12 @@ export interface RemoteRoutesDeps {
   timeouts?: () => RemoteTimeouts
   /** Session change ledger, when the host half mounted one. */
   changes?: SessionChanges
+  /**
+   * Live local port forwards. Absent only in route-only probes (the gates build
+   * `makeRoutes` with the minimum they need): the port routes then answer 503
+   * instead of pretending the feature exists.
+   */
+  forwards?: ForwardManager
 }
 
 /** Package name our loader row is mounted from (ns discovery key). */
@@ -247,6 +255,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   const timeouts = (): RemoteTimeouts => deps.timeouts?.() ?? DEFAULT_TIMEOUTS
   const files = new RemoteFiles(pool)
   const terminalSessions = new TerminalSessionRegistry(pool)
+  const forwards = deps.forwards
 
   /**
    * Stream one remote `tar -czf -` command into a `.tar.gz` download response.
@@ -395,6 +404,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         if (method === 'DELETE') {
+          // A deleted host has no panel row left to stop its forwards from, so
+          // their listeners would keep the local ports bound until the Host
+          // restarts. Close them BEFORE the connection they ride on goes away.
+          forwards?.stopAlias(alias)
           pool.forget(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           if (!store.remove(alias)) {
@@ -1309,6 +1322,118 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         writeJson(res, 200, { ok: terminalSessions.close(body.id) })
+      },
+    },
+    // ---------------------------------------------- port forwards
+    // Local TCP forwards (`ssh -L`): the listener lives in the ForwardManager
+    // (its own fiber-scoped lifecycle), so this route family is a thin CRUD
+    // face plus the remote listening-port probe. Local ports are loopback-only;
+    // see `src/forward.ts` for why.
+    {
+      kind: 'exact',
+      path: REMOTE_API.forwards,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (forwards === undefined) {
+          writeJson(res, 503, { error: 'port forwarding is not available in this composition' })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        if (req.method === 'GET') {
+          const alias = queryParam(url, 'alias')
+          writeJson(res, 200, { forwards: forwards.list(alias === undefined || alias === '' ? undefined : alias) })
+          return
+        }
+        if (req.method === 'DELETE') {
+          const id = queryParam(url, 'id')
+          if (id === undefined || id === '') {
+            writeJson(res, 400, { error: 'id query parameter is required' })
+            return
+          }
+          writeJson(res, 200, { ok: forwards.stop(id) })
+          return
+        }
+        if (req.method !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const read = await readBodyOrError<unknown>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        const validated = validateForwardRequest(read.body)
+        if (!validated.ok) {
+          writeJson(res, 400, { error: validated.error })
+          return
+        }
+        try {
+          writeJson(res, 200, { forward: await forwards.start(validated.value) })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // Caller-actionable refusals get 409: a taken local port, a privileged
+          // port this process may not bind, and the per-alias rule ceiling
+          // ("already has 16 local forwards; stop one first") — all three are
+          // fixed by stopping/changing something locally. Everything else here
+          // is the ssh side refusing or failing to connect: 502.
+          const local = /EADDRINUSE|EACCES|already in use|already has \d+ local forwards|permission denied|not permitted/i.test(message)
+          writeJson(res, local ? 409 : 502, { error: message })
+        }
+      },
+    },
+    // ------------------------------------------------ remote listen ports
+    {
+      kind: 'exact',
+      path: REMOTE_API.listenPorts,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = queryParam(url, 'alias')
+        if (alias === undefined || alias === '') {
+          writeJson(res, 400, { error: 'alias query parameter is required' })
+          return
+        }
+        try {
+          const result = await pool.exec(alias, listenPortsCommand(), { timeoutMs: LISTEN_PORTS_TIMEOUT_MS })
+          // `exec` answers transport failures as a RESULT; only a real command
+          // run can be parsed. A missing tool is the command's own answer
+          // (`@@RVS-PORTS none`), not an error.
+          if (result.error !== undefined) {
+            writeJson(res, 502, { error: result.error })
+            return
+          }
+          // A capped/dead run must not be parsed as a complete one: `timedOut`
+          // means the exec deadline cut the command (a partial `ss` table would
+          // read as "these are all the ports"), and a null exit code means the
+          // channel closed without telling us how the command ended. Both are
+          // "cannot enumerate", which the panel renders as an explanation.
+          if (result.timedOut) {
+            writeJson(res, 200, {
+              tool: 'unknown',
+              ports: [],
+              error: `the remote probe did not finish within ${LISTEN_PORTS_TIMEOUT_MS / 1000}s`,
+            })
+            return
+          }
+          if (result.exitCode === null) {
+            writeJson(res, 200, {
+              tool: 'unknown',
+              ports: [],
+              error: 'the remote probe ended without an exit status (the SSH channel closed)',
+            })
+            return
+          }
+          writeJson(res, 200, parseListenPorts(result.stdout, result.exitCode))
+        } catch (error) {
+          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
       },
     },
   ]

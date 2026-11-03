@@ -686,6 +686,69 @@ export class RemotePool {
     }
   }
 
+  /**
+   * Open one direct-tcpip channel to a TCP target reachable FROM the remote
+   * host (`ssh -L` semantics). The caller owns the channel lifecycle.
+   *
+   * Deliberately NOT routed through `acquireSlot`: that table bounds the pool's
+   * own request channels (exec / SFTP) and its ceiling leaves room for the
+   * long-lived channels the pool does not count (PTY terminals, the subprocess
+   * runtime, the helper). A local forward is the same kind of long-lived
+   * channel, so the port panel keeps its own per-alias budget instead.
+   *
+   * A channel-open failure is NOT a connection failure: sshd answers
+   * "administratively prohibited" when forwarding is forbidden and "connect
+   * failed" when the remote port is closed — both on a perfectly healthy link,
+   * and painting the connection chip red for either would send the user to
+   * debug their network. Real transport failures still arrive through the
+   * pooled connection's own close/error events.
+   */
+  async forwardOut(alias: string, dstHost: string, dstPort: number, srcPort = 0): Promise<ClientChannel> {
+    const conn = await this.acquire(alias)
+    this.hold(alias)
+    /**
+     * What the channel-open callback does after the deadline already answered.
+     *
+     * ssh2 has no channel-open timeout (see `openSession`'s note), so the
+     * deadline above can fire while the callback is still in flight. Without
+     * this flag a late success would hand back a channel nobody owns — a
+     * direct-tcpip that outlives every reference to it. The late channel is
+     * closed here instead, and no `close`→`release` handler is attached to it
+     * (the hold was already released by the timeout path).
+     */
+    let settled = false
+    try {
+      const channel = await withDeadline(
+        new Promise<ClientChannel>((resolve, reject) => {
+          conn.forwardOut('127.0.0.1', srcPort, dstHost, dstPort, (error, stream) => {
+            if (settled) {
+              if (error === undefined || error === null) {
+                try {
+                  stream.close()
+                } catch {
+                  // Already gone.
+                }
+              }
+              return
+            }
+            settled = true
+            if (error !== undefined && error !== null) reject(error)
+            else resolve(stream)
+          })
+        }),
+        CONTROL_TIMEOUT_MS,
+        `forwarding channel to ${dstHost}:${dstPort} did not open within ${CONTROL_TIMEOUT_MS / 1000}s`,
+      )
+      channel.once('close', () => this.release(alias))
+      this.markOk(alias)
+      return channel
+    } catch (error) {
+      settled = true
+      this.release(alias)
+      throw error
+    }
+  }
+
   /** Run one callback with a fresh SFTP session (closed afterwards). */
   async withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts: SftpOptions = {}): Promise<T> {
     // An SFTP session IS a channel, so it takes a slot too: the burst that put

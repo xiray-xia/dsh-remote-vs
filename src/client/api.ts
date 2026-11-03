@@ -16,7 +16,10 @@ import {
   type RemoteDeployState,
   type RemoteExecResult,
   type RemoteFileEntry,
+  type RemoteForwardRequest,
+  type RemoteForwardState,
   type RemoteHostSummary,
+  type RemoteListenPortsResult,
   type RemotePluginMeta,
   type RemoteProbe,
   type RemoteRead,
@@ -568,6 +571,41 @@ export const api = {
   importDshSsh: () => post<ImportReport>(REMOTE_API.importDshSsh, {}),
   // -- terminal
   terminalClose: (id: string) => post<{ ok: boolean }>(REMOTE_API.terminalClose, { id }),
+  // -- port forwards (the port panel's `ssh -L` tunnels)
+  /**
+   * Live forwards, narrowed to one host when an alias is given.
+   *
+   * A purely LOCAL read: the Host already holds the tunnels, so the panel can
+   * poll this every few seconds without spending a single remote command.
+   */
+  forwards: (alias?: string) =>
+    call<{ forwards: RemoteForwardState[] }>(
+      alias === undefined || alias === ''
+        ? REMOTE_API.forwards
+        : `${REMOTE_API.forwards}?alias=${encodeURIComponent(alias)}`,
+    ).then(r => r.forwards),
+  /**
+   * Open one forward.
+   *
+   * 400 = the request is not a valid rule, 409 = the local port is taken, 502 =
+   * the tunnel could not be established (a refused `direct-tcpip` included) —
+   * all three arrive as a `RemoteApiError` whose `message` is the Host's own
+   * explanation, which is what the panel shows.
+   */
+  startForward: (request: RemoteForwardRequest) =>
+    post<{ forward: RemoteForwardState }>(REMOTE_API.forwards, request).then(r => r.forward),
+  /** Close one forward by its rule id. */
+  stopForward: (id: string) =>
+    call<{ ok: boolean }>(`${REMOTE_API.forwards}?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /**
+   * One bounded probe of the remote host's listening TCP sockets.
+   *
+   * Costs one remote exec, so the panel asks rarely; `tool: 'none' | 'unknown'`
+   * is an honest "cannot enumerate" answer and must not be rendered as "none
+   * found" (see `RemoteListenPortsResult`).
+   */
+  listenPorts: (alias: string) =>
+    call<RemoteListenPortsResult>(`${REMOTE_API.listenPorts}?alias=${encodeURIComponent(alias)}`),
   // -- git (over the exec route; parsed in the browser, no host changes)
   // Timeouts come from the effective setting: status/log on a huge cold tree
   // routinely exceed the old fixed 120 s, and the client deadline used to cut

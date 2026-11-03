@@ -5,7 +5,7 @@
 中文 | [English](./README.en.md)
 
 Host 进程内的 SSH 主机管理 + helper 推送流水线 + **VS Code 式远端工作台**
-（资源管理器 / 搜索 / 源代码管理 / 提交图与提交详情面板 / 多标签编辑器 / 悬浮编辑器 / 并排 Diff / 多终端）。
+（资源管理器 / 搜索 / 源代码管理 / 提交图与提交详情面板 / 多标签编辑器 / 悬浮编辑器 / 并排 Diff / 多终端 / 端口转发）。
 主机配在 DSH 设置里（“远程主机”项）；装了 `dsh-better-sidebar` 时另有
 独立“远程”tab，没装则退到原生右侧栏“远程”页（同内容，引导页自助开，per-session 实例）。
 编辑器还额外挂到会话视图槽，与“对话 / 轨迹”并列成一个**远程编辑器**标签，
@@ -93,6 +93,7 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | 跳转 | 从搜索结果点进文件 → 跳到该行 + 垂直居中 + **落地行高亮**（约 2.6 秒后淡出）；同文件反复跳都生效 |
 | 多终端 | 标签式多终端（`+` 新建、`✕`/中键关闭带确认）、可跨主机；刷新页面按 session id 自动重连回原会话，**socket 全断开后会话保留 10 分钟**（够刷新、够切浏览器标签页接回），超时才关闭远端 shell；**socket 断开（而不是 shell 退出）时会话保留、可一键接回**（同一 session id 重连，Host 侧仍按上面 10 分钟 TTL 回收），只有真正退出才清会话 |
 | 工作区 | 绑定列表 + 路由档位下拉 + 新建工作区双模向导（本地 / 远端）；**解绑前确认**（会话与历史仍可读，新的远端调用会被拒绝） |
+| 端口转发 | 侧边栏「端口」页：列出远端监听端口（`ss`，没有则 `netstat`），对任一端口**一键转发到本地**、复制本地 URL、在浏览器打开；也支持手动「远端地址:端口 → 本地端口（可自动分配）」规则。**本地只监听 `127.0.0.1`**（`ssh -L` 语义，不暴露到局域网）；每条转发有自己的通道预算，不占池里的 6 个执行/SFTP 通道；SSH 掉线或闲置回收后，下一条本地连接自动重拨而不影响监听；规则存浏览器（刷新后恢复），可逐条停止；关闭插件、删除主机、卸载插件都会释放本地端口。远端既没有 `ss` 也没有 `netstat`、或探测超时/中断时，明确显示「无法枚举」而不是空列表 |
 
 ### 主机与通道
 
@@ -134,6 +135,8 @@ dsh_remote_vs/
 │   ├── importers.ts        # ssh_config / dsh-ssh.json 解析导入
 │   ├── routes.ts           # /api/dsh-remote/* 路由表 + 终端 WebSocket 升级
 │   ├── terminal.ts         # PTY 会话注册表（刷新重连/断开清理）
+│   ├── forward.ts          # 本地端口转发管理器（direct-tcpip 通道/每规则监听器/连接预算）
+│   ├── listen-ports.ts     # 远端监听端口探测（ss/netstat 命令 + 纯解析器）
 │   ├── tools.ts            # 5 个 Agent 工具定义
 │   ├── http.ts / loopback.ts # JSON 体读写 + 回环信任围栏
 │   ├── git-format.ts       # git 命令构造 + 纯前端解析（Host 零增量）
@@ -189,7 +192,7 @@ dsh_remote_vs/
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # 远端 @引用/选中加对话
 │       ├── ai-review.ts    # AI 审查 prompt 构造（单文件 diff / 整提交，按字节分级，纯函数）
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
-│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / Dialog
+│       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
 │       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表，自取数）
 │       ├── DirectoryFlow.tsx        # 原生入口 occupant（本地双模/远端向导）
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
@@ -197,7 +200,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.16.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.17.0）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
@@ -343,6 +346,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 - 推送物逐包验 sha256（tarball 进、binary 出，双重校验）；helper 安装目录与工作区分开；sidecar 的 `version`、平台与 tarball 路径都走白名单校验（不内插未校验字符串到远端 shell 行），安装失败会保留上一版。
 - 主机配置写入走 fsync + 变更戳复核（读-改-写窗口内被别的进程改过会重放，而不是静默覆盖）。
 - 远端会话可读显式本机绝对路径（工具 spill 文件契约要求）；同模型信任下可接受，属已知取舍，本地维护文档有记录。
+- **端口转发只绑 `127.0.0.1`**：本机其他进程能连它是 `ssh -L` 的既定语义（信任边界是本机用户账户）。目标地址由**远端主机**拨号，因此可访问远端内网；「在浏览器中打开」固定按 `http://` 生成，转发 HTTPS 服务需手工改成 `https://`。
 
 ## 开发
 

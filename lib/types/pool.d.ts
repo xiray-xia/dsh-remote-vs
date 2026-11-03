@@ -129,6 +129,24 @@ export declare class RemotePool {
     shell(alias: string, opts?: ShellOptions): Promise<ClientChannel>;
     /** Open one exec channel. The caller owns the channel lifecycle. */
     execChannel(alias: string, command: string): Promise<ClientChannel>;
+    /**
+     * Open one direct-tcpip channel to a TCP target reachable FROM the remote
+     * host (`ssh -L` semantics). The caller owns the channel lifecycle.
+     *
+     * Deliberately NOT routed through `acquireSlot`: that table bounds the pool's
+     * own request channels (exec / SFTP) and its ceiling leaves room for the
+     * long-lived channels the pool does not count (PTY terminals, the subprocess
+     * runtime, the helper). A local forward is the same kind of long-lived
+     * channel, so the port panel keeps its own per-alias budget instead.
+     *
+     * A channel-open failure is NOT a connection failure: sshd answers
+     * "administratively prohibited" when forwarding is forbidden and "connect
+     * failed" when the remote port is closed — both on a perfectly healthy link,
+     * and painting the connection chip red for either would send the user to
+     * debug their network. Real transport failures still arrive through the
+     * pooled connection's own close/error events.
+     */
+    forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number): Promise<ClientChannel>;
     /** Run one callback with a fresh SFTP session (closed afterwards). */
     withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts?: SftpOptions): Promise<T>;
     /**
