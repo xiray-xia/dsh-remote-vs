@@ -37,9 +37,9 @@ dsh plugin --profile web add dsh-remote-vs
 (From npm, recommended; installing straight from the repository also works:
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
-Requires DSH `0.2.2-alpha.2` or newer (`engines.dsh` enforces the range; **the tested
-baseline is `0.2.2-alpha.2`**). Older Hosts (`0.2.1-rc.2` generation) need plugin `0.9.3`: the
-Remote preset of this version uses the `0.2.2-alpha.2` tool schema. `--profile web` selects which profile to install into —
+**Requires DSH `0.2.2-alpha.3` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
+**the tested baseline is `0.2.2-alpha.3`**). On Host `0.2.2-alpha.2` use plugin `0.17.0` (or
+upgrade DSH first); the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
 profile instead — see [Desktop](#desktop-dsh-desktop) below.
@@ -74,7 +74,7 @@ Install either way:
 `desktop` is reserved for the Electron application: an **npm-installed `dsh` cannot manage
 it** (it answers `profile "desktop" is managed exclusively by the Electron application`),
 so one of the two routes above is required. The Desktop release version equals the DSH
-runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-alpha.2`; check About);
+runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-alpha.3`; check About);
 older releases make the Plugins page refuse the install. Desktop opens no visible Web
 port, but the plugin's HTTP routes and terminal socket are forwarded through Desktop's
 Host (the terminal resolves its address from `__DSH_TRANSPORT__.streamBaseUrl`), so no
@@ -215,7 +215,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.17.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.18.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
@@ -369,7 +369,7 @@ over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one H
 Upstream never published helper binaries (all Release assets are empty), so this plugin builds its own:
 
 - Build machine: WSL2 Ubuntu-22.04 (glibc 2.35, matching the remote targets), Node v24.21.0 + pnpm 11.28.5
-- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — our protocol is still **2**, so a Host upgrade to `0.2.2-alpha.2` needs no rebuild either: the plugin intentionally stays on `dsh-ssh@0.2.1-rc.2`, and the new generation's protocol 3 is deliberately not followed — see §2.26 of the maintenance notes)
+- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — our protocol is still **2**, so a Host upgrade to `0.2.2-alpha.3` needs no rebuild either: the plugin intentionally stays on `dsh-ssh@0.2.1-rc.2`, and the new generation's protocol 3 is deliberately not followed — see §2.26 of the maintenance notes)
 - Command: stock script `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
 - Only deviation: no docker for the manylinux 2.28 rebuild, so a `DSH_GLIBC_CEILING`
   env override was added (default stays 2.28); this build targets 2.35 (see `glibc-ceiling.patch` in the cache dir)

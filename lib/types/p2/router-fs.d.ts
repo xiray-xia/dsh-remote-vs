@@ -5,7 +5,7 @@
  * extra fields); unknown targets fail closed.
  */
 import { FileSystem } from '@deepseek-ai/dsh-fs';
-import type { FsDirEntry, FsEditOutcome, FsEditRequest, FsInfo, FsPathInfo, FsTarget, FsVersion, FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs';
+import type { FsDeleteOutcome, FsDirEntry, FsEditOutcome, FsEditRequest, FsInfo, FsMoveOutcome, FsPathInfo, FsTarget, FsVersion, FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs';
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox';
 export default class TransparentFileSystem extends FileSystem {
     static inject: string[];
@@ -88,5 +88,21 @@ export default class TransparentFileSystem extends FileSystem {
     editText(target: FsTarget, edit: FsEditRequest, expected?: {
         version: FsVersion;
     }, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsEditOutcome>;
+    /**
+     * alpha.3 added patch/delete/move to the FileSystem contract for the
+     * apply_patch tool. Local providers implement all three; the deliberately
+     * pinned protocol-2 remote backend (dsh-fs-ssh 0.2.1-rc.2) predates them, so
+     * remote targets get a typed error instead of a TypeError. The apply_patch
+     * tool is off by default in every stock preset (alpha.3 dsh-base and presets
+     * pin `applyPatch: false`), so this only matters when it is enabled.
+     */
+    private unsupportedRemote;
+    patchText(target: FsTarget, hunks: Parameters<FileSystem['patchText']>[1], expected?: {
+        version: FsVersion;
+    }, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsEditOutcome>;
+    deleteFile(target: FsTarget, expected?: {
+        version: FsVersion;
+    }, signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsDeleteOutcome>;
+    moveFile(source: FsTarget, destination: FsTarget, options: Parameters<FileSystem['moveFile']>[2], signal?: AbortSignal, sandboxPolicy?: SandboxExecutionPolicy): Promise<FsMoveOutcome>;
     watch(target: FsTarget, changed: (error?: Error) => void, signal: AbortSignal): Promise<() => Promise<void>>;
 }

@@ -111,6 +111,11 @@
                 name: '@deepseek-ai/dsh-tool-bash'
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              # alpha.3 stock pins this explicitly; false is the alpha.3 default.
+              # Kept explicit so the remote mirror cannot silently grow apply_patch
+              # (its remote half is protocol-2 and has no patch/delete/move yet).
+              applyPatch: false
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:

@@ -6,10 +6,12 @@
  */
 import { FileSystem, FsError, type FsErrorCode } from '@deepseek-ai/dsh-fs'
 import type {
+  FsDeleteOutcome,
   FsDirEntry,
   FsEditOutcome,
   FsEditRequest,
   FsInfo,
+  FsMoveOutcome,
   FsPathInfo,
   FsTarget,
   FsVersion,
@@ -318,6 +320,62 @@ export default class TransparentFileSystem extends FileSystem {
   ): Promise<FsEditOutcome> {
     const { fs, world } = await this.backendOf(target)
     return fs.editText(target, edit, expected, signal, this.remote.rewritePolicy(sandboxPolicy, world))
+  }
+
+  /**
+   * alpha.3 added patch/delete/move to the FileSystem contract for the
+   * apply_patch tool. Local providers implement all three; the deliberately
+   * pinned protocol-2 remote backend (dsh-fs-ssh 0.2.1-rc.2) predates them, so
+   * remote targets get a typed error instead of a TypeError. The apply_patch
+   * tool is off by default in every stock preset (alpha.3 dsh-base and presets
+   * pin `applyPatch: false`), so this only matters when it is enabled.
+   */
+  private unsupportedRemote(what: string): FsError {
+    return new FsError(
+      `${what} is not supported on remote workspaces yet (fs-ssh protocol 2); run it in a local workspace`,
+      'FS_IO_ERROR',
+    )
+  }
+
+  async patchText(
+    target: FsTarget,
+    hunks: Parameters<FileSystem['patchText']>[1],
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsEditOutcome> {
+    const { fs, world } = await this.backendOf(target)
+    if (typeof fs.patchText !== 'function') throw this.unsupportedRemote('apply_patch')
+    return fs.patchText(target, hunks, expected, signal, this.remote.rewritePolicy(sandboxPolicy, world))
+  }
+
+  async deleteFile(
+    target: FsTarget,
+    expected?: { version: FsVersion },
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsDeleteOutcome> {
+    const { fs, world } = await this.backendOf(target)
+    if (typeof fs.deleteFile !== 'function') throw this.unsupportedRemote('deleting files')
+    return fs.deleteFile(target, expected, signal, this.remote.rewritePolicy(sandboxPolicy, world))
+  }
+
+  async moveFile(
+    source: FsTarget,
+    destination: FsTarget,
+    options: Parameters<FileSystem['moveFile']>[2],
+    signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
+  ): Promise<FsMoveOutcome> {
+    const { fs, world } = await this.backendOf(source)
+    const destinationWorld = this.worlds.get(destination)
+    const sameWorld =
+      destinationWorld !== undefined &&
+      destinationWorld.kind === world.kind &&
+      (world.kind === 'local' || (destinationWorld.kind === 'remote' && destinationWorld.id === world.id))
+    if (!sameWorld) throw new FsError('cannot move a file across local and remote worlds', 'FS_IO_ERROR')
+    if (typeof fs.moveFile !== 'function') throw this.unsupportedRemote('moving files')
+    return fs.moveFile(source, destination, options, signal, this.remote.rewritePolicy(sandboxPolicy, world))
   }
 
   async watch(target: FsTarget, changed: (error?: Error) => void, signal: AbortSignal): Promise<() => Promise<void>> {

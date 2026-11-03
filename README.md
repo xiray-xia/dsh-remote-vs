@@ -34,8 +34,8 @@ dsh plugin --profile web add dsh-remote-vs
 
 （从 npm 装，推荐；也可以直接跟仓库装：`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`。）
 
-要求 DSH `0.2.2-alpha.2` 及以上（`engines.dsh` 门到底；**当前实测基线 `0.2.2-alpha.2`**）。
-旧 Host（`0.2.1-rc.2` 一代）请用插件 `0.9.3`：新版的 Remote 预设用了 `0.2.2-alpha.2` 的工具 schema。
+**需要 DSH `0.2.2-alpha.3` 及以上、`0.3.0` 以下**（`engines.dsh` 门到底；当前实测基线 `0.2.2-alpha.3`）。
+Host 仍是 `0.2.2-alpha.2` 的请用插件 `0.17.0`（或先把 DSH 升到 `0.2.2-alpha.3`）；`0.2.1-rc.2` 一代请用 `0.9.3`。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
 要装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）；
 桌面端用的是保留 profile `desktop`，见下面「桌面端」。
@@ -63,7 +63,7 @@ dsh plugin --profile web add dsh-remote-vs
 注意：`desktop` 是桌面端独占的保留 profile，**npm 全局安装的 `dsh` 不能管理它**
 （会报 `profile "desktop" is managed exclusively by the Electron application`），
 只能走上面两条路径。桌面端的版本号等于它捆绑的 DSH 运行时版本，同样要满足
-`engines.dsh` 要求（`>=0.2.2-alpha.2`，关于面板可看）；低于该版本时插件页会直接拒绝
+`engines.dsh` 要求（`>=0.2.2-alpha.3`，关于面板可看）；低于该版本时插件页会直接拒绝
 安装。桌面端没有可见的 Web 端口，但本插件的 HTTP 路由与终端 socket 都经桌面端的
 Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无需额外设置。
 
@@ -200,7 +200,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.17.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.18.0）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
@@ -329,7 +329,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 
 - 构建机：WSL2 Ubuntu-22.04（glibc 2.35，与目标远端一致），Node v24.21.0 + pnpm 11.28.5
 - 源码：`dsh-v0.2.1-alpha.2` tag（**构建基线**：对齐的是 wire 协议号，不是 Host 版本号 —— 我们用到的
-  协议号仍是 **2**，Host 升到 `0.2.2-alpha.2` 也不需要重编：插件自行停在 `dsh-ssh@0.2.1-rc.2`，
+  协议号仍是 **2**，Host 升到 `0.2.2-alpha.3` 也不需要重编：插件自行停在 `dsh-ssh@0.2.1-rc.2`，
   新 Host 那一代 `dsh-ssh` 的协议 3 我们故意不跟，差异见维护文档 §2.26）
 - 命令：官方原脚本 `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
 - 唯一偏离：无 docker 跑不了 manylinux 2.28 重编，加了 `DSH_GLIBC_CEILING`
