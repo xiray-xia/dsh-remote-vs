@@ -25,6 +25,7 @@
   --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
   --rvs-accent: var(--dsw-alias-button-info-fill, #4d6bfe);
   --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-ok: #2ea043;
   --rvs-git-m: #e2b714;
   --rvs-git-a: #4ec9b0;
   --rvs-git-d: #f14c4c;
@@ -4162,6 +4163,469 @@ body[data-ds-dark-theme] .rvs-execpanel {
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------- host monitor */
+
+/**
+ * The monitor panel is cross-host (not bound to the workspace): one card for a
+ * single subject, a compact clickable list for "all hosts". Values are
+ * tabular-nums so a 5 s refresh does not make the text dance.
+ */
+.rvs-monitor-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 8px 14px;
+  /* Container for the narrow-sidebar layout rules at the end of this section. */
+  container-type: inline-size;
+}
+
+/* The rail title and the scope picker both wanted flex:1; the title yields so
+   the picker keeps enough width for its own label at 230px. */
+.rvs-monitor-header .rvs-title {
+  flex: none;
+}
+
+/* The panel's own settings (refresh interval). Shown under the header only
+   while the gear is active; it is chrome, not a modal, so the live values stay
+   visible above it. */
+.rvs-monitor-settings {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rvs-border);
+  background: var(--rvs-layer3);
+}
+
+.rvs-monitor-settings-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rvs-monitor-settings-label {
+  color: var(--rvs-fg2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rvs-monitor-settings-hint {
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+}
+
+.rvs-monitor-settings .rvs-seg {
+  align-self: flex-start;
+}
+
+.rvs-monitor-card {
+  margin: 2px 0 8px;
+  padding: 10px;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 9px;
+  background: var(--rvs-layer3);
+}
+
+.rvs-monitor-card.error {
+  border-color: rgba(224, 85, 85, .45);
+}
+
+.rvs-monitor-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rvs-monitor-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rvs-fg3);
+}
+
+.rvs-monitor-dot.ok {
+  background: var(--rvs-ok, #2ea043);
+}
+
+.rvs-monitor-dot.error {
+  background: var(--rvs-danger);
+}
+
+.rvs-monitor-title {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--rvs-fg);
+}
+
+.rvs-monitor-conn {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+}
+
+.rvs-monitor-sub {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.rvs-monitor-state {
+  flex: none;
+  font-weight: 600;
+}
+
+.rvs-monitor-state.ok {
+  color: var(--rvs-ok, #2ea043);
+}
+
+.rvs-monitor-state.error {
+  color: var(--rvs-danger);
+}
+
+.rvs-monitor-state.unknown {
+  color: var(--rvs-fg3);
+}
+
+.rvs-monitor-age {
+  color: var(--rvs-fg3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rvs-monitor-reason {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--rvs-fg2);
+  line-height: 1.45;
+}
+
+.rvs-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rvs-monitor-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 7px;
+  background: var(--rvs-hover);
+}
+
+.rvs-monitor-tile-label {
+  color: var(--rvs-fg2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.rvs-monitor-tile-value {
+  color: var(--rvs-fg);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.rvs-monitor-tile-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rvs-fg2);
+  font-size: 10.5px;
+}
+
+.rvs-monitor-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--rvs-border);
+  overflow: hidden;
+}
+
+.rvs-monitor-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--rvs-brand);
+  transition: width .35s ease;
+}
+
+.rvs-monitor-bar-fill.warn {
+  background: var(--rvs-git-m);
+}
+
+.rvs-monitor-bar-fill.hot {
+  background: var(--rvs-danger);
+}
+
+/* Four facts: a 2×2 block reads calmer than three-then-one with auto-fit. */
+.rvs-monitor-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.rvs-monitor-fact {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 7px;
+}
+
+.rvs-monitor-fact-label {
+  color: var(--rvs-fg2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.rvs-monitor-fact-value {
+  color: var(--rvs-fg);
+  font-size: 11.5px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.rvs-monitor-sparks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rvs-monitor-spark {
+  min-width: 0;
+  padding: 6px 8px 4px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 7px;
+}
+
+.rvs-monitor-spark-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rvs-monitor-spark-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+}
+
+.rvs-monitor-spark-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rvs-monitor-spark-line {
+  display: inline-block;
+  width: 10px;
+  height: 0;
+  border-top: 2px solid currentColor;
+}
+
+.rvs-monitor-spark-line.tx {
+  border-top-style: dashed;
+  opacity: .7;
+}
+
+.rvs-monitor-spark-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rvs-fg2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.rvs-monitor-spark svg {
+  display: block;
+  width: 100%;
+  height: 34px;
+  margin-top: 2px;
+}
+
+.rvs-monitor-spark.cpu {
+  color: var(--rvs-brand);
+}
+
+.rvs-monitor-spark.mem {
+  color: var(--rvs-git-a);
+}
+
+.rvs-monitor-spark.net {
+  color: var(--rvs-git-c);
+}
+
+.rvs-monitor-spark.temp {
+  color: var(--rvs-git-m);
+}
+
+.rvs-monitor-spark-empty {
+  padding: 8px 0 4px;
+  text-align: center;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+}
+
+.rvs-monitor-hint {
+  margin-top: 8px;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rvs-monitor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rvs-monitor-summary {
+  padding: 0 2px 4px;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+.rvs-monitor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 8px;
+  background: var(--rvs-layer3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-monitor-row:hover {
+  border-color: var(--rvs-border2);
+  background: var(--rvs-hover);
+}
+
+.rvs-monitor-row.error {
+  border-color: rgba(224, 85, 85, .45);
+}
+
+.rvs-monitor-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rvs-monitor-row-name {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.rvs-monitor-row-host {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+}
+
+.rvs-monitor-row-cpu {
+  flex: none;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.rvs-monitor-row-bars {
+  display: flex;
+  gap: 4px;
+}
+
+.rvs-monitor-row-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--rvs-border);
+  overflow: hidden;
+}
+
+.rvs-monitor-row-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------- narrow sidebar (<=260px)
+   Container queries, not media queries: the rail is narrow while the WINDOW is
+   wide. Reactions: the three gauges stack (an orphan grid cell with ~90px of
+   empty space next to it looked broken), the four curves go 2×2 instead of a
+   single tall column, and the all-hosts facts become a 2×2 grid so row heights
+   stay uniform. */
+@container (max-width: 260px) {
+  .rvs-monitor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rvs-monitor-sparks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rvs-monitor-row-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* A 2-column spark is ~80px wide; the label must win over the legend there. */
+  .rvs-monitor-spark-legend {
+    display: none;
+  }
 }
 
 /* ------------------------------------------------------ Ctrl+P quick open */

@@ -257,6 +257,14 @@ export declare const api: {
      * found" (see `RemoteListenPortsResult`).
      */
     listenPorts: (alias: string) => Promise<RemoteListenPortsResult>;
+    /**
+     * One host's live metrics sample.
+     *
+     * `refresh` bypasses the Host's few-second reuse window (manual refresh).
+     * The route always answers one entry for `alias`; a host that disappeared
+     * between the panel's host list and this call is a normal 404.
+     */
+    hostMetrics: (alias: string, refresh?: boolean) => Promise<import("../protocol.ts").RemoteHostMetrics>;
     git: {
         status(alias: string, path: string): Promise<GitStatus>;
         log(alias: string, path: string, max: number, branch?: string): Promise<GitCommit[]>;

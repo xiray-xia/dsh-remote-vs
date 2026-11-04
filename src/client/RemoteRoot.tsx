@@ -17,6 +17,7 @@ import { EditorPane } from './EditorPane.tsx'
 import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
 import { PortsView, IconPlug } from './PortsView.tsx'
+import { MonitorView, IconMonitor } from './MonitorView.tsx'
 import { QuickOpen } from './QuickOpen.tsx'
 import { RemoteExplorer } from './RemoteExplorer.tsx'
 import { SearchView } from './SearchView.tsx'
@@ -38,7 +39,7 @@ import {
   MiniSpinner,
 } from './vsc/kit.tsx'
 
-type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'workspaces'
+type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'monitor' | 'workspaces'
 
 const SPLIT_KEY = 'dsh-remote-vs.split'
 const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
@@ -302,7 +303,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   // A profile with no binding has nothing to explore: the workspaces view (the
   // wizard) takes over until one exists.
   useEffect(() => {
-    if (store.workspaces.length === 0 && view !== 'workspaces') go('workspaces')
+    if (store.workspaces.length === 0 && view !== 'workspaces' && view !== 'monitor') go('workspaces')
   }, [store.workspaces.length, view, go])
 
   /**
@@ -434,6 +435,11 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         // Same shape as the terminal: its own header (host picker + refresh) and
         // its own scroller, so no viewpad wrapper either.
         return <PortsView t={t} hosts={store.hosts} visible={panelLive('ports')} />
+      case 'monitor':
+        // Live host metrics: own header (scope picker + refresh/pause) and its
+        // own scroller. Cross-host by design, so it reads `store.hosts` rather
+        // than the current binding.
+        return <MonitorView t={t} hosts={store.hosts} visible={panelLive('monitor')} />
       case 'workspaces':
         return (
           <div className="rvs-viewpad" style={{ height: '100%' }}>
@@ -521,6 +527,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           && railButton('editor', store.activeTab?.rel.split('/').pop() ?? t('tab.editor'), <IconDiff size={17} />, store.tabs.length)}
         {railButton('terminal', t('tab.terminal'), <IconTerminal size={17} />)}
         {railButton('ports', t('tab.ports'), <IconPlug size={17} />)}
+        {railButton('monitor', t('tab.monitor'), <IconMonitor size={17} />)}
         {railButton('workspaces', t('tab.workspaces'), <IconServer size={17} />, store.workspaces.length)}
       </div>
       <div className="rvs-column" ref={columnRef}>

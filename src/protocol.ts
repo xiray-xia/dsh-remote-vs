@@ -38,6 +38,8 @@ export const REMOTE_API = {
   forwards: '/api/dsh-remote/forwards',
   /** Remote listening TCP sockets for the port panel (one bounded probe). */
   listenPorts: '/api/dsh-remote/listen-ports',
+  /** Live system metrics for the monitor panel (one bounded probe per host). */
+  metrics: '/api/dsh-remote/metrics',
 } as const
 
 /**
@@ -631,4 +633,59 @@ export interface RemoteListenPortsResult {
   ports: RemoteListenPort[]
   /** Why the probe could not be used, when it could not. */
   error?: string
+}
+
+/**
+ * How one host metrics sample ended.
+ *
+ * `ok` = the probe answered and at least one metric was readable; `unknown` =
+ * the command ran but could not be trusted (timeout, missing markers, a host
+ * that is not Linux); `error` = the command never produced a usable answer
+ * (transport failure). `null` fields inside an `ok` sample mean "this host does
+ * not expose that metric" — the UI must render them as unknown, never as zero.
+ */
+export type RemoteMetricsState = 'ok' | 'unknown' | 'error'
+
+/**
+ * One host's live system metrics, sampled by the Host over the existing SSH
+ * channel (a single bounded POSIX probe; no helper and no Python on the remote).
+ *
+ * `cpuPercent`, `netRxBps` and `netTxBps` are deltas over the previous sample:
+ * the first sample has them null on purpose (a made-up 0% would be a lie). The
+ * Host caches a sample for a few seconds, so a poll storm costs one channel.
+ */
+export interface RemoteHostMetrics {
+  alias: string
+  state: RemoteMetricsState
+  /** Why the state is not `ok`; never empty then. */
+  reason?: string
+  /** Host clock when the sample was taken (epoch ms). */
+  sampledAt: number
+  /** `uname -srm` (`Linux 6.1.0 x86_64`), or null when unreadable. */
+  kernel: string | null
+  cpuCores: number | null
+  cpuModel: string | null
+  ip: string | null
+  uptimeSeconds: number | null
+  load1: number | null
+  load5: number | null
+  load15: number | null
+  /** Busy CPU over the previous sample, 0–100. */
+  cpuPercent: number | null
+  memUsedBytes: number | null
+  memTotalBytes: number | null
+  memPercent: number | null
+  diskUsedBytes: number | null
+  diskTotalBytes: number | null
+  diskPercent: number | null
+  /** The first thermal zone in °C when the host exposes one (many VMs do not). */
+  temperatureC: number | null
+  /** Receive/transmit bytes per second since the previous sample. */
+  netRxBps: number | null
+  netTxBps: number | null
+}
+
+/** The monitor route's answer (`alias` omitted = every configured host). */
+export interface RemoteMetricsResult {
+  hosts: RemoteHostMetrics[]
 }

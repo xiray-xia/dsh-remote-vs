@@ -219,7 +219,7 @@ interface State {
 }
 
 /** The sidebar rail destinations. */
-export type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'workspaces'
+export type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'monitor' | 'workspaces'
 
 /** One "search this folder" request coming from the tree. */
 export interface SearchRequest {
@@ -415,7 +415,7 @@ function readStoredView(): RailView {
   try {
     const saved = localStorage.getItem(VIEW_KEY)
     if (saved === 'explorer' || saved === 'search' || saved === 'scm' || saved === 'history'
-      || saved === 'editor' || saved === 'terminal' || saved === 'ports' || saved === 'workspaces') {
+      || saved === 'editor' || saved === 'terminal' || saved === 'ports' || saved === 'monitor' || saved === 'workspaces') {
       return saved
     }
   } catch {

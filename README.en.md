@@ -120,6 +120,7 @@ extra configuration is needed.
 | Remote files | SFTP browse / read / write / create / delete / rename. Boundaries hardened: 0-byte files no longer deadlock, and every SFTP operation times out at 60s and releases its channel; **a single directory listing is capped at 20000 entries** (the first 20000 after sorting — directories first, then names — announced in the host log; the protocol carries no "truncated" field, so the UI has no marker); **a save goes through a side file and a rename** (server-side `posix-rename` when available, otherwise backup-rename-rollback), **writes through symlinks** (the link itself survives) and keeps the mode bits **on a best-effort basis**; SCM status parsing unquotes git's C-quoted paths (any name with whitespace is quoted) |
 | Remote terminal | ssh2 PTY + WebSocket, xterm rendering (copy-paste/theme-follow/reconnect-on-refresh); **a reattach only takes over, it does not resize** (a page reload no longer shrinks a running shell to 80×24); an output backlog applies real backpressure to the far end; **frames are capped at 1 MiB**, and pastes past 64 Ki characters are chunked on code points by the client instead of dropping the connection |
 | Concurrent channels | At most **6** remote channels per host at a time (no longer colliding with the far end's sshd `MaxSessions`); the 7th queues for up to **30 seconds** and then fails with `remote host <alias> is busy` instead of piling on connections |
+| Monitor | A sidebar **"Monitor"** page samples one host or every host **only while the panel and the page are visible**, at the configured refresh interval (5 s by default; 5/10/30 s in its settings): CPU, memory, disk, load, network rate, temperature and uptime, with 60-point history curves plus manual refresh and pause. The scope is "current host / a named host / all hosts" and survives a reload. The **first sample reports CPU% and the network rate as unknown** (both are deltas and need a second sample), and a non-Linux host shows unknown instead of 0. The Host caches one sample per alias for 3 seconds and joins concurrent requests, so one sample uses one exec channel and never the port-forward budget. Samples live in memory only — nothing is written to disk |
 | Timeouts and process cleanup | Ordinary git commands default to 300 s (configurable); the **network verbs (fetch/pull/push/sync) default to 20 minutes with a 30-minute ceiling**. exec runs in its own session (`setsid --wait`); on timeout OR cancel it sends TERM and **escalates to KILL after 3 seconds**, reaping the child processes with it; a host without `setsid --wait` is detected by a one-shot probe and falls back to the old behaviour, with a host-log line saying the timed-out remote command may still be running; **directory / multi-selection archive downloads carry a 600 s server-side budget** (remote `timeout -k 3 600`; a host without GNU `timeout` falls back to the unbudgeted old behaviour) and fail with the real reason when it expires |
 | Git graph | Remote repo status + branches + SVG commit graph + commit details/contents/diff pane (exec + frontend parsing, zero Host additions) |
 | Import | One-click import from `~/.ssh/config` and from an existing `dsh-ssh.json` (read once, no coupling); `Host a b` multi-pattern entries are expanded one by one, `Include` is reported as not expanded instead of being silently dropped, and every skipped host names an actionable reason (no User / no IdentityFile / invalid port …) |
@@ -152,6 +153,8 @@ dsh_remote_vs/
 │   ├── terminal.ts         # PTY session registry (reconnect-on-refresh/disconnect cleanup)
 │   ├── forward.ts          # local port-forward manager (direct-tcpip channels / one listener per rule / budgets)
 │   ├── listen-ports.ts     # remote listening-port probe (ss/netstat command + pure parser)
+│   ├── metrics.ts          # host-monitor probe (one POSIX /proc command + pure parse/CPU·net deltas)
+│   ├── monitor.ts          # monitor sampler (per-alias TTL cache/in-flight join/counters/forget)
 │   ├── tools.ts            # the 5 Agent tool definitions
 │   ├── http.ts / loopback.ts # JSON body IO + loopback trust fence
 │   ├── git-format.ts       # git command builders + pure frontend parsing (zero Host additions)
@@ -207,6 +210,8 @@ dsh_remote_vs/
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # remote @refs/selection-to-chat
 │       ├── ai-review.ts    # AI review prompt builder (single diff / whole commit, byte tiers, pure)
 │       ├── api.ts          # typed fetch wrapper over /api/dsh-remote
+│       ├── MonitorView.tsx # monitor panel (one/all hosts, curves, pause/refresh, persisted scope)
+│       ├── metrics-model.ts # monitor model (history window/sparkline geometry/capacity+rate formatting)
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
 │       ├── SettingsHosts.tsx        # settings occupants (host mgmt/binding list, self-fetching)
 │       ├── DirectoryFlow.tsx        # native entry occupant (local dual-mode/remote wizard)
@@ -215,7 +220,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.18.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.19.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
@@ -292,6 +297,11 @@ Both surfaces share one state module (`store.tsx`): **the sidebar "Remote" page*
   - A directory listing past 20000 entries is truncated, and since the protocol has no "truncated" field
     the UI shows **no marker at all** — only the host log line
     `listing <path> on <alias> shows 20000 of N entries`.
+    - **Monitor limits**: sampling happens only while the Monitor panel is the visible view AND the page is
+      in the foreground (hidden means zero remote traffic); the complete metric set comes from Linux
+      `/proc`, so other platforms show unknown; temperature exists only when the host exposes a thermal
+      zone (many VMs do not); CPU% and the network rate are deltas, so the **first frame is unknown**;
+      samples live in memory only and the curves restart after a page reload.
 
 ## Session change review (Cursor style)
 

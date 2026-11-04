@@ -117,7 +117,7 @@ export interface HeadInfo {
     behind: number;
 }
 /** The sidebar rail destinations. */
-export type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'workspaces';
+export type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'monitor' | 'workspaces';
 /** One "search this folder" request coming from the tree. */
 export interface SearchRequest {
     /** Monotonic id so a repeated request still re-triggers the view. */

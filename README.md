@@ -105,6 +105,7 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名。边界已加固：0 字节文件不再卡死，每个 SFTP 操作 60s 超时回收通道；**单个目录列表上限 20000 条**（按"目录在前、其余按名"排序后取前 20000，宿主日志说明——协议里没有"已截断"字段，界面上没有标记）；**保存走侧文件 + 重命名**（优先服务端 `posix-rename`，不支持时备份-重命名-失败回滚），**写穿符号链接**（链接本身保留）并**尽力保留权限位**；SCM 状态解析会反解 git 的 C-quote 路径（凡名字含空格都会被加引号） |
 | 远端终端 | ssh2 PTY + WebSocket，xterm 渲染（复制粘贴/主题跟随/刷新重连）；**重新挂接只接管、不改尺寸**（刷新页面不会把运行中的 shell 缩成 80×24）；输出积压时对远端施加真背压；**单帧上限 1 MiB**，超过 64 Ki 字符的粘贴在客户端按码点分块发送，不再撑断连接 |
 | 并发通道 | 每主机同时最多 **6 条**远端通道（不再撞远端 sshd 的 `MaxSessions`）；第 7 个排队最多等 **30 秒**，超时明确报 `remote host <alias> is busy`，而不是无限堆连接 |
+| 运行监控 | 侧栏「监控」页：**仅在面板可见且页面在前台时**按刷新设置（默认 5 秒，可改 5/10/30 秒）采样一台/全部主机的 CPU、内存、磁盘、负载、网络速率、温度与运行时长，带 60 点历史曲线、手动刷新与暂停；范围可选「当前主机 / 指定主机 / 全部主机」并跨刷新记住。**首帧 CPU% 与网络速率显示「未知」**（差分需要第二帧），Linux 之外的平台如实显示「未知」而不是 0；Host 侧按 alias 缓存 3 秒并合并并发请求，一次采样只占一条执行通道、不占端口转发预算；样本只在内存，不落盘 |
 | 超时与进程清理 | 普通 git 命令默认 300s（设置可调）；**网络动词（fetch/pull/push/sync）默认 20 分钟、上限 30 分钟**。exec 跑在独立会话里（`setsid --wait`），超时/取消都先发 TERM、**3 秒后升级 KILL**，连同子进程一起收掉；远端没有 `setsid --wait` 时探测一次即知，退回旧行为并在宿主日志里写明"超时可能没停掉远端命令"；**目录/多选归档下载有 600 秒服务端预算**（远端 `timeout -k 3 600`；远端没有 GNU `timeout` 时退回无预算的旧行为），超时以真实原因失败 |
 | Git 图谱 | 远端仓库状态 + 分支 + SVG 提交图 + 提交详情/内容/差异面板（exec + 前端解析，零 Host 增量）|
 | 导入 | 从 `~/.ssh/config`、从现有 `dsh-ssh.json` 一键导入（只读一次，不耦合）；`Host a b` 这类多模式条目会逐个展开，`Include` 如实报告为未展开，被跳过的主机会给出可操作原因（缺 User / 缺 IdentityFile / 端口非法等）|
@@ -137,6 +138,8 @@ dsh_remote_vs/
 │   ├── terminal.ts         # PTY 会话注册表（刷新重连/断开清理）
 │   ├── forward.ts          # 本地端口转发管理器（direct-tcpip 通道/每规则监听器/连接预算）
 │   ├── listen-ports.ts     # 远端监听端口探测（ss/netstat 命令 + 纯解析器）
+│   ├── metrics.ts          # 主机监控探针（一条 POSIX /proc 命令 + 纯解析/CPU·网络差分）
+│   ├── monitor.ts          # 监控采样器（按 alias 的 TTL 缓存/单飞/计数器/forget）
 │   ├── tools.ts            # 5 个 Agent 工具定义
 │   ├── http.ts / loopback.ts # JSON 体读写 + 回环信任围栏
 │   ├── git-format.ts       # git 命令构造 + 纯前端解析（Host 零增量）
@@ -192,6 +195,8 @@ dsh_remote_vs/
 │       ├── composer.ts / use-remote-chat-target.ts / selection-popup.ts # 远端 @引用/选中加对话
 │       ├── ai-review.ts    # AI 审查 prompt 构造（单文件 diff / 整提交，按字节分级，纯函数）
 │       ├── api.ts          # /api/dsh-remote 类型化 fetch 封装
+│       ├── MonitorView.tsx # 监控面板（单机/全部主机、曲线、暂停/刷新、范围持久化）
+│       ├── metrics-model.ts # 监控纯模型（历史窗口/Sparkline 几何/容量与速率格式化）
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
 │       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表，自取数）
 │       ├── DirectoryFlow.tsx        # 原生入口 occupant（本地双模/远端向导）
@@ -200,7 +205,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.18.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.19.0）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
@@ -266,6 +271,9 @@ dsh_remote_vs/
     拖住远端命令，也不让宿主内存无界增长）；
   - 目录列表超过 20000 条会被截断，而协议里没有"已截断"字段 ⇒ 界面上没有任何标记，只有宿主日志里的
     `listing <path> on <alias> shows 20000 of N entries`。
+  - **监控的边界**：采样只在「监控」面板可见且页面在前台时进行（隐藏即完全停止，不产生远端流量）；完整指标来自 Linux `/proc`，
+    其它平台显示「未知」；温度只在主机暴露 thermal zone 时有值（很多虚拟机没有）；CPU% 与网络速率是两帧差分，**首帧为未知**；
+    样本只进内存，刷新页面后曲线从头开始。
 
 ## 会话改动审阅（Cursor 式）
 

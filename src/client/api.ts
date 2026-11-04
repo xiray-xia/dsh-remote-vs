@@ -20,6 +20,7 @@ import {
   type RemoteForwardState,
   type RemoteHostSummary,
   type RemoteListenPortsResult,
+  type RemoteMetricsResult,
   type RemotePluginMeta,
   type RemoteProbe,
   type RemoteRead,
@@ -606,6 +607,21 @@ export const api = {
    */
   listenPorts: (alias: string) =>
     call<RemoteListenPortsResult>(`${REMOTE_API.listenPorts}?alias=${encodeURIComponent(alias)}`),
+  /**
+   * One host's live metrics sample.
+   *
+   * `refresh` bypasses the Host's few-second reuse window (manual refresh).
+   * The route always answers one entry for `alias`; a host that disappeared
+   * between the panel's host list and this call is a normal 404.
+   */
+  hostMetrics: (alias: string, refresh = false) =>
+    call<RemoteMetricsResult>(
+      `${REMOTE_API.metrics}?alias=${encodeURIComponent(alias)}${refresh ? '&refresh=1' : ''}`,
+    ).then((result) => {
+      const metrics = result.hosts.find(host => host.alias === alias) ?? result.hosts[0]
+      if (metrics === undefined) throw new RemoteApiError(502, `no metrics for ${alias}`)
+      return metrics
+    }),
   // -- git (over the exec route; parsed in the browser, no host changes)
   // Timeouts come from the effective setting: status/log on a huge cold tree
   // routinely exceed the old fixed 120 s, and the client deadline used to cut

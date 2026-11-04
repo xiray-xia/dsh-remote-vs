@@ -24,6 +24,7 @@ import { migrateDshSsh, parseSshConfig, readDefaultSshConfig, type ParsedImport 
 import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts'
 import { ForwardManager, validateForwardRequest } from './forward.ts'
 import { LISTEN_PORTS_TIMEOUT_MS, listenPortsCommand, parseListenPorts } from './listen-ports.ts'
+import { HostMonitor } from './monitor.ts'
 import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 
@@ -255,6 +256,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   const timeouts = (): RemoteTimeouts => deps.timeouts?.() ?? DEFAULT_TIMEOUTS
   const files = new RemoteFiles(pool)
   const terminalSessions = new TerminalSessionRegistry(pool)
+  // Cache/counters only (no timers, no listeners): a route rebuild losing it
+  // costs one extra sample, so it is safe to construct here instead of owning a
+  // fiber-scoped effect like the forward manager.
+  const monitor = new HostMonitor(pool)
   const forwards = deps.forwards
 
   /**
@@ -409,6 +414,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           // restarts. Close them BEFORE the connection they ride on goes away.
           forwards?.stopAlias(alias)
           pool.forget(alias)
+          monitor.forget(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           if (!store.remove(alias)) {
             writeJson(res, 404, { error: `unknown host alias: ${alias}` })
@@ -427,6 +433,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         }
         try {
           pool.forget(alias)
+          monitor.forget(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           const entry = store.update(alias, body as Partial<HostPayload>)
           writeJson(res, 200, { host: store.summarize(entry) })
@@ -1431,6 +1438,46 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
             return
           }
           writeJson(res, 200, parseListenPorts(result.stdout, result.exitCode))
+        } catch (error) {
+          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    // ------------------------------------------------------- host metrics
+    // Live CPU/RAM/disk/net/temperature for the monitor panel. One bounded
+    // POSIX probe per host (no helper, no Python on the remote); `HostMonitor`
+    // caches a sample for a few seconds and diffs the CPU/net counters, so a
+    // poll storm costs one channel and the first sample honestly says "unknown"
+    // for the two deltas instead of inventing numbers.
+    //
+    // `alias` selects one host; omitting it samples every configured host (the
+    // panel asks per host, so this is a convenience/tooling shape, not a
+    // browser fan-out). Loopback-fenced like every other route.
+    {
+      kind: 'exact',
+      path: REMOTE_API.metrics,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { error: `method not allowed: ${req.method}` })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = queryParam(url, 'alias')
+        const refresh = queryParam(url, 'refresh') === '1'
+        if (alias !== undefined && alias !== '' && store.get(alias) === undefined) {
+          writeJson(res, 404, { error: `unknown host alias: ${alias}` })
+          return
+        }
+        const aliases = alias === undefined || alias === ''
+          ? store.list().map(host => host.alias)
+          : [alias]
+        try {
+          const hosts = await Promise.all(aliases.map(host => monitor.sample(host, refresh)))
+          writeJson(res, 200, { hosts })
         } catch (error) {
           writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
         }
