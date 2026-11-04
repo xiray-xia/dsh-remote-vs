@@ -38,7 +38,7 @@ dsh plugin --profile web add dsh-remote-vs
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
 **Requires DSH `0.2.2-alpha.3` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
-**the tested baseline is `0.2.2-alpha.3`**). On Host `0.2.2-alpha.2` use plugin `0.17.0` (or
+**tested on `0.2.2-alpha.3` and `0.2.2-rc.1`**). On Host `0.2.2-alpha.2` use plugin `0.17.0` (or
 upgrade DSH first); the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
@@ -220,7 +220,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.19.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.19.1)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)

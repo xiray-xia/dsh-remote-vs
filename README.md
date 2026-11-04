@@ -34,7 +34,7 @@ dsh plugin --profile web add dsh-remote-vs
 
 （从 npm 装，推荐；也可以直接跟仓库装：`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`。）
 
-**需要 DSH `0.2.2-alpha.3` 及以上、`0.3.0` 以下**（`engines.dsh` 门到底；当前实测基线 `0.2.2-alpha.3`）。
+**需要 DSH `0.2.2-alpha.3` 及以上、`0.3.0` 以下**（`engines.dsh` 门到底；已在 `0.2.2-alpha.3` 与 `0.2.2-rc.1` 上验证）。
 Host 仍是 `0.2.2-alpha.2` 的请用插件 `0.17.0`（或先把 DSH 升到 `0.2.2-alpha.3`）；`0.2.1-rc.2` 一代请用 `0.9.3`。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
 要装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）；
@@ -205,7 +205,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.19.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.19.1）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
