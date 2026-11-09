@@ -5,11 +5,17 @@
  * ships the same split, and the confirm dialogs are what guard destructive
  * remote git verbs).
  *
- * Icon sourcing: when dsh-better-sidebar is installed its service answers
- * `fileIcon` / `folderIcon`, which run the host's own classifier and any
- * user-registered icon theme — the remote tree then matches the user's local
- * sidebar glyph for glyph. Without that service the built-in SVG set below
- * takes over, so the native fallback surface still renders a real tree.
+ * Icon sourcing has two tiers. `FileIcon` / `FolderIcon` paint the plain glyphs
+ * below (search hits, SCM rows, commit panes, download rows — list chrome where
+ * one neutral outline reads best). `ExplorerFileIcon` / `ExplorerFolderIcon`
+ * paint the COLOURED type set ported from dsh-sidebar in `./file-icons.tsx`, so
+ * the remote directory tree looks like the local sidebar's tree: one sheet
+ * whose colour and mark carry the file type, and an amber folder that opens.
+ *
+ * Every tier still prefers the host service when one is published (the
+ * better-sidebar lineage's `fileIcon` / `folderIcon`: host classifier plus any
+ * registered icon theme). dsh-sidebar itself publishes none today, so in a
+ * dsh-sidebar profile the SVG sets above are what actually render.
  */
 import {
   createElement,
@@ -25,6 +31,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { detectLang, makeT } from '../i18n.ts'
+import { FileTypeIcon, FolderGlyph } from './file-icons.tsx'
 
 // ------------------------------------------------------------------ icons
 
@@ -328,6 +335,28 @@ export function FolderIcon(props: { path: string; open: boolean; size?: number; 
   const fromHost = tryService(() => iconService?.folderIcon(props.path, props.open, size))
   if (fromHost !== undefined) return fromHost
   return <IconFolder size={size} open={props.open} className={props.className} />
+}
+
+// --------------------------------------------------- directory-tree icons
+//
+// The tree is the one surface that has to match the local sidebar, so it uses
+// the coloured type set (see `./file-icons.tsx`) instead of the plain glyphs
+// above. Host service still wins, so a user-registered icon theme keeps working.
+
+/** Explorer file row: host glyph when available, else the coloured type icon. */
+export function ExplorerFileIcon(props: { path: string; size?: number; className?: string }): ReactNode {
+  const size = props.size ?? 16
+  const fromHost = tryService(() => iconService?.fileIcon(props.path, size))
+  if (fromHost !== undefined) return fromHost
+  return <FileTypeIcon path={props.path} size={size} className={props.className} />
+}
+
+/** Explorer directory row: host glyph when available, else the amber folder. */
+export function ExplorerFolderIcon(props: { path: string; open: boolean; size?: number; className?: string }): ReactNode {
+  const size = props.size ?? 16
+  const fromHost = tryService(() => iconService?.folderIcon(props.path, props.open, size))
+  if (fromHost !== undefined) return fromHost
+  return <FolderGlyph open={props.open} size={size} className={props.className} />
 }
 
 // ------------------------------------------------------------- file kinds

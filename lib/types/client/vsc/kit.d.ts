@@ -5,11 +5,17 @@
  * ships the same split, and the confirm dialogs are what guard destructive
  * remote git verbs).
  *
- * Icon sourcing: when dsh-better-sidebar is installed its service answers
- * `fileIcon` / `folderIcon`, which run the host's own classifier and any
- * user-registered icon theme — the remote tree then matches the user's local
- * sidebar glyph for glyph. Without that service the built-in SVG set below
- * takes over, so the native fallback surface still renders a real tree.
+ * Icon sourcing has two tiers. `FileIcon` / `FolderIcon` paint the plain glyphs
+ * below (search hits, SCM rows, commit panes, download rows — list chrome where
+ * one neutral outline reads best). `ExplorerFileIcon` / `ExplorerFolderIcon`
+ * paint the COLOURED type set ported from dsh-sidebar in `./file-icons.tsx`, so
+ * the remote directory tree looks like the local sidebar's tree: one sheet
+ * whose colour and mark carry the file type, and an amber folder that opens.
+ *
+ * Every tier still prefers the host service when one is published (the
+ * better-sidebar lineage's `fileIcon` / `folderIcon`: host classifier plus any
+ * registered icon theme). dsh-sidebar itself publishes none today, so in a
+ * dsh-sidebar profile the SVG sets above are what actually render.
  */
 import { type ReactNode } from 'react';
 type IconProps = {
@@ -96,6 +102,19 @@ export declare function FileIcon(props: {
 }): ReactNode;
 /** Directory row icon: host glyph when available, else the built-in SVG. */
 export declare function FolderIcon(props: {
+    path: string;
+    open: boolean;
+    size?: number;
+    className?: string;
+}): ReactNode;
+/** Explorer file row: host glyph when available, else the coloured type icon. */
+export declare function ExplorerFileIcon(props: {
+    path: string;
+    size?: number;
+    className?: string;
+}): ReactNode;
+/** Explorer directory row: host glyph when available, else the amber folder. */
+export declare function ExplorerFolderIcon(props: {
     path: string;
     open: boolean;
     size?: number;

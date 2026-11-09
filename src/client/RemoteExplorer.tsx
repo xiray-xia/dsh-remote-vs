@@ -32,8 +32,8 @@ import {
   IconRefresh,
   IconUpload,
   ContextMenu,
-  FileIcon,
-  FolderIcon,
+  ExplorerFileIcon,
+  ExplorerFolderIcon,
   baseName,
   confirmDialog,
   copyText,
@@ -566,8 +566,8 @@ export const ExplorerRowView = memo(function ExplorerRowView(props: ExplorerRowP
     >
       <span className="rvs-node-icon">
         {entry.isDir
-          ? <FolderIcon path={entry.path} open={isOpen} size={15} />
-          : <FileIcon path={entry.path} size={15} />}
+          ? <ExplorerFolderIcon path={entry.path} open={isOpen} size={16} />
+          : <ExplorerFileIcon path={entry.path} size={16} />}
       </span>
       {isRenaming
         ? (
@@ -2229,8 +2229,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
                 kind={row.createKind}
                 onCommit={(value) => { void doCreate(value) }}
                 onCancel={() => setCreating(undefined)}
-                fileIcon={<FileIcon path="name.ts" size={15} />}
-                folderIcon={<FolderIcon path="name" open={false} size={15} />}
+                // 16 px to match the tree rows and the local sidebar's tree, and
+                // a nameless sheet for the file: the row has no path yet, so
+                // claiming a type (the old hard-coded `name.ts`) would paint
+                // every "new file" row TS-blue.
+                fileIcon={<ExplorerFileIcon path="untitled" size={16} />}
+                folderIcon={<ExplorerFolderIcon path="name" open={false} size={16} />}
                 t={t}
               />
             )
