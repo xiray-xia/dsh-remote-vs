@@ -11,13 +11,14 @@ import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
 import { EditorSelection, EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
 import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import { history } from '@codemirror/commands'
 import { bracketMatching, ensureSyntaxTree, indentOnInput } from '@codemirror/language'
 import { closeBrackets } from '@codemirror/autocomplete'
 import { search } from '@codemirror/search'
 import { syntaxHighlighting } from '@codemirror/language'
 import { vscodeHighlightStyle } from './vsc/editor-palette.ts'
 import { FindWidget, clearFindMarks, findMatchHighlight, stepFind } from './vsc/FindWidget.tsx'
+import { editorKeymap } from './vsc/editor-keymap.ts'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 import { json } from '@codemirror/lang-json'
@@ -587,72 +588,33 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     if (host === null) return
     const extensions: Extension[] = [
       history(),
-      keymap.of([
-        ...defaultKeymap,
-        ...historyKeymap,
-        { key: 'Mod-s', run: () => { propsRef.current.onSave(); return true }, preventDefault: true },
-        // Ctrl/Cmd+F opens OUR widget (the built-in search panel is never
-        // mounted, so `searchKeymap` is deliberately absent). A selection seeds
-        // the query, the way it does in VS Code, so find-on-selection is one
-        // keystroke instead of a copy-paste.
-        {
-          key: 'Mod-f',
-          run: (view) => {
-            const sel = view.state.selection.main
-            if (!sel.empty) {
-              const text = view.state.sliceDoc(sel.from, sel.to)
-              if (text !== '' && text.length <= 200) {
-                setFindSeed(prev => ({ text, id: prev.id + 1 }))
-              }
+      keymap.of(editorKeymap({
+        save: () => { propsRef.current.onSave() },
+        openFindForSelection: (view) => {
+          const sel = view.state.selection.main
+          if (!sel.empty) {
+            const text = view.state.sliceDoc(sel.from, sel.to)
+            if (text !== '' && text.length <= 200) {
+              setFindSeed(prev => ({ text, id: prev.id + 1 }))
             }
-            setFindOpen(true)
-            return true
-          },
-          preventDefault: true,
+          }
+          setFindOpen(true)
         },
-        { key: 'F3', run: (view) => { stepFind(view, true); return true }, preventDefault: true },
-        { key: 'Shift-F3', run: (view) => { stepFind(view, false); return true }, preventDefault: true },
-        /**
-         * 上一个 / 下一个改动点。
-         *
-         * `Mod-Shift-Alt-ArrowUp/Down` 是挑出来的空位：`@codemirror/commands` 的
-         * defaultKeymap 里 `Mod-Alt-ArrowUp/Down`（多光标）、`Alt-ArrowUp/Down`
-         * （移动行）、`Shift-Alt-ArrowUp/Down`（复制行）都被占了，三者之上再加
-         * Shift 的这两个组合它没有用；浏览器侧 Ctrl+Shift+Alt+方向键也没有默认
-         * 行为（选中/滚动都落在更低的组合上）。
-         *
-         * 没有 `onStepHunk`（面板没开）时返回 false，按键照旧落回 CodeMirror 的
-         * 默认处理，不会平白吞掉一个组合键。
-         */
-        {
-          key: 'Mod-Shift-Alt-ArrowDown',
-          run: () => {
-            const step = propsRef.current.onStepHunk
-            if (step === undefined) return false
-            step(1)
-            return true
-          },
-          preventDefault: true,
+        stepFind: (view, forward) => {
+          stepFind(view, forward)
         },
-        {
-          key: 'Mod-Shift-Alt-ArrowUp',
-          run: () => {
-            const step = propsRef.current.onStepHunk
-            if (step === undefined) return false
-            step(-1)
-            return true
-          },
-          preventDefault: true,
+        stepHunk: (delta) => {
+          const step = propsRef.current.onStepHunk
+          if (step === undefined) return false
+          step(delta)
+          return true
         },
-        {
-          key: 'Escape',
-          run: () => {
-            if (!findOpenRef.current) return false
-            setFindOpen(false)
-            return true
-          },
+        closeFind: () => {
+          if (!findOpenRef.current) return false
+          setFindOpen(false)
+          return true
         },
-      ]),
+      })),
       lineNumbers(),
       highlightActiveLine(),
       indentOnInput(),

@@ -8,7 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -27,7 +27,14 @@ import {
   MIN_TIMEOUT_MS,
   resolveTimeouts,
 } from './timeouts.ts'
-import { RemoteWorlds, type RoutingMode, type WorldRoute } from './p2/worlds.ts'
+import { RemoteWorlds, TombstonedError, type RoutingMode, type WorldRoute } from './p2/worlds.ts'
+import {
+  REMOTE_PRESET_ID,
+  decidePresetSwitch,
+  runPresetSwitchAttempts,
+  type PresetSwitchAttempt,
+  type PresetSwitchFacts,
+} from './preset-switch.ts'
 import { SessionChanges } from './changes/recorder.ts'
 import {
   remoteExecTool,
@@ -449,60 +456,116 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
   }
 
   ctx.on('loader/volatile-update', () => { sync() })
-  // Phase 4b auto-switch (race-free take 2, 2026-10-13): new sessions born in
-  // a remote workspace switch to Remote once. Calling select() synchronously
-  // from agent/created races the initial mount (both preset trees register
-  // tools concurrently → `subagent already registered` → session creation
-  // dies), so the listener DETACHES: it returns immediately (creation never
-  // blocks) and a delayed attempt runs after mount fibers settle (ms-scale;
-  // 2.5s is forever). Guards re-checked at fire time; a started turn (locked)
-  // or any failure silently keeps standard (routing still works, bash tool
-  // excepted) — manual selection remains the fallback. Nothing here can fail
-  // session creation: the worst case is today's manual behavior plus a warn.
+  /**
+   * Preset auto-switch for a new session born in a remote workspace (Phase 4b).
+   *
+   * 2026-11-10, bug "sometimes no Remote preset ~3 s after creating a session":
+   *
+   * - The Web client does not always MINT a session. `createInWorkspace` reuses
+   *   the first listed BLANK session of the workspace by passing its id, and the
+   *   Host answers that through `agents.resume` → `agent/created` with source
+   *   `'resume'`. The old `source !== 'startup'` guard silently skipped exactly
+   *   those sessions. Blankness (no turn started) is the precondition the preset
+   *   registry itself enforces, so it is what we check now — a resumed session
+   *   with history is excluded by it.
+   * - One 2.5 s shot also lost every transient state: the preset may not be
+   *   composed yet, the working directory may be unreadable, or the workspace
+   *   binding may not be listed. `runPresetSwitchAttempts` retries those for a
+   *   bounded time and stops on terminal reasons (routing off, history, user's
+   *   own preset, local directory).
+   *
+   * The listener still DETACHES: it returns immediately, so session creation
+   * never waits for a switch (the original 2026-10-13 race: selecting during
+   * creation while both preset trees register tools could kill the session).
+   * Failure modes are logged, never thrown; manual selection stays the fallback.
+   */
+  const attemptPresetSwitch = async (agent: Agent): Promise<PresetSwitchAttempt> => {
+    const presets = ctx.get('agentPresets')
+    const agents = ctx.get('agents') as
+      | { turnBoundaryOf?: (session: unknown) => { openTurnStartSeq: number | null; lastTurn: number } | undefined }
+      | undefined
+    const workingDirectory = ctx.get('workingDirectory') as
+      | { get?: (session: unknown) => unknown }
+      | undefined
+    let boundary: { openTurnStartSeq: number | null; lastTurn: number } | undefined
+    try {
+      boundary = agents?.turnBoundaryOf?.(agent.session)
+    } catch {
+      boundary = undefined
+    }
+    let cwd = ''
+    try {
+      const current = workingDirectory?.get?.(agent.session)
+      if (typeof current === 'string') cwd = current
+    } catch {
+      // Soft read: an unbound session stays unreadable and retries.
+    }
+    let remote: boolean | undefined
+    let tombstoned = false
+    if (cwd !== '') {
+      try {
+        remote = worlds.routeDir(cwd).kind === 'remote'
+      } catch (error) {
+        if (error instanceof TombstonedError) tombstoned = true
+      }
+    }
+    // Service reads can throw during (re)mount; a throw is transient, so the
+    // facts fall back to "not composed yet" and the loop retries instead of
+    // losing the one chance (2026-11-10: that silent loss was the bug).
+    let currentPreset: string | undefined
+    let defaultPreset: string | undefined
+    try {
+      currentPreset = presets?.composedPreset(agent.ctx)
+      defaultPreset = presets?.defaultId
+    } catch {
+      currentPreset = undefined
+      defaultPreset = undefined
+    }
+    const facts: PresetSwitchFacts = {
+      mode: worlds.mode,
+      hasPresets: presets !== undefined,
+      blank: boundary !== undefined && boundary.openTurnStartSeq === null && boundary.lastTurn === 0,
+      cwd,
+      remote,
+      tombstoned,
+      currentPreset,
+      defaultPreset,
+    }
+    const step = decidePresetSwitch(facts)
+    if (step.action !== 'switch') return { step, facts }
+    if (presets === undefined) return { step: { action: 'stop', reason: 'presets-absent' }, facts }
+    try {
+      await presets.select(agent, REMOTE_PRESET_ID)
+      return { step: { action: 'stop', reason: 'switched' }, facts }
+    } catch (error) {
+      // agent-preset/locked = the user already started a turn: respect it.
+      const locked = error instanceof Error && /locked|already started/i.test(error.message)
+      return { step: { action: locked ? 'stop' : 'retry', reason: locked ? 'locked' : 'select-failed' }, facts }
+    }
+  }
   ctx.on('agent/created', (payload) => {
-    if (payload.source !== 'startup') return undefined
-    const timer = setTimeout(() => {
-      void (async () => {
+    void (async () => {
+      try {
+        const { step, facts, attempts } = await runPresetSwitchAttempts(() => attemptPresetSwitch(payload.agent))
         try {
-          const presets = ctx.get('agentPresets')
-          if (presets === undefined) return
-          if (worlds.mode !== 'enforce') return
-          const current = presets.composedPreset(payload.agent.ctx)
-          if (current !== presets.defaultId || current === 'remote') return
-          const workingDirectory = ctx.get('workingDirectory')
-          if (workingDirectory === undefined) return
-          let cwd: string
-          try {
-            cwd = workingDirectory.get(payload.agent.session)
-          } catch {
-            return
+          if (step.reason === 'switched' && facts?.remote === true) {
+            ctx.logger.info(`[remote-vs] remote session ${facts.cwd}: preset switched to ${REMOTE_PRESET_ID} after ${attempts} attempt(s)`)
+          } else if (step.action === 'retry') {
+            ctx.logger.warn(`[remote-vs] preset auto-switch gave up after ${attempts} attempt(s): ${step.reason}`)
+          } else if (facts?.remote === true) {
+            ctx.logger.info(`[remote-vs] preset auto-switch skipped for ${facts.cwd}: ${step.reason}`)
           }
-          let remote = false
-          try {
-            remote = worlds.routeDir(cwd).kind === 'remote'
-          } catch {
-            return
-          }
-          if (!remote) return
-          await presets.select(payload.agent, 'remote')
-          try {
-            ctx.logger.info(`[remote-vs] new remote session entered ${cwd}; preset switched to remote`)
-          } catch {
-            // Logging must never break routing.
-          }
-        } catch (error) {
-          // agent-preset/locked = user already started a turn: respect it.
-          const locked = error instanceof Error && /locked|already started/i.test(error.message)
-          if (locked) return
-          try {
-            ctx.logger.warn(`[remote-vs] preset auto-switch skipped: ${error instanceof Error ? error.message : String(error)}`)
-          } catch {
-            // Ignore.
-          }
+        } catch {
+          // Logging must never break routing.
         }
-      })()
-    }, 2500)
-    timer.unref?.()
+      } catch (error) {
+        try {
+          ctx.logger.warn(`[remote-vs] preset auto-switch skipped: ${error instanceof Error ? error.message : String(error)}`)
+        } catch {
+          // Ignore.
+        }
+      }
+    })()
     return undefined
   })
   sync()

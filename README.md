@@ -413,7 +413,7 @@ node .spike/letter-check.mjs     # 状态字母：未跟踪 ? 与冲突 U 不再
 > 失败时才触发，所以「调用点 57」与「跑出来 55」本来就该差 2）。
 
 真机回归仍是 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`。
-DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 54 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
+DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 57 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
 
 ## 开源许可
 

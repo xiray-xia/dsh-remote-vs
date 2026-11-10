@@ -8,14 +8,15 @@
  * Icon sourcing has two tiers. `FileIcon` / `FolderIcon` paint the plain glyphs
  * below (search hits, SCM rows, commit panes, download rows — list chrome where
  * one neutral outline reads best). `ExplorerFileIcon` / `ExplorerFolderIcon`
- * paint the COLOURED type set ported from dsh-sidebar in `./file-icons.tsx`, so
- * the remote directory tree looks like the local sidebar's tree: one sheet
- * whose colour and mark carry the file type, and an amber folder that opens.
+ * paint the COLOURED type set ported from the local sidebar plugin in
+ * `./file-icons.tsx`, so the remote directory tree looks like the local
+ * sidebar's tree: one sheet whose colour and mark carry the file type, and an
+ * amber folder that opens.
  *
  * Every tier still prefers the host service when one is published (the
- * better-sidebar lineage's `fileIcon` / `folderIcon`: host classifier plus any
- * registered icon theme). dsh-sidebar itself publishes none today, so in a
- * dsh-sidebar profile the SVG sets above are what actually render.
+ * better-sidebar contract's `fileIcon` / `folderIcon`: host classifier plus any
+ * registered icon theme). That plugin publishes none today, so with the local
+ * sidebar installed the SVG sets above are what actually render.
  */
 import {
   createElement,

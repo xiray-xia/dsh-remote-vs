@@ -462,7 +462,7 @@ tsc, to the bundler and to jsdom — this fixture is the only place they reprodu
 > exactly why "57 call sites" and "55 checks run" differ by 2).
 
 The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
-Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 54 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
+Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 57 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
 
 ## License
 

@@ -99,9 +99,9 @@ function cssInlinePlugin(): BuildPlugin {
       // rendered as bare inline buttons.
       //
       // The key must be relative, not the absolute build-machine path: shipping
-      // `E:\work_base\...\vsc.css` inside the public bundle leaked the builder's
-      // directory layout (found by the release audit; fixed in 0.11.0). A
-      // package-relative spelling is also identical on every machine, so two
+      // a drive-letter path to `vsc.css` inside the public bundle leaked the
+      // builder's directory layout (found by the release audit; fixed in 0.11.0).
+      // A package-relative spelling is also identical on every machine, so two
       // builds of the same file dedupe correctly in the page.
       const relKey = relId
       return [

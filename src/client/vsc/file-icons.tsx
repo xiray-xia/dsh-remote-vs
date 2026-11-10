@@ -8,19 +8,18 @@
  *
  * Provenance
  * ----------
- * These are a straight port of the local sidebar plugin's artwork (`FileTypeIcon`
- * and its amber `FolderIcon` in dsh-sidebar's `src/client/icons.tsx`, package
- * name `dsh-sidebar`): one paper sheet whose colour and bottom-right mark carry
- * the type — TS blue + `<>`, JS yellow + `<>`, Python blue with a yellow mark,
- * Markdown blue + lines, images purple + a mountain, archives yellow + a zip,
- * `.gitignore` orange + a commit graph.
+ * These are a straight port of the icon set the local sidebar plugin draws
+ * (`FileTypeIcon` and its amber folder icon): one paper sheet whose colour and
+ * bottom-right mark carry the type — TS blue + `<>`, JS yellow + `<>`, Python
+ * blue with a yellow mark, Markdown blue + lines, images purple + a mountain,
+ * archives yellow + a zip, `.gitignore` orange + a commit graph.
  *
  * The copy exists on purpose: the client bundle may not import another plugin's
- * values (tsdown's purity gate rejects cross-plugin imports), and dsh-sidebar
+ * values (tsdown's purity gate rejects cross-plugin imports), and that plugin
  * publishes no `fileIcon` / `folderIcon` service that `kit.tsx` could call.
  * `kit.tsx` still prefers such a service if a host ever provides one (the
- * better-sidebar lineage is where that contract would come from); this set is
- * the fallback that paints a real, typed tree in a dsh-sidebar profile.
+ * better-sidebar contract is where it would come from); this set is the
+ * fallback that paints a real, typed tree whenever that plugin is present.
  *
  * One deliberate difference from the source: the image mark used
  * `fill="currentColor"`, which in a tree inherits the row's dim text colour —

@@ -85,9 +85,9 @@ export function apply(ctx: Context): void {
       if (sidebar === undefined) return false
       // Optional host icon classifier: a better-sidebar release may publish
       // `fileIcon` / `folderIcon` alongside `registerTab`, and then the remote
-      // tree follows the user's registered icon theme. dsh-sidebar (the local
-      // sidebar this plugin usually runs next to) publishes none, so in practice
-      // the built-in colour set in `vsc/file-icons.tsx` is what paints the tree.
+      // tree follows the user's registered icon theme. The local sidebar plugin
+      // this one usually runs next to publishes none, so in practice the
+      // built-in colour set in `vsc/file-icons.tsx` is what paints the tree.
       try {
         const candidate = sidebar as unknown as Partial<IconServiceLike>
         if (typeof candidate.fileIcon === 'function' && typeof candidate.folderIcon === 'function') {
