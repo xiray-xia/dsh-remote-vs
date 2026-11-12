@@ -37,9 +37,9 @@ dsh plugin --profile web add dsh-remote-vs
 (From npm, recommended; installing straight from the repository also works:
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
-**Requires DSH `0.2.2-alpha.3` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
-**tested on `0.2.2-alpha.3` and `0.2.2-rc.1`**). On Host `0.2.2-alpha.2` use plugin `0.17.0` (or
-upgrade DSH first); the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
+**Requires DSH `0.2.2-rc.2` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
+**adapted to and typechecked against `0.2.2-rc.2`**). On Host `0.2.2-alpha.3` / `0.2.2-rc.1` use plugin `0.20.1`; the
+`0.2.2-alpha.2` generation needs `0.17.0` and the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
 profile instead — see [Desktop](#desktop-dsh-desktop) below.
@@ -74,7 +74,7 @@ Install either way:
 `desktop` is reserved for the Electron application: an **npm-installed `dsh` cannot manage
 it** (it answers `profile "desktop" is managed exclusively by the Electron application`),
 so one of the two routes above is required. The Desktop release version equals the DSH
-runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-alpha.3`; check About);
+runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-rc.2`; check About);
 older releases make the Plugins page refuse the install. Desktop opens no visible Web
 port, but the plugin's HTTP routes and terminal socket are forwarded through Desktop's
 Host (the terminal resolves its address from `__DSH_TRANSPORT__.streamBaseUrl`), so no
@@ -220,7 +220,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.20.1)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.21.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
