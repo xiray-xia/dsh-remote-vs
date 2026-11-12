@@ -40,6 +40,11 @@ export const DYNAMIC_KEYS = [
   // exit), which stores the key and renders it later.
   'term.disconnected',
   'term.closed',
+  // Reached through tRef.current(...) in the XTerm right-click menu (built
+  // inside a mount-once effect: literal keys, but not a t() call site).
+  'term.copy',
+  'term.paste',
+  'term.selectAll',
   // Labels chosen through connectionLabelKey in connection.ts (a state → key
   // mapping, so the call site is 	(connectionLabelKey(state))).
   'connection.ok',
@@ -203,6 +208,9 @@ const zh: Record<string, string> = {
   'term.empty': '还没有终端 —— 选好主机后点右上角 + 新建一个。',
   'term.close': '关闭终端',
   'term.closeTitle': '关闭这个终端',
+  'term.copy': '复制',
+  'term.paste': '粘贴',
+  'term.selectAll': '全选',
   'term.noHosts': '还没有主机，请先去「设置 → 远程主机」配置。',
   'tab.git': 'Git',
   'git.hint': '请选择远端路径为 git 仓库的工作区。',
@@ -818,6 +826,9 @@ const en: Record<string, string> = {
   'term.empty': 'No terminal yet — pick a host, then press + to open one.',
   'term.close': 'Close terminal',
   'term.closeTitle': 'Close this terminal',
+  'term.copy': 'Copy',
+  'term.paste': 'Paste',
+  'term.selectAll': 'Select all',
   'term.noHosts': 'No hosts yet. Configure one in Settings → Remote Hosts first.',
   'tab.git': 'Git',
   'git.hint': 'Pick a workspace whose remote path is a git repository.',

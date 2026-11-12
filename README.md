@@ -205,7 +205,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.21.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.21.1）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）

@@ -18,4 +18,6 @@ export declare function XTerm(props: {
      * which correctly re-runs the line.
      */
     initialInput?: string;
+    /** Translator for the right-click menu (copy / paste / select all). */
+    t: (key: string) => string;
 }): ReactNode;

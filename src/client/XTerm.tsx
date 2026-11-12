@@ -10,6 +10,13 @@ import type { ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { TerminalClientFrame, TerminalServerFrame } from '../protocol.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
+import { ContextMenu, useContextMenu, type MenuEntry } from './vsc/kit.tsx'
+import {
+  clipboardChordFor,
+  createPasteFallback,
+  stripBracketedPasteMarkers,
+  terminalMenuState,
+} from './vsc/terminal-clipboard.ts'
 
 function send(ws: WebSocket, frame: TerminalClientFrame): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -112,11 +119,20 @@ export function XTerm(props: {
    * which correctly re-runs the line.
    */
   initialInput?: string
+  /** Translator for the right-click menu (copy / paste / select all). */
+  t: (key: string) => string
 }): ReactNode {
   const hostRef = useRef<HTMLDivElement>(null)
   const propsRef = useRef(props)
   propsRef.current = props
   const liveRef = useRef<{ refit: () => void } | undefined>(undefined)
+  // The context menu lives at component level (portal); the mount-once effect
+  // reaches it through refs, the same pattern the explorer row uses.
+  const menu = useContextMenu()
+  const openMenuRef = useRef(menu.open)
+  openMenuRef.current = menu.open
+  const tRef = useRef(props.t)
+  tRef.current = props.t
 
   // Shown again after being hidden: refit and push the size.
   useEffect(() => {
@@ -187,7 +203,9 @@ export function XTerm(props: {
      * characters — far under that cap either way, and far above a keystroke.
      */
     const INPUT_CHUNK_CHARS = 64 * 1024
-    const sendInput = (data: string): void => {
+    const sendInput = (rawData: string): void => {
+      const data = stripBracketedPasteMarkers(rawData)
+      if (data === '') return
       if (data.length <= INPUT_CHUNK_CHARS) {
         send(ws, { t: 'in', d: data })
         return
@@ -253,9 +271,13 @@ export function XTerm(props: {
     // Late layout (tab switch): refit shortly after mount too.
     const timer = window.setTimeout(pushSize, 300)
 
-    // Copy/paste (Windows Terminal conventions; plain Ctrl+C stays SIGINT):
-    // Ctrl+Shift+C / Cmd+C / Ctrl+Insert = copy, Ctrl+Shift+V / Cmd+V /
-    // Shift+Insert = paste, right-click = copy when selecting else paste.
+    // Clipboard (VS Code / Windows Terminal conventions; plain Ctrl+C stays SIGINT):
+    // copy = Ctrl+Shift+C / Cmd+C / Ctrl+Insert, paste = Ctrl+Shift+V / Cmd+V /
+    // Shift+Insert. Handled chords call preventDefault() THEMSELVES: returning
+    // false only stops xterm, and the browser would then run its own default
+    // (Chrome maps Ctrl+Shift+V to paste-as-plain-text, which double-pasted).
+    // Plain Ctrl+V is left to the browser first; when no paste event arrives the
+    // Clipboard API fallback fires (some shells swallow the native paste).
     const doCopy = (clear: boolean): void => {
       const selection = term.getSelection()
       if (selection === '') return
@@ -273,30 +295,91 @@ export function XTerm(props: {
         term.paste(text)
       })
     }
-    term.attachCustomKeyEventHandler((e) => {
-      const key = e.key.toLowerCase()
-      const copyKey = (!e.metaKey && e.ctrlKey && ((e.shiftKey && key === 'c') || (!e.shiftKey && e.key === 'Insert')))
-        || (e.metaKey && !e.ctrlKey && key === 'c')
-      const pasteKey = (!e.metaKey && e.ctrlKey && e.shiftKey && key === 'v')
-        || (e.metaKey && !e.ctrlKey && key === 'v')
-        || (!e.ctrlKey && !e.metaKey && e.shiftKey && e.key === 'Insert')
-      if (copyKey) {
-        if (term.hasSelection()) {
-          doCopy(false)
-          return false
-        }
-        return true
+    const pasteFallback = createPasteFallback({
+      read: readClipboard,
+      paste: (text) => { term.paste(text) },
+      onDenied: () => { term.write('\r\n[dsh-remote] clipboard read denied by the browser\r\n') },
+    })
+    /**
+     * All paste input converges here: one insertion per paste event.
+     *
+     * Capture phase + stopPropagation keeps xterm's own textarea handler from
+     * inserting a second copy, and preventDefault stops the browser's remaining
+     * default. The watcher is cancelled so the Clipboard-API fallback (for hosts
+     * that never deliver this event) does not fire on top of it.
+     */
+    /**
+     * Explicit paste chords (Ctrl+Shift+V / Cmd+V / Shift+Insert) insert through
+     * the Clipboard API themselves. Some hosts still deliver the browser's native
+     * paste afterwards even when the keydown was preventDefault-ed (observed with
+     * Ctrl+Shift+V paste-as-plain-text), which pasted twice. This window swallows
+     * that native delivery; plain Ctrl+V keeps the native path below.
+     */
+    let suppressNativePasteUntil = 0
+    const onPasteEvent = (e: ClipboardEvent): void => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (Date.now() < suppressNativePasteUntil) {
+        // The explicit chord already inserted this paste through the API.
+        suppressNativePasteUntil = 0
+        return
       }
-      if (pasteKey) {
+      const text = e.clipboardData?.getData('text/plain') ?? ''
+      pasteFallback.observed()
+      if (text !== '') term.paste(text)
+    }
+    host.addEventListener('paste', onPasteEvent, true)
+    term.attachCustomKeyEventHandler((e) => {
+      const chord = clipboardChordFor({
+        key: e.key,
+        ctrl: e.ctrlKey,
+        shift: e.shiftKey,
+        alt: e.altKey,
+        meta: e.metaKey,
+      })
+      if (chord === undefined) return true
+      if (chord === 'copy-interrupt') {
+        // Ctrl+C: with a selection the convention is COPY (never SIGINT); without
+        // one the key falls through so the remote shell interrupts as usual.
+        if (!term.hasSelection()) return true
+        e.preventDefault()
+        doCopy(false)
+        return false
+      }
+      if (chord === 'paste') {
+        // Explicit paste chord: insert ONCE through the Clipboard API and swallow
+        // the browser's native delivery for this gesture (some hosts ignore the
+        // keydown preventDefault and paste again).
+        e.preventDefault()
+        suppressNativePasteUntil = Date.now() + 600
         doPaste()
         return false
       }
-      return true
+      if (chord === 'paste-native') {
+        // Plain Ctrl+V: the browser's native paste is the primary path; when the
+        // host swallows it, the watcher falls back to the Clipboard API.
+        pasteFallback.arm()
+        return true
+      }
+      // Copy: with nothing selected the key belongs to the terminal/browser.
+      if (!term.hasSelection()) return true
+      e.preventDefault()
+      doCopy(false)
+      return false
     })
     const onContextMenu = (e: MouseEvent): void => {
       e.preventDefault()
-      if (term.hasSelection()) doCopy(true)
-      else doPaste()
+      const hasSelection = term.hasSelection()
+      const entries: MenuEntry[] = [
+        {
+          label: tRef.current('term.copy'),
+          disabled: terminalMenuState({ hasSelection }).copyDisabled,
+          onSelect: () => { doCopy(false); term.focus() },
+        },
+        { label: tRef.current('term.paste'), onSelect: () => { doPaste(); term.focus() } },
+        { label: tRef.current('term.selectAll'), separated: true, onSelect: () => { term.selectAll(); term.focus() } },
+      ]
+      openMenuRef.current(e.clientX, e.clientY, entries)
     }
     host.addEventListener('contextmenu', onContextMenu)
 
@@ -306,6 +389,7 @@ export function XTerm(props: {
       unflip()
       window.clearTimeout(timer)
       window.removeEventListener('resize', onWindowResize)
+      host.removeEventListener('paste', onPasteEvent, true)
       host.removeEventListener('contextmenu', onContextMenu)
       resizeObserver.disconnect()
       try {
@@ -319,5 +403,12 @@ export function XTerm(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  return <div ref={hostRef} style={{ height: '100%', minHeight: 200 }} />
+  return (
+    <>
+      <div ref={hostRef} style={{ height: '100%', minHeight: 200 }} />
+      {menu.menu !== undefined && (
+        <ContextMenu x={menu.menu.x} y={menu.menu.y} entries={menu.menu.entries} onClose={menu.close} />
+      )}
+    </>
+  )
 }

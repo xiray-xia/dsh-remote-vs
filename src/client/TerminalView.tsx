@@ -480,6 +480,7 @@ export function TerminalView(props: {
                   rows: 24,
                 })}
                 visible={props.visible && tab.id === active?.id}
+                t={t}
                 {...(tab.initialCommand === undefined ? {} : { initialInput: tab.initialCommand })}
                 onReady={(id) => patchTab(tab.id, { session: id, connected: true, note: undefined })}
                 onExit={(code, message) => {
