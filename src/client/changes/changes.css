@@ -137,21 +137,39 @@
 }
 
 /*
- * One file per row: type icon, path, counts at the far right.
+ * One file per row: status letter, type icon, path, counts, review toggle.
  *
- * Every part is nowrap and the path is the only flexible one, so a long remote
- * path ellipsizes in the middle of the row instead of pushing the counts out of
- * view or wrapping the row into a paragraph (which is what a row of inline
- * <button>s does without this rule).
+ * The row is a flex CONTAINER holding two buttons (open + review): a whole-row
+ * <button> cannot legally contain the toggle, and clicking the toggle must not
+ * also open the file. Every part is nowrap and the path is the only flexible
+ * one, so a long remote path ellipsizes in the middle of the row instead of
+ * pushing the counts out of view or wrapping the row into a paragraph.
  */
 .rvs-chg-row {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
   width: 100%;
+  min-width: 0;
+  border-radius: 5px;
+}
+
+.rvs-chg-row:hover { background-color: var(--rvs-chg-hover); }
+
+.rvs-chg-row.rvs-chg-loading { opacity: .55; }
+
+/* Reviewed rows recede a little, but hover brings them back to full contrast so
+   a row is never unreadable at the moment the user is about to act on it. */
+.rvs-chg-row[data-reviewed='1']:not(:hover) .rvs-chg-open { opacity: .58; }
+
+.rvs-chg-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   min-height: 24px;
-  padding: 1px 6px;
+  padding: 1px 4px 1px 6px;
   border: none;
   border-radius: 5px;
   background: transparent;
@@ -163,9 +181,81 @@
   cursor: pointer;
 }
 
-.rvs-chg-row:hover { background-color: var(--rvs-chg-hover); }
+/*
+ * Review toggle. Hidden until the row is hovered (or focused by keyboard) so the
+ * list stays quiet, and always visible once the mark is ON — that ✓ is the only
+ * evidence the mark exists.
+ */
+.rvs-chg-review {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-right: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rvs-chg-fg3);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+}
 
-.rvs-chg-row.rvs-chg-loading { opacity: .55; }
+.rvs-chg-row:hover .rvs-chg-review,
+.rvs-chg-review:focus-visible,
+.rvs-chg-review.is-on { opacity: 1; }
+
+.rvs-chg-review:hover { background-color: var(--rvs-chg-hover); color: var(--rvs-chg-fg); }
+
+.rvs-chg-review.is-on { color: var(--rvs-chg-add); }
+
+/*
+ * Status letter (A/M/D/R/C/T/U).
+ *
+ * A one-character column instead of a second tooltip: the row already shows the
+ * counts, and "was this file added, deleted or renamed" is the other question a
+ * reviewer asks. Colour follows the same vocabulary as the diff marks.
+ */
+.rvs-chg-status {
+  flex: 0 0 auto;
+  width: 10px;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--rvs-chg-fg3);
+}
+
+.rvs-chg-status[data-status='A'] { color: var(--rvs-chg-add); }
+.rvs-chg-status[data-status='M'] { color: var(--rvs-chg-mod); }
+.rvs-chg-status[data-status='D'] { color: var(--rvs-chg-del); }
+.rvs-chg-status[data-status='R'] { color: var(--rvs-chg-info); }
+.rvs-chg-status[data-status='C'] { color: var(--rvs-chg-info); }
+.rvs-chg-status[data-status='U'] { color: var(--rvs-chg-del); }
+
+/* The reviewed counter in the header doubles as the mark-all / clear menu. */
+.rvs-changes-reviewed {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  height: 18px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--rvs-chg-fg3);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rvs-changes-reviewed:hover {
+  background-color: var(--rvs-chg-hover);
+  color: var(--rvs-chg-fg);
+}
 
 /* File-type icon: the host's icon theme when the shell provides one, else the
    plugin's own SVG set (see vsc/kit.tsx FileIcon). */
@@ -227,4 +317,27 @@ body:not([data-ds-dark-theme]) .rvs-changes {
   --rvs-chg-del: #cf222e;
   --rvs-chg-mod: #9a6700;
   --rvs-chg-info: #0969da;
+}
+
+/*
+ * The row / header menus opened from THIS panel.
+ *
+ * `ContextMenu` portals to `document.body`, so neither `.rvs-changes`' palette
+ * nor the `.rvs-root` variables are in scope: the menu would come up with no
+ * border and no hover feedback. The panel therefore hands the shared component
+ * the four variables it reads, under this class — one menu component, one visual
+ * language, and no restyling of the other surfaces' menus.
+ */
+.rvs-menu-dock {
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .28));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+}
+
+body:not([data-ds-dark-theme]) .rvs-menu-dock {
+  --rvs-fg: var(--dsw-alias-label-primary, #1f2328);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(31, 35, 40, .07));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(31, 35, 40, .16));
+  --rvs-border2: var(--dsw-alias-border-l1, rgba(31, 35, 40, .16));
 }

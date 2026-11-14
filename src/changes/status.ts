@@ -171,13 +171,80 @@ export function trackedStatusCommand(root: string): string {
 }
 
 /**
+ * Directory names the ledger does not count as session changes.
+ *
+ * Build output and dependency caches are the two things a build leaves behind,
+ * and neither is this session's work. `--exclude-standard` only covers what the
+ * repository's own ignore rules name, so a checkout whose build directory is NOT
+ * ignored pays twice: thousands of paths fill the 500-row list (sorted, and
+ * `build/`/`out/` sort BEFORE `src/`, so the real changes get truncated away) and
+ * every listed path costs a read out of the 8 MiB transfer budget.
+ *
+ * The names mirror the three lists the plugin already prunes by elsewhere
+ * (`client/quickopen-model.ts` `EXCLUDED_DIRECTORIES`, `p2/file-refs.ts`
+ * `REMOTE_FILE_SEARCH_EXCLUDED_DIRECTORIES`, `search-ops.ts` `PRUNE_DIRS`). One
+ * vocabulary, four consumers: fold them into a shared module when one of those
+ * surfaces is next touched, instead of adding a fifth spelling here.
+ */
+export const UNTRACKED_EXCLUDED_DIRECTORIES: readonly string[] = [
+  '.git', 'node_modules', 'dist', 'build', 'out', 'coverage', 'target',
+  '.next', '.nuxt', '.turbo', '.venv', '__pycache__', '.pytest_cache',
+  '.mypy_cache', '.gradle',
+]
+
+/** Ceiling on the pathspecs one command carries (a cap, not a policy). */
+const MAX_EXCLUDE_DIRS = 32
+
+/**
+ * Keep only directory names a pathspec may name safely.
+ *
+ * A value that is absolute, carries a separator, walks up or looks like a flag
+ * is DROPPED rather than rejected: the list is configuration, and one bad entry
+ * must not stop the scan — the scan's job is to say what changed, not to police
+ * a setting. Dropping is also the conservative direction: a name that is not
+ * excluded is merely visible, while a malformed pathspec would hide paths the
+ * user never asked to hide (or turn `--exclude` into another flag).
+ *
+ * @param dirs - candidate names (undefined = none).
+ * @returns the usable names, deduplicated, in the given order.
+ */
+export function excludeDirNames(dirs: readonly string[] | undefined): string[] {
+  const kept: string[] = []
+  for (const raw of dirs ?? []) {
+    const name = raw.trim()
+    if (name === '' || name === '.' || name === '..') continue
+    if (name.includes('/') || name.includes('\\') || name.includes('\0')) continue
+    // A pathspec is a PATTERN: `a*b` would exclude far more than the name says,
+    // and the panel would report that pattern as if it were a directory.
+    if (/[*?[\]]/.test(name)) continue
+    // A leading `-` would reach git as a flag, not a pathspec.
+    if (name.startsWith('-')) continue
+    if (kept.includes(name)) continue
+    if (kept.length >= MAX_EXCLUDE_DIRS) break
+    kept.push(name)
+  }
+  return kept
+}
+
+/**
  * New files git is not tracking yet (the ones a session usually creates).
  *
+ * The exclusions are pushed down as pathspecs (`:(exclude)out`) rather than
+ * filtered after the fact, so those paths never cross the wire and never enter
+ * the 500-row cap. Measured on a tree with 3000 build outputs + 300 sources:
+ * 3300 records / 61.5 KB unfiltered versus 300 records / 6.8 KB with two
+ * exclusions — the walk itself costs the same either way (git still descends
+ * those directories), so the win is wire bytes, parse time and the read budget,
+ * not scan latency.
+ *
  * @param root - remote absolute POSIX directory (the session cwd).
+ * @param excludeDirs - directory names to leave out (see {@link excludeDirNames}).
  * @returns a `sh` script printing NUL-separated paths.
  */
-export function untrackedCommand(root: string): string {
-  return [cdLine(root), 'git ls-files --others --exclude-standard -z -- .'].join('\n')
+export function untrackedCommand(root: string, excludeDirs: readonly string[] = []): string {
+  const excludes = excludeDirNames(excludeDirs).map(name => shq(`:(exclude)${name}`))
+  const pathspec = ['--', '.', ...excludes].join(' ')
+  return [cdLine(root), `git ls-files --others --exclude-standard -z ${pathspec}`].join('\n')
 }
 
 /**

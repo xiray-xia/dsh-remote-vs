@@ -375,3 +375,45 @@ function lastLineOfSide(lines: string[], tag: '-' | '+'): number {
   }
   return -1
 }
+
+/**
+ * Serialize a WHOLE file comparison as ONE patch (one header, every hunk).
+ *
+ * "Revert everything this session did to this file" is `git apply -R` of the
+ * file's complete diff, and that is a single write instead of one write per
+ * hunk. Concatenating `hunkPatch` output would also apply (git tolerates the
+ * repeated headers and re-anchors each block by offset), but it says the same
+ * file begins twice and depends on offset guessing — a real unified diff names
+ * the file once and lets git place every hunk against one picture.
+ *
+ * Verified against git 2.x: the result reverse-applies to a file whose content
+ * is `hunks`' new side, and leaves it byte-identical to the old side.
+ *
+ * @param displayPath - repo-relative path, as the panel shows it.
+ * @param hunks - every hunk of the comparison, in ascending order.
+ * @returns the patch, or '' when there is nothing to write (no hunks).
+ */
+export function filePatch(displayPath: string, hunks: readonly TextHunk[]): string {
+  if (hunks.length === 0) return ''
+  const out: string[] = [`--- a/${displayPath}`, `+++ b/${displayPath}`]
+  for (const hunk of hunks) {
+    out.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`)
+    // The marker follows the last line of the side that lacks a final newline.
+    // A per-file comparison has at most one such line per side and it is inside
+    // the last hunk, so the same rule as `hunkPatch` applies hunk by hunk.
+    const markers = new Set<number>()
+    if (hunk.oldNoEol === true) {
+      const at = lastLineOfSide(hunk.lines, '-')
+      if (at >= 0) markers.add(at)
+    }
+    if (hunk.newNoEol === true) {
+      const at = lastLineOfSide(hunk.lines, '+')
+      if (at >= 0) markers.add(at)
+    }
+    for (let index = 0; index < hunk.lines.length; index += 1) {
+      out.push(hunk.lines[index] ?? '')
+      if (markers.has(index)) out.push('\\ No newline at end of file')
+    }
+  }
+  return `${out.join('\n')}\n`
+}

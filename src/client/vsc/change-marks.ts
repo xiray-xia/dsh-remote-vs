@@ -75,6 +75,14 @@ export interface RemovedChip {
   truncated: boolean
   /** 这个 chip 落在哪一行（1-based）。**省略 = 所属 mark 的 `from` 行**。 */
   line?: number
+  /**
+   * 这个 chip 代表的**被删行数**（省略或 1 = 单行/行内片段）。
+   *
+   * 一个整块删除（例如删掉 10 行）不能画成 10 个 chip 叠在同一列上 —— 那既读不出
+   * "删了 10 行"，也读不出内容。此时 `count > 1`，`text` 改为携带**预览**（前若干
+   * 行的原文，供 tooltip），渲染成一个 `−N 行已删除` 的可读胶囊。
+   */
+  count?: number
 }
 
 /**
@@ -118,6 +126,15 @@ export interface ChangeSet {
    * 护栏，比在浏览器里重算一遍替换区间可靠。
    */
   patches?: string[]
+  /**
+   * 整文件的补丁（一个文件头 + 全部 hunk），用于"撤销该文件的全部改动"。
+   *
+   * 一次远端写而不是逐 hunk 循环：后者会让后面每个 hunk 的行号整体错位，撤到一半
+   * 报冲突，文件就停在半截状态。补丁由 Host 生成（浏览器一侧没有基线内容，自己拼
+   * 出来的补丁只会把别人的改动一起盖掉）。省略 = 这个文件没有可整体撤销的补丁
+   * （新建 / 二进制 / 字节被上限扣下）。
+   */
+  filePatch?: string
 }
 
 /** 换一份改动标记；`null` = 清空（有改动数据，但没有任何要画的东西）。 */
@@ -170,6 +187,9 @@ const WORD_ADD = Decoration.mark({ class: 'rvs-change-word-add' })
 /** 删除 chip 的悬浮说明。与 gutter 的 `LABEL` 一样，是编辑器侧的固定文案。 */
 const CHIP_TITLE = '已删除的内容'
 
+/** 整块删除那种胶囊的悬浮说明（后面跟行数）。 */
+const BLOCK_CHIP_TITLE = '已删除的整块内容'
+
 /**
  * 被删内容的零宽 widget。
  *
@@ -180,25 +200,37 @@ const CHIP_TITLE = '已删除的内容'
 class RemovedChipWidget extends WidgetType {
   private readonly text: string
   private readonly truncated: boolean
+  private readonly count: number
 
-  constructor(text: string, truncated: boolean) {
+  constructor(text: string, truncated: boolean, count = 0) {
     super()
     this.text = text
     this.truncated = truncated
+    this.count = count
   }
 
   eq(other: WidgetType): boolean {
     return other instanceof RemovedChipWidget
       && other.text === this.text
       && other.truncated === this.truncated
+      && other.count === this.count
   }
 
   toDOM(): HTMLElement {
     const chip = document.createElement('span')
-    chip.className = 'rvs-change-word-del'
-    chip.textContent = this.truncated ? `${this.text}…` : this.text
-    chip.title = CHIP_TITLE
-    chip.setAttribute('aria-label', CHIP_TITLE)
+    /**
+     * 整块删除（`count > 1`）读成一枚胶囊，不是一行删除线文字。
+     *
+     * 行内删短（`const a = 1 + 2` → `const a = 1`）仍然是划掉的原文 —— 那里被删的
+     * 是一个片段，位置和内容都能直接读。多行整块没有这个性质：原文是一个段落，
+     * 划线堆在行首只会糊成一片，所以这里只报**行数**，原文进 tooltip（已在数据层
+     * 限过长度，见 `model.ts` 的 `deletedRunChip`）。
+     */
+    const block = this.count > 1
+    chip.className = block ? 'rvs-change-word-del rvs-change-block-del' : 'rvs-change-word-del'
+    chip.textContent = block ? `−${this.count} 行已删除` : (this.truncated ? `${this.text}…` : this.text)
+    chip.title = block ? `${BLOCK_CHIP_TITLE}（${this.count} 行）\n${this.text}` : CHIP_TITLE
+    chip.setAttribute('aria-label', chip.title)
     return chip
   }
 }
@@ -209,7 +241,7 @@ class RemovedChipWidget extends WidgetType {
  * `-2e8`、chip `-1e8`、字符区间 `-1`）。
  */
 function chipDecoration(chip: RemovedChip): Decoration {
-  return Decoration.widget({ widget: new RemovedChipWidget(chip.text, chip.truncated), side: -1 })
+  return Decoration.widget({ widget: new RemovedChipWidget(chip.text, chip.truncated, chip.count ?? 0), side: -1 })
 }
 
 /** 一行的行内片段：新增字符区间 + 删除 chip。 */
@@ -251,6 +283,7 @@ function inlineIndexOf(set: ChangeSet | null, doc: Text): Map<number, LineInline
         at: Math.max(0, Math.round(chip.at)),
         text: chip.text,
         truncated: chip.truncated === true,
+        ...(chip.count === undefined ? {} : { count: chip.count }),
       })
     }
   }

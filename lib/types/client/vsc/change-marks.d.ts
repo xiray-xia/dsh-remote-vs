@@ -54,6 +54,14 @@ export interface RemovedChip {
     truncated: boolean;
     /** 这个 chip 落在哪一行（1-based）。**省略 = 所属 mark 的 `from` 行**。 */
     line?: number;
+    /**
+     * 这个 chip 代表的**被删行数**（省略或 1 = 单行/行内片段）。
+     *
+     * 一个整块删除（例如删掉 10 行）不能画成 10 个 chip 叠在同一列上 —— 那既读不出
+     * "删了 10 行"，也读不出内容。此时 `count > 1`，`text` 改为携带**预览**（前若干
+     * 行的原文，供 tooltip），渲染成一个 `−N 行已删除` 的可读胶囊。
+     */
+    count?: number;
 }
 /**
  * 一处改动：**1-based、闭区间**的行号。
@@ -95,6 +103,15 @@ export interface ChangeSet {
      * 护栏，比在浏览器里重算一遍替换区间可靠。
      */
     patches?: string[];
+    /**
+     * 整文件的补丁（一个文件头 + 全部 hunk），用于"撤销该文件的全部改动"。
+     *
+     * 一次远端写而不是逐 hunk 循环：后者会让后面每个 hunk 的行号整体错位，撤到一半
+     * 报冲突，文件就停在半截状态。补丁由 Host 生成（浏览器一侧没有基线内容，自己拼
+     * 出来的补丁只会把别人的改动一起盖掉）。省略 = 这个文件没有可整体撤销的补丁
+     * （新建 / 二进制 / 字节被上限扣下）。
+     */
+    filePatch?: string;
 }
 /** 换一份改动标记；`null` = 清空（有改动数据，但没有任何要画的东西）。 */
 export declare const setChangeSet: import("@codemirror/state").StateEffectType<ChangeSet | null>;

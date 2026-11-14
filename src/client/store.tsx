@@ -28,6 +28,7 @@ import { buildDiffModel } from './scm/diff-model.ts'
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
 import { changeSetFromHunks } from './changes/model.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
+import { changeOriginForTab, resolveUndoTarget } from './changes/undo-target.ts'
 import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, optimisticStageDetail, type ChangeEntry, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeRepoRoot, probeStatusDir, probeStatusPaths, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
 import { StageCoordinator } from './scm/stage-queue.ts'
@@ -648,6 +649,12 @@ export interface ExplorerValue {
    */
   undoChange: (tabId: string, mark: ChangeMark) => Promise<void>
   /**
+   * 撤销本会话对某个文件的**全部**改动（改动面板那一行的动作）。
+   *
+   * @returns 远端是否真的写了（`false` = 被某道门拒了，文件未变）。
+   */
+  revertFileChanges: (target: RevertFileTarget) => Promise<boolean>
+  /**
    * Write one file tab back to the remote host.
    * @returns true only when the write really succeeded — the caller uses it to
    *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
@@ -770,6 +777,7 @@ function build(): ExplorerValue {
     gotoChange,
     markChangeStale,
     undoChange,
+    revertFileChanges,
     saveTab,
     dismissConflict,
     reloadTab,
@@ -2616,7 +2624,31 @@ async function performSave(id: string, text: string, force: boolean): Promise<bo
     })
     markLiveEditorSaved(id, text)
     toast(`${t('editor.saved')} · ${target.rel}`, false)
-    await afterWrite()
+    /**
+     * The write is DONE, and the save result must not include a remote git read.
+     *
+     * `afterWrite()` re-reads `git status` and only then re-lists the tree. On a
+     * monorepo that read is the expensive half (the SCM panel shows the same cost:
+     * seconds, and minutes when the tree is cold), and awaiting it here made the
+     * editor's "saving…" last exactly that long — which is what "saving is slow,
+     * it refreshes git first" looks like from the outside. Nothing the save
+     * REPORTS depends on it: the baseline advances from the write's own answer
+     * above, and the dirty flag is re-derived synchronously.
+     *
+     * So it runs in the background. It still runs — the status marks and the tree
+     * revision catch up when it lands — and the read queue collapses a burst of
+     * saves into at most one follow-up walk (`ReadQueue.run(..., 'fresh')`).
+     */
+    void afterWrite()
+    /**
+     * The save just changed what this file looks like against the session
+     * baseline, so the marks painted from the PREVIOUS bytes are gone (typing
+     * invalidates them by design) — and nothing used to bring them back until the
+     * user clicked the row in the change panel again. Re-fetch them from the tab's
+     * own recorded provenance, which needs no panel interaction. Also background:
+     * it is one more remote read that must not stand between the user and "saved".
+     */
+    refreshChangeSetForTab(id)
     return true
   } catch (error) {
     /**
@@ -2915,7 +2947,7 @@ async function refreshChangeSet(tabId: string, context: UndoContext): Promise<vo
       applyChangeSet(tabId, null)
       return
     }
-    applyChangeSet(tabId, changeSetFromHunks(diff.hunks, `${tab.fullPath}@${Date.now()}`))
+    applyChangeSet(tabId, changeSetFromHunks(diff.hunks, `${tab.fullPath}@${Date.now()}`, diff.patch))
   } catch {
     // A read that fails leaves no marks rather than wrong ones.
     applyChangeSet(tabId, null)
@@ -3000,6 +3032,158 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
   // NEW buffer). Force a scan now: the list is the user's evidence that the
   // revert happened, and it must not lag the editor by a turn.
   void api.changes.list(context.sessionId, true).catch(() => undefined)
+}
+
+/**
+ * Coordinates for "undo everything this session did to this file".
+ *
+ * Handed over by the change panel, which is the only surface that knows both the
+ * file and the session it belongs to. `mode` comes from the HOST
+ * (`RemoteChangedFile.revert`), never from the client: only git can say whether a
+ * creation has a copy to fall back on.
+ */
+export interface RevertFileTarget {
+  sessionId: string
+  bindingId: string
+  alias: string
+  root: string
+  path: string
+  display: string
+  mode: 'patch' | 'delete'
+}
+
+/**
+ * Revert one file's WHOLE session change set (the panel row's action).
+ *
+ * Three things make this a separate path from `undoChange`, and each one is
+ * load-bearing:
+ *
+ * 1. **It works without an open tab.** The panel lists files nobody opened, so
+ *    the coordinates cannot come from `undoContext()` (which describes the tab on
+ *    screen). They arrive with the call and are validated by the SAME rules
+ *    (`resolveUndoTarget`: session agreement, binding identity, path under the
+ *    ledger root) — a row from another conversation, or from a sibling binding
+ *    that happens to share the alias, is refused rather than guessed.
+ * 2. **It is ONE remote write.** The host serves the file as a single patch, which
+ *    is exactly what `git apply -R` needs to restore the session baseline; a loop
+ *    of per-hunk applies would shift every later hunk and report a conflict
+ *    halfway through, leaving the file half reverted.
+ * 3. **A creation is not a patch.** `mode: 'delete'` (a tracked addition, where
+ *    git still holds the bytes) deletes the file behind an explicit confirmation;
+ *    an untracked creation never reaches here, because the host offers no mode
+ *    for it.
+ *
+ * The order of the gates is the one `undoChange` established: an unsaved buffer
+ * refuses first (a remote write must never overwrite what the user has not
+ * saved), then the offline check, then the coordinates, then the patch.
+ *
+ * @returns whether the remote was actually written.
+ */
+export async function revertFileChanges(target: RevertFileTarget): Promise<boolean> {
+  const tab = state.tabs.find(item => item.kind === 'file' && item.fullPath === target.path)
+  if (tab?.dirty === true) {
+    info(t('changes.undoDirty'))
+    return false
+  }
+  if (connectionStateOf(target.alias) === 'error') {
+    info(t('connection.actionFailed'))
+    return false
+  }
+  const origin = {
+    sessionId: target.sessionId,
+    bindingId: target.bindingId,
+    alias: target.alias,
+    root: target.root,
+  }
+  /**
+   * The session check inside `resolveUndoTarget` is trivially true here (the panel
+   * passed both ids), and that is fine: the panel can only hand over a row from the
+   * summary it fetched FOR this session (`data.id === sessionId`). What this call
+   * really answers is the part the panel cannot know: is that binding still the
+   * same one (id + alias), and does this path still sit under the ledger root the
+   * patch was computed against?
+   */
+  const resolved = resolveUndoTarget({
+    origin,
+    tabPath: target.path,
+    panelSessionId: target.sessionId,
+    bindings: remoteOpenBindings().bindings,
+  })
+  if (!resolved.ok) {
+    info(t('changes.undoNoContext'))
+    return false
+  }
+  try {
+    if (target.mode === 'patch') {
+      // Fresh from the host: the panel's numbers may be a poll old, and the patch
+      // must describe the file as it is NOW.
+      const diff = await api.changes.diff(target.sessionId, target.path)
+      const patch = diff !== null && diff.kind === 'text' ? (diff.patch ?? '') : ''
+      if (patch.trim() === '') {
+        info(t('changes.undoMissing'))
+        return false
+      }
+      await applyHunk(target.alias, target.root, patch, 'revert')
+    } else {
+      const ok = await confirmDialog({
+        title: t('changes.revertCreationTitle'),
+        text: t('changes.revertCreationText').replace('{path}', target.display),
+        danger: true,
+        okText: t('changes.revertCreationOk'),
+      })
+      if (!ok) return false
+      await api.fileOp.rm(target.alias, target.path, false)
+    }
+  } catch (error) {
+    if (isConnectionFailure(error)) {
+      info(t('connection.actionFailed'))
+      return false
+    }
+    const detail = error instanceof Error ? error.message.trim() : String(error).trim()
+    // A refused reverse patch means "the surroundings moved" (that is the conflict
+    // guard); a failed delete has no such reading, so it gets its own wording
+    // instead of pretending the patch context drifted.
+    const label = target.mode === 'delete' ? t('changes.revertFailed') : t('changes.undoConflict')
+    info(detail === '' ? label : `${label} · ${detail}`)
+    return false
+  }
+  /**
+   * The write SUCCEEDED, so nothing below may be reported as a failure: the
+   * remote file has already changed. Refreshing the tab and the list is best
+   * effort — a read that fails here leaves a stale panel, not a lost revert.
+   */
+  try {
+    // Re-read the tab: the write took a round trip, and it may have been closed
+    // (or replaced) meanwhile.
+    const live = state.tabs.find(item => item.id === (tab?.id ?? ''))
+    if (target.mode === 'delete') {
+      // The file is gone; a tab showing it would keep a buffer that cannot be
+      // saved anywhere sensible.
+      if (live !== undefined) closeTab(live.id)
+    } else if (live !== undefined) {
+      await reloadTab(live.id)
+      await refreshChangeSet(live.id, resolved.origin)
+    }
+  } catch {
+    // Deliberately swallowed: see above.
+  }
+  void api.changes.list(target.sessionId, true).catch(() => undefined)
+  info(target.mode === 'delete' ? t('changes.deletedCreation') : t('changes.revertedFile'))
+  return true
+}
+
+/**
+ * Re-read one tab's change marks from the provenance recorded for it.
+ *
+ * Used after a successful save: typing invalidates the painted marks by design
+ * (see `change-marks.ts`), and without this the file would keep its "positions
+ * stale" badge until the user clicked the row again. A tab nobody attached marks
+ * to has no provenance, so this is a no-op for every file opened from the tree.
+ */
+function refreshChangeSetForTab(tabId: string): void {
+  const origin = changeOriginForTab(tabId)
+  if (origin === undefined) return
+  void refreshChangeSet(tabId, origin)
 }
 
 /** Mount-time hook: boot the store for a given ctx. */

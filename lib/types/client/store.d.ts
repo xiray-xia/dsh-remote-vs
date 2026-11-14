@@ -291,6 +291,12 @@ export interface ExplorerValue {
      */
     undoChange: (tabId: string, mark: ChangeMark) => Promise<void>;
     /**
+     * 撤销本会话对某个文件的**全部**改动（改动面板那一行的动作）。
+     *
+     * @returns 远端是否真的写了（`false` = 被某道门拒了，文件未变）。
+     */
+    revertFileChanges: (target: RevertFileTarget) => Promise<boolean>;
+    /**
      * Write one file tab back to the remote host.
      * @returns true only when the write really succeeded — the caller uses it to
      *   advance the editor's dirty baseline (see `CodeEditorHandle.markSaved`).
@@ -765,5 +771,50 @@ export declare function gotoChange(tabId: string, dir: 1 | -1): number | undefin
  */
 export declare function markChangeStale(tabId: string): void;
 export declare function undoChange(tabId: string, mark: ChangeMark): Promise<void>;
+/**
+ * Coordinates for "undo everything this session did to this file".
+ *
+ * Handed over by the change panel, which is the only surface that knows both the
+ * file and the session it belongs to. `mode` comes from the HOST
+ * (`RemoteChangedFile.revert`), never from the client: only git can say whether a
+ * creation has a copy to fall back on.
+ */
+export interface RevertFileTarget {
+    sessionId: string;
+    bindingId: string;
+    alias: string;
+    root: string;
+    path: string;
+    display: string;
+    mode: 'patch' | 'delete';
+}
+/**
+ * Revert one file's WHOLE session change set (the panel row's action).
+ *
+ * Three things make this a separate path from `undoChange`, and each one is
+ * load-bearing:
+ *
+ * 1. **It works without an open tab.** The panel lists files nobody opened, so
+ *    the coordinates cannot come from `undoContext()` (which describes the tab on
+ *    screen). They arrive with the call and are validated by the SAME rules
+ *    (`resolveUndoTarget`: session agreement, binding identity, path under the
+ *    ledger root) — a row from another conversation, or from a sibling binding
+ *    that happens to share the alias, is refused rather than guessed.
+ * 2. **It is ONE remote write.** The host serves the file as a single patch, which
+ *    is exactly what `git apply -R` needs to restore the session baseline; a loop
+ *    of per-hunk applies would shift every later hunk and report a conflict
+ *    halfway through, leaving the file half reverted.
+ * 3. **A creation is not a patch.** `mode: 'delete'` (a tracked addition, where
+ *    git still holds the bytes) deletes the file behind an explicit confirmation;
+ *    an untracked creation never reaches here, because the host offers no mode
+ *    for it.
+ *
+ * The order of the gates is the one `undoChange` established: an unsaved buffer
+ * refuses first (a remote write must never overwrite what the user has not
+ * saved), then the offline check, then the coordinates, then the patch.
+ *
+ * @returns whether the remote was actually written.
+ */
+export declare function revertFileChanges(target: RevertFileTarget): Promise<boolean>;
 /** Mount-time hook: boot the store for a given ctx. */
 export declare function useBootstrap(ctx: Context): void;

@@ -166,6 +166,54 @@ function chipAt(at: number, text: string): RemovedChip | undefined {
 }
 
 /**
+ * How many lines of a collapsed deletion block travel as the tooltip preview.
+ *
+ * The pill only shows the COUNT, so the text is not on screen; it is still worth
+ * carrying a bounded prefix for the hover — enough to recognize the block, never
+ * enough to build a thousand-line title from a thousand-line removal.
+ */
+const MAX_BLOCK_PREVIEW_LINES = 20
+
+/**
+ * One chip for a run of deleted lines.
+ *
+ * A block deletion used to emit one chip PER line, every one of them at column 0
+ * of the same anchor line: a ten-line removal became ten struck-through
+ * fragments printed on top of each other, which says neither "ten lines" nor
+ * what they were. A run longer than a single line now collapses into one chip
+ * carrying the count (rendered as `−N 行已删除`) with a bounded preview in its
+ * title; a one-line removal keeps the exact text at the cut, which is the case
+ * where the struck-through words are genuinely readable.
+ *
+ * @param deleted - the run's deleted texts, in order.
+ * @param line - the line the run belongs to.
+ * @param anchor - the mark's anchor line (see {@link chipOnLine}).
+ */
+function deletedRunChip(deleted: readonly string[], line: number, anchor: number): RemovedChip | undefined {
+  const [only] = deleted
+  if (only === undefined) return undefined
+  if (deleted.length === 1) {
+    const chip = chipAt(0, only)
+    return chip === undefined ? undefined : chipOnLine(chip, line, anchor)
+  }
+  const preview = deleted
+    .slice(0, MAX_BLOCK_PREVIEW_LINES)
+    .map(text => (text.length > MAX_CHIP_CHARS ? text.slice(0, MAX_CHIP_CHARS) : text))
+    .join('\n')
+  return chipOnLine(
+    {
+      at: 0,
+      text: preview,
+      // The preview was cut either by the line cap or by the line count.
+      truncated: deleted.length > MAX_BLOCK_PREVIEW_LINES || deleted.some(text => text.length > MAX_CHIP_CHARS),
+      count: deleted.length,
+    },
+    line,
+    anchor,
+  )
+}
+
+/**
  * Attach `line` only when the fragment is NOT on the mark's anchor line.
  *
  * Single-line changes are the common case, and there the fragment's line is
@@ -196,24 +244,57 @@ function shortEnough(deleted: readonly string[], added: readonly AddedLine[]): b
 /**
  * Fill in `mark.inline` / `mark.removed` for one modified block.
  *
- * Pairing is positional: the i-th deleted line of the block goes with the i-th
- * added line (git puts every deletion of a block before its additions, and a
- * block with unequal counts leaves the extras as pure additions/removals).
+ * Pairing happens in two phases, and the first one is what keeps the highlight
+ * honest:
+ *
+ * 1. **Exact matches are consumed first, at any index.** A block that was merely
+ *    REORDERED (`a`,`b` → `b`,`a`) has no character-level change in it, but
+ *    positional pairing compares `a` against `b` and paints "these characters
+ *    changed" on two lines that did not change at all. The same phase fixes the
+ *    common "one line inserted inside an edited run" shape, where every line
+ *    after the insertion used to be paired with the wrong neighbour. Lookup goes
+ *    through a text → indices map, so the phase stays linear in the block rather
+ *    than quadratic in its lines.
+ * 2. **What is left pairs by position** — the i-th edited deletion with the i-th
+ *    remaining addition. git puts every deletion of a block before its
+ *    additions, and a block with unequal counts leaves the extras as pure
+ *    additions/removals.
  *
  * @param mark - the block's mark (mutated).
  * @param deleted - the block's deleted texts, in order.
  * @param added - the block's added lines, in order.
  */
 function attachInline(mark: ChangeMark, deleted: readonly string[], added: readonly AddedLine[]): void {
-  const pairs = Math.min(deleted.length, added.length)
+  // Phase 1 — consume lines that did not change, only moved.
+  const pending = new Map<string, number[]>()
+  added.forEach((item, index) => {
+    const list = pending.get(item.text)
+    if (list === undefined) pending.set(item.text, [index])
+    else list.push(index)
+  })
+  const edited: string[] = []
+  const used = new Array<boolean>(added.length).fill(false)
+  for (const text of deleted) {
+    const list = pending.get(text)
+    if (list === undefined || list.length === 0) {
+      edited.push(text)
+      continue
+    }
+    const index = list.shift()
+    if (index !== undefined) used[index] = true
+  }
+  const fresh = added.filter((_item, index) => !used[index])
+
+  // Phase 2 — positional pairing over the survivors.
+  const pairs = Math.min(edited.length, fresh.length)
   const inline: InlineRange[] = []
   const removed: RemovedChip[] = []
   for (let index = 0; index < pairs; index += 1) {
-    const before = deleted[index]
-    const after = added[index].text
-    const line = added[index].line
-    // A pair that came out identical (the block was reordered, not rewritten).
-    if (before === after) continue
+    const before = edited[index]
+    const item = fresh[index]
+    if (before === undefined || item === undefined) continue
+    const after = item.text
+    const line = item.line
     const { head, oldMid, newMid } = splitCommon(before, after)
     if (newMid.length === 0) {
       // The line was only shortened: there is no new character to paint, so the
@@ -231,11 +312,10 @@ function attachInline(mark: ChangeMark, deleted: readonly string[], added: reado
     for (const range of refineRanges(oldMid, newMid, head)) inline.push(rangeOnLine(range, line, mark.from))
   }
   // Deleted lines with no added counterpart: their text no longer exists in the
-  // new file, so it hangs on the anchor line's first column as a chip.
-  for (let index = pairs; index < deleted.length; index += 1) {
-    const chip = chipAt(0, deleted[index])
-    if (chip !== undefined) removed.push(chip)
-  }
+  // new file, so it hangs on the anchor line's first column — as one collapsed
+  // chip when the run is longer than a line (see `deletedRunChip`).
+  const tailChip = deletedRunChip(edited.slice(pairs), mark.from, mark.from)
+  if (tailChip !== undefined) removed.push(tailChip)
   if (inline.length > 0) mark.inline = inline
   if (removed.length > 0) mark.removed = removed
 }
@@ -280,13 +360,14 @@ function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[], index: number): num
     } else if (deleted.length > 0) {
       const anchor = Math.max(1, line)
       const mark: ChangeMark = { from: anchor, to: anchor, kind: 'del', hunk: index }
-      if (inlineAllowed && deleted.every(text => text.length <= MAX_INLINE_LINE)) {
-        const chips: RemovedChip[] = []
-        for (const text of deleted) {
-          const chip = chipAt(0, text)
-          if (chip !== undefined) chips.push(chip)
-        }
-        if (chips.length > 0) mark.removed = chips
+      // A collapsed block pill carries a bounded preview only, so the per-line
+      // length cap (which exists to keep character-level work bounded) does not
+      // apply to it; a single deleted line still has to fit before its text is
+      // put on screen.
+      const printable = deleted.length > 1 || deleted.every(text => text.length <= MAX_INLINE_LINE)
+      if (inlineAllowed && printable) {
+        const chip = deletedRunChip(deleted, anchor, anchor)
+        if (chip !== undefined) mark.removed = [chip]
       }
       marks.push(mark)
       first ??= anchor
@@ -319,9 +400,11 @@ function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[], index: number): num
  *
  * @param hunks - served hunks for the whole session.
  * @param stamp - identity of the comparison (file + baseline + turn).
+ * @param filePatch - the host's whole-file reverse patch, when it served one
+ *   (see `ChangeSet.filePatch`); '' / missing = nothing to revert as a whole.
  * @returns the mark set the editor paints, or {@link EMPTY_CHANGE_SET}.
  */
-export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string): ChangeSet {
+export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string, filePatch?: string): ChangeSet {
   if (hunks.length === 0) return { marks: [], hunks: [], stamp, patches: [] }
   const marks: ChangeMark[] = []
   // `hunks[i]` / `patches[i]` must stay in step with the mark's `hunk` index, so
@@ -343,5 +426,6 @@ export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string)
     hunks: [...new Set(order.map(anchor => anchor.line))],
     stamp,
     patches,
+    ...(filePatch === undefined || filePatch === '' ? {} : { filePatch }),
   }
 }

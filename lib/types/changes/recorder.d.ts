@@ -56,6 +56,12 @@ export interface SessionChangesDeps {
     /** How often the untracked scan may run again (default five seconds). */
     untrackedRefreshMs?: number;
     /**
+     * Directory names the untracked scan leaves out (build output, dependency
+     * caches). Defaults to {@link UNTRACKED_EXCLUDED_DIRECTORIES}; an explicit
+     * empty array turns the exclusion off.
+     */
+    excludeDirs?: readonly string[];
+    /**
      * Override the per-exec budget outright.
      *
      * The timeouts setting is clamped to a sane range, which is right for a Host
@@ -83,6 +89,14 @@ export declare class SessionChanges {
      * the last scan: a revert, a save from the editor or a shell command all
      * change the file between scans, and replaying a cached copy against a fresh
      * buffer is exactly how the painted lines end up at the wrong places.
+     *
+     * This is the ONE read a user asks for by clicking a row, so it is allowed a
+     * larger per-file budget than a scan (`DIFF_MAX_FILE_BYTES`): a file the list
+     * had to withhold as "too large" can still be reviewed and reverted here,
+     * while a scan stays cheap. A withheld HEAD side is retaken at that budget
+     * (git has the bytes); a withheld BASELINE side is not — that snapshot
+     * described the session's own starting point and cannot be reconstructed, so
+     * the file stays display-only rather than guessing a wrong reverse.
      *
      * @param sessionId - live session owning the ledger.
      * @param path - the file's remote absolute path (as listed in the summary).
@@ -267,6 +281,13 @@ export declare class SessionChanges {
      * command are visible ONLY through this scan.
      */
     private untrackedBudget;
+    /**
+     * The exclusions this ledger scans with, normalized once per call.
+     *
+     * `??` and not `||`: an explicit empty array is a caller saying "count
+     * everything", which must stay distinguishable from "not configured".
+     */
+    private excludedDirs;
     private budget;
     private warn;
 }

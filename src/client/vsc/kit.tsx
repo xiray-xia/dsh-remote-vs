@@ -783,6 +783,15 @@ export function ContextMenu(props: {
   y: number
   entries: MenuEntry[]
   onClose: () => void
+  /**
+   * Extra class on the menu box, for a surface that lives OUTSIDE `.rvs-root`.
+   *
+   * The menu is portalled to `document.body`, so the `--rvs-*` variables defined
+   * on the root never reach it: an outside surface (the change panel above the
+   * composer) supplies its own palette through this hook instead of forking the
+   * component.
+   */
+  className?: string
 }): ReactNode {
   const boxRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ left: props.x, top: props.y })
@@ -896,7 +905,13 @@ export function ContextMenu(props: {
   if (typeof document === 'undefined') return null
   return createPortal(
     <div className="rvs-portal">
-      <div ref={boxRef} className="rvs-menu" role="menu" style={{ left: pos.left, top: pos.top }} onKeyDown={onMenuKeyDown}>
+      <div
+        ref={boxRef}
+        className={props.className === undefined ? 'rvs-menu' : `rvs-menu ${props.className}`}
+        role="menu"
+        style={{ left: pos.left, top: pos.top }}
+        onKeyDown={onMenuKeyDown}
+      >
         {props.entries.map((entry, index) => (
           <div key={`${entry.label}-${index}`}>
             {entry.separated === true && index > 0 && <div className="rvs-menu-sep" />}

@@ -40,6 +40,7 @@ import type {
 import type { RemotePool } from '../pool.ts'
 import type { RemoteWorlds, WorldRoute } from '../p2/worlds.ts'
 import {
+  excludeDirNames,
   parseReads,
   parseStatusZ,
   parseUntrackedZ,
@@ -47,12 +48,13 @@ import {
   readWorktreeCommand,
   reposBelowCommand,
   trackedStatusCommand,
+  UNTRACKED_EXCLUDED_DIRECTORIES,
   untrackedCommand,
   type ChangeStatus,
   type ReadResult,
   type StatusEntry,
 } from './status.ts'
-import { diffText, hunkPatch } from './text-diff.ts'
+import { diffText, filePatch, hunkPatch } from './text-diff.ts'
 
 /** The two facts a turn boundary needs from a Session, kept cordis-free. */
 export interface LedgerTarget {
@@ -78,6 +80,12 @@ export interface SessionChangesDeps {
   untrackedBudgetMs?: number
   /** How often the untracked scan may run again (default five seconds). */
   untrackedRefreshMs?: number
+  /**
+   * Directory names the untracked scan leaves out (build output, dependency
+   * caches). Defaults to {@link UNTRACKED_EXCLUDED_DIRECTORIES}; an explicit
+   * empty array turns the exclusion off.
+   */
+  excludeDirs?: readonly string[]
   /**
    * Override the per-exec budget outright.
    *
@@ -111,24 +119,36 @@ interface FileRecord {
   binary: boolean
   truncated: boolean
   /**
-   * Whether {@link SessionChanges.diff} may hand out a real reverse patch.
+   * Which side the `before` bytes came from.
    *
-   * A record with no old side is a whole-file creation, and the only reverse of
-   * its patch is deleting the file. That is recoverable when git holds the
-   * content (a tracked addition — the index still has it) and unrecoverable when
-   * it does not: an untracked file exists only in the worktree, so a revert
-   * would destroy its single copy. A missing old side (a failed read) is not
-   * evidence either, and a creation patch built from missing evidence is a
-   * guess. Both cases are still served for display; only the patch is withheld,
-   * which makes the client's undo path fail closed instead of deleting.
+   * `baseline` is the content a file already carried when the session started
+   * (pre-existing dirt), `head` is git's committed blob. The distinction is
+   * load-bearing for big files: a HEAD read can be taken again at a larger cap
+   * when the user asks for one file, while the baseline snapshot cannot be
+   * retaken — it described the worktree at session start, which has moved on.
+   * Re-reading `HEAD` for a baseline-backed record would silently build a
+   * revert that discards the user's own pre-session edits.
    */
-  undoable: boolean
+  beforeFrom: 'baseline' | 'head' | 'none'
 }
 
 /** Grace added to an exec budget before the watchdog gives up on it. */
 const WATCHDOG_GRACE_MS = 5_000
 /** Sentinel for "the host call never came back". */
 const WATCHDOG_FIRED = 'watchdog-fired' as const
+
+/**
+ * Per-file budget for the ONE read a click asks for (`diff`).
+ *
+ * A scan compares hundreds of paths and stays at 256 KiB; a single file the user
+ * asked to review is a different trade — 2 MiB is enough for the large sources
+ * a monorepo carries while keeping the base64 reply (≈2.7 MB) inside what one
+ * exec comfortably returns.
+ */
+const DIFF_MAX_FILE_BYTES = 2 * 1024 * 1024
+
+/** The single-file read budget, as `readPaths` wants it. */
+const DIFF_LIMITS = { perFile: DIFF_MAX_FILE_BYTES, total: DIFF_MAX_FILE_BYTES } as const
 
 /** One session's bookkeeping. */
 interface Ledger {
@@ -277,6 +297,10 @@ export class SessionChanges {
       ?? (ledger.untrackedFailure === undefined
         ? undefined
         : `new-file scan unavailable: ${ledger.untrackedFailure} (use the refresh button to retry)`)
+    // Which paths the scan was told to skip. Said out loud (not silently
+    // filtered) so a file the user expected to see is never "missing" for an
+    // unknown reason; the SCM panel is the surface that shows everything.
+    const excludedDirs = this.excludedDirs()
     return {
       alias: ledger.alias,
       root: ledger.root,
@@ -285,6 +309,7 @@ export class SessionChanges {
       added: ledger.added,
       deleted: ledger.deleted,
       at: ledger.at,
+      ...(excludedDirs.length === 0 ? {} : { excludedDirs }),
       /*
        * What "pending" is allowed to mean to the panel.
        *
@@ -314,6 +339,14 @@ export class SessionChanges {
    * change the file between scans, and replaying a cached copy against a fresh
    * buffer is exactly how the painted lines end up at the wrong places.
    *
+   * This is the ONE read a user asks for by clicking a row, so it is allowed a
+   * larger per-file budget than a scan (`DIFF_MAX_FILE_BYTES`): a file the list
+   * had to withhold as "too large" can still be reviewed and reverted here,
+   * while a scan stays cheap. A withheld HEAD side is retaken at that budget
+   * (git has the bytes); a withheld BASELINE side is not — that snapshot
+   * described the session's own starting point and cannot be reconstructed, so
+   * the file stays display-only rather than guessing a wrong reverse.
+   *
    * @param sessionId - live session owning the ledger.
    * @param path - the file's remote absolute path (as listed in the summary).
    * @returns hunks for decorations, or null when the session/file is unknown.
@@ -329,7 +362,7 @@ export class SessionChanges {
     let afterText = record.after
     let binary = record.binary
     let truncated = record.truncated
-    const fresh = await this.readPaths(ledger, [record.display], 'worktree')
+    const fresh = await this.readPaths(ledger, [record.display], 'worktree', DIFF_LIMITS)
     if (ledger.disposed) return null
     const side = fresh.get(record.display)
     if (side !== undefined) {
@@ -341,7 +374,24 @@ export class SessionChanges {
     if (binary) {
       return { kind: 'binary', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
     }
-    const result = diffText(record.before ?? '', afterText ?? '')
+    // A HEAD side the scan had to withhold is worth one more read at the larger
+    // budget; the baseline side is not (see the note above).
+    let beforeText = record.before
+    if (beforeText === null && record.beforeFrom === 'head') {
+      const head = await this.readPaths(ledger, [record.display], 'head', DIFF_LIMITS)
+      if (ledger.disposed) return null
+      beforeText = head.get(record.display)?.text ?? null
+    }
+    const result = diffText(beforeText ?? '', afterText ?? '')
+    /**
+     * The reverse patch exists only when the comparison is complete and has an
+     * old side. A whole-file creation has no old side: its reverse is "delete the
+     * file", which a patch cannot express (the client uses
+     * `RemoteChangedFile.revert` for that case instead). Withheld bytes are not
+     * evidence either, so a truncated after side gets no patch — the client's
+     * undo path then refuses (`changes.undoMissing`) instead of guessing.
+     */
+    const reverse = beforeText !== null && !truncated ? filePatch(record.display, result.hunks) : ''
     const hunks: UnifiedHunk[] = result.hunks.map(hunk => ({
       oldStart: hunk.oldStart,
       oldCount: hunk.oldLines,
@@ -353,9 +403,8 @@ export class SessionChanges {
       // change", so it must be a real patch, not a display artifact. Empty
       // means "display only": the client's undo path refuses an empty patch
       // (`changes.undoMissing`), which is the fail-closed answer for a record
-      // whose reverse would delete a file git has no copy of (see
-      // `FileRecord.undoable`).
-      patch: record.undoable ? hunkPatch(record.display, hunk) : '',
+      // whose reverse would delete a file git has no copy of.
+      patch: reverse === '' ? '' : hunkPatch(record.display, hunk),
     }))
     if (hunks.length === 0) {
       return { kind: 'missing', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
@@ -365,6 +414,7 @@ export class SessionChanges {
       path,
       display: record.display,
       hunks,
+      ...(reverse === '' ? {} : { patch: reverse }),
       ...(status === undefined ? {} : { status }),
       ...(truncated ? { truncated: true as const } : {}),
     }
@@ -692,7 +742,9 @@ export class SessionChanges {
     let added = 0
     let deleted = 0
     for (const entry of listed) {
-      const beforeSide = baseline.get(entry.path) ?? head.get(entry.path)
+      const fromBaseline = baseline.get(entry.path)
+      const fromHead = head.get(entry.path)
+      const beforeSide = fromBaseline ?? fromHead
       const afterSide = after.get(entry.path)
       const before = beforeSide?.text ?? null
       const afterText = afterSide?.text ?? null
@@ -711,14 +763,15 @@ export class SessionChanges {
       if ((binary || fileTruncated) && sameStat(beforeSide, afterSide)) continue
       const oversized = fileTruncated && !binary
       // No old side = whole-file creation, and the only reverse of its patch is
-      // deleting the file. git holds the content only for a TRACKED addition (the
-      // index has it); an untracked one exists nowhere else, and a "before side"
-      // that a failed read could not see is not evidence either. A reverse patch
-      // cannot express "un-add" anyway, so no creation is offered one — the hunk
-      // is still served for display (the client's undo path refuses an empty
-      // patch: `changes.undoMissing`).
+      // deleting the file. That is recoverable when git holds the content — a
+      // tracked addition, where the index still has the bytes — and not when it
+      // does not: an untracked file exists only in the worktree, so "undo" would
+      // destroy its single copy. The summary therefore tells the client which
+      // action (if any) it may offer, instead of letting the browser guess.
       const creation = before === null
-      const undoable = !binary && !oversized && beforeSide !== undefined && !creation
+      const revert: 'patch' | 'delete' | undefined = !binary && !oversized && beforeSide !== undefined && !creation
+        ? 'patch'
+        : (entry.status === 'A' ? 'delete' : undefined)
       const diff = binary || oversized ? { added: 0, deleted: 0 } : diffText(before ?? '', afterText ?? '')
       const status = panelStatus(entry.status)
       const absolute = posixJoin(ledger.root, entry.path)
@@ -730,7 +783,7 @@ export class SessionChanges {
         after: afterText,
         binary,
         truncated: fileTruncated,
-        undoable,
+        beforeFrom: fromBaseline !== undefined ? 'baseline' : fromHead !== undefined ? 'head' : 'none',
       })
       added += diff.added
       deleted += diff.deleted
@@ -742,6 +795,7 @@ export class SessionChanges {
         ...(binary ? { binary: true as const } : {}),
         ...(oversized ? { oversized: true as const } : {}),
         ...(status === undefined ? {} : { status }),
+        ...(revert === undefined ? {} : { revert }),
       })
     }
     files.sort((left, right) => left.display.localeCompare(right.display))
@@ -884,7 +938,7 @@ export class SessionChanges {
     ledger.untrackedAt = Date.now()
     const job = (async () => {
       const started = Date.now()
-      const scan = await this.run(ledger.alias, untrackedCommand(root), this.untrackedBudget())
+      const scan = await this.run(ledger.alias, untrackedCommand(root, this.excludedDirs()), this.untrackedBudget())
       ledger.untrackedMs = Date.now() - started
       if (ledger.disposed) return
       if (ledger.root !== root) return
@@ -993,10 +1047,11 @@ export class SessionChanges {
     ledger: Ledger,
     paths: readonly string[],
     side: 'worktree' | 'head',
+    limits?: { perFile: number; total: number },
   ): Promise<Map<string, ReadResult>> {
     if (paths.length === 0) return new Map()
-    const perFile = this.deps.maxFileBytes ?? 256 * 1024
-    const total = this.deps.maxTotalBytes ?? 8 * 1024 * 1024
+    const perFile = limits?.perFile ?? this.deps.maxFileBytes ?? 256 * 1024
+    const total = limits?.total ?? this.deps.maxTotalBytes ?? 8 * 1024 * 1024
     const command = side === 'worktree'
       ? readWorktreeCommand(ledger.root, paths, perFile, total)
       : readHeadCommand(ledger.root, paths, perFile, total)
@@ -1063,6 +1118,16 @@ export class SessionChanges {
    */
   private untrackedBudget(): number {
     return this.deps.untrackedBudgetMs ?? this.budget(this.deps.timeouts().gitMs, 10_000, 180_000)
+  }
+
+  /**
+   * The exclusions this ledger scans with, normalized once per call.
+   *
+   * `??` and not `||`: an explicit empty array is a caller saying "count
+   * everything", which must stay distinguishable from "not configured".
+   */
+  private excludedDirs(): string[] {
+    return excludeDirNames(this.deps.excludeDirs ?? UNTRACKED_EXCLUDED_DIRECTORIES)
   }
 
   private budget(configured: number, floor: number, ceiling: number): number {

@@ -31,6 +31,8 @@ export declare const EMPTY_CHANGE_SET: ChangeSet;
  *
  * @param hunks - served hunks for the whole session.
  * @param stamp - identity of the comparison (file + baseline + turn).
+ * @param filePatch - the host's whole-file reverse patch, when it served one
+ *   (see `ChangeSet.filePatch`); '' / missing = nothing to revert as a whole.
  * @returns the mark set the editor paints, or {@link EMPTY_CHANGE_SET}.
  */
-export declare function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string): ChangeSet;
+export declare function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string, filePatch?: string): ChangeSet;

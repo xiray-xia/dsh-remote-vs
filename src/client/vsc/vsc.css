@@ -1837,6 +1837,29 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-word-del {
 }
 
 /**
+ * 整块删除：一枚带行数的胶囊，不是一行划掉的文字。
+ *
+ * 多行删除的原文是一个段落，划线堆在锚点行首只会糊成一片（数据层因此把 `count > 1`
+ * 的 chip 压成一枚，见 `change-marks.ts` 的 `RemovedChipWidget`）。这里只做外形：
+ * 去掉继承来的删除线（胶囊不是"被划掉的字符串"），字号与计数对齐，别把行高撑开。
+ */
+.rvs-edge .rvs-change-block-del {
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 3px;
+  background-color: rgba(248, 81, 73, .18);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  opacity: 1;
+  white-space: nowrap;
+}
+
+body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-block-del {
+  background-color: rgba(207, 34, 46, .14);
+}
+
+/**
  * 改动跳转按钮：浮在编辑器右上角。
  *
  * 放在编辑器上而不是面板里 —— 文件打开后光标就在这里，而面板可能被收起、被滚走。

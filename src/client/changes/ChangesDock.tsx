@@ -12,8 +12,15 @@
  * written with `node:fs`), which the probe measured as 58 remote sessions with
  * zero change events.
  *
- * Clicking a row opens the file in the remote editor and hands the editor the
- * same hunks, so the changed lines are painted in place.
+ * Three things happen here, and they are deliberately different in kind:
+ * - a row's LEFT click opens the file and hands the editor the same hunks, so the
+ *   changed lines are painted in place;
+ * - a row's RIGHT click offers the writes ("revert everything this session did to
+ *   this file", "undo a tracked creation") plus the navigation shortcuts. The
+ *   host decides which of those exist (`RemoteChangedFile.revert`), because only
+ *   git knows whether a creation has a copy to fall back on;
+ * - the ✓ on a row is a LOCAL review note (`review-state.ts`): it writes nothing,
+ *   it is what makes a thirty-file refactor converge.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -25,8 +32,10 @@ import {
   openRemoteFileInBinding,
   refreshAll,
   remoteOpenBindings,
+  revertFileChanges,
   sessionRepoSubdir,
   setFollowSession,
+  setView,
   useExplorer,
   workspaceMatchesSession,
 } from '../store.tsx'
@@ -34,13 +43,31 @@ import { bindingForChangedFile } from '../remote-file-open-target.ts'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
+import {
+  isReviewed,
+  parseReviewed,
+  pruneReviewed,
+  reviewedCount,
+  serializeReviewed,
+  setAllReviewed,
+  toggleReviewed as toggleReviewedEntry,
+} from './review-state.ts'
 import { setUndoContext } from './undo-context.ts'
 import { forgetChangeOrigin, publishableUndoOrigin, rememberChangeOrigin } from './undo-target.ts'
-import { FileIcon } from '../vsc/kit.tsx'
+import { ContextMenu, FileIcon, copyText, useContextMenu } from '../vsc/kit.tsx'
 import './changes.css'
 
 /** How often an open panel re-reads the ledger (the host refreshes it per turn). */
 const POLL_MS = 3000
+
+/**
+ * Where the review marks are remembered, per session.
+ *
+ * `localStorage`, like the port-forward rules: this is a note about the user's own
+ * reading progress, not a fact about the remote tree, so it must survive a page
+ * reload without becoming a protocol field nobody else needs.
+ */
+const REVIEW_STORAGE_PREFIX = 'rvs.changes.reviewed.'
 
 /**
  * How many polls between two follow retries (5 × 3 s = one probe every 15 s).
@@ -79,6 +106,17 @@ function splitDisplay(display: string): { dir: string; name: string } {
   return at < 0 ? { dir: '', name: display } : { dir: display.slice(0, at + 1), name: display.slice(at + 1) }
 }
 
+/** Read one session's review marks, tolerating a storage that refuses to answer. */
+function loadReviewed(sessionId: string | undefined): Record<string, 1> {
+  if (sessionId === undefined || sessionId === '') return {}
+  try {
+    return parseReviewed(window.localStorage.getItem(`${REVIEW_STORAGE_PREFIX}${sessionId}`))
+  } catch {
+    // Private mode / disabled storage: the marks simply do not persist.
+    return {}
+  }
+}
+
 export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const explorer = useExplorer()
   // The dock is a second surface of the same store as the explorer, and it can
@@ -104,9 +142,13 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   // push the composer off the screen.
   const [collapsed, setCollapsed] = useState(true)
   const [busy, setBusy] = useState<string | undefined>(undefined)
+  /** This session's local review marks (see `review-state.ts`). */
+  const [reviewed, setReviewed] = useState<Record<string, 1>>(() => loadReviewed(sessionId))
   const alive = useRef(true)
   const currentSession = useRef(sessionId)
   currentSession.current = sessionId
+  const rowMenu = useContextMenu()
+  const reviewMenu = useContextMenu()
   // The Source Control panel's repository directory, resolved at call time: it is
   // the user's explicit answer to "which repository in this workspace", and it
   // outranks the host's one-level guess. A ref (not a value) so a change made
@@ -149,6 +191,12 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       window.clearInterval(timer)
     }
   }, [load])
+
+  // A different conversation has different marks: reload them instead of carrying
+  // one session's ✓ onto another's files.
+  useEffect(() => {
+    setReviewed(loadReviewed(sessionId))
+  }, [sessionId])
 
   /**
    * Publish the revert coordinates for the tab the user is LOOKING AT.
@@ -233,6 +281,25 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     void followSessionWorkspace({ sessionId, alias: summary.alias, remoteRoot: summary.root })
   }, [sessionId, summary, chatTarget.sessionId])
 
+  const files = useMemo(() => summary?.files ?? [], [summary])
+
+  /**
+   * Resolve the binding a row belongs to, with one refresh for a cold page.
+   *
+   * The store may still be loading its workspace table on a cold page, so a miss
+   * is worth one refresh before giving up.
+   */
+  const bindingOf = useCallback(async (file: RemoteChangedFile) => {
+    if (summary === null) return undefined
+    let binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
+    if (binding === undefined) {
+      refreshAll()
+      await new Promise(resolve => { window.setTimeout(resolve, 300) })
+      binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
+    }
+    return binding
+  }, [summary])
+
   /** Open one listed file in the remote editor with its change marks. */
   const openChanged = useCallback(async (file: RemoteChangedFile): Promise<void> => {
     if (sessionId === undefined || summary === null) return
@@ -242,24 +309,14 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       if (!alive.current) return
       const stamp = `${file.path}@${summary.at}@${summary.turn}`
       const set: ChangeSet = diff !== null && diff.kind === 'text'
-        ? changeSetFromHunks(diff.hunks, stamp)
+        ? changeSetFromHunks(diff.hunks, stamp, diff.patch)
         : { ...EMPTY_CHANGE_SET, stamp }
-      // The store may still be loading its workspace table on a cold page, so a
-      // miss is worth one refresh before giving up on the click. Read through
-      // the snapshot accessor, not the render-time props, so the retry actually
-      // sees what the load wrote.
-      //
       // Resolved by the session's REMOTE root, never by the alias alone: one
       // alias carries several bindings (two workspaces can live on one alias),
       // and the alias-only form picked whichever came first —
       // the file opened while the tree and the selector stayed on the other
       // workspace. That was the reported bug.
-      let binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
-      if (binding === undefined) {
-        refreshAll()
-        await new Promise(resolve => { window.setTimeout(resolve, 300) })
-        binding = bindingForChangedFile(remoteOpenBindings(), summary, file.path)
-      }
+      const binding = await bindingOf(file)
       if (binding === undefined) {
         explorer.info(t('changes.noWorkspace'))
         return
@@ -284,9 +341,94 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     } finally {
       if (alive.current) setBusy(undefined)
     }
-  }, [explorer, sessionId, summary, t])
+  }, [bindingOf, explorer, sessionId, summary, t])
 
-  const files = summary?.files ?? []
+  /**
+   * Revert EVERYTHING this session did to one listed file.
+   *
+   * The write itself (gates, patch, confirmation, refresh) lives in the store's
+   * `revertFileChanges`: it is the same class of remote write as the hover-revert
+   * and must obey the same rules. This callback only resolves the coordinates the
+   * row stands for.
+   */
+  const revertRow = useCallback(async (file: RemoteChangedFile): Promise<void> => {
+    if (sessionId === undefined || summary === null || file.revert === undefined) return
+    const binding = await bindingOf(file)
+    if (binding === undefined) {
+      explorer.info(t('changes.noWorkspace'))
+      return
+    }
+    setBusy(file.path)
+    try {
+      await revertFileChanges({
+        sessionId,
+        bindingId: binding.id,
+        alias: binding.alias,
+        root: summary.root,
+        path: file.path,
+        display: file.display,
+        mode: file.revert,
+      })
+    } finally {
+      if (alive.current) setBusy(undefined)
+    }
+  }, [bindingOf, explorer, sessionId, summary, t])
+
+  const toggleReviewed = useCallback((file: RemoteChangedFile): void => {
+    setReviewed(previous => toggleReviewedEntry(files, previous, file))
+  }, [files])
+
+  // Persist the marks whenever they change. A storage that refuses (private mode)
+  // must cost nothing but persistence — never a broken panel.
+  useEffect(() => {
+    if (sessionId === undefined || sessionId === '') return
+    try {
+      window.localStorage.setItem(`${REVIEW_STORAGE_PREFIX}${sessionId}`, serializeReviewed(reviewed))
+    } catch {
+      // Ignore: see above.
+    }
+  }, [reviewed, sessionId])
+
+  // Drop marks for rows that are gone (or whose counts changed). Without this a
+  // path that leaves and comes back would show a ✓ nobody gave it.
+  useEffect(() => {
+    setReviewed(previous => {
+      const next = pruneReviewed(files, previous)
+      // A prune only ever removes entries, so equal length means "identical".
+      return Object.keys(next).length === Object.keys(previous).length ? previous : next
+    })
+  }, [files])
+
+  const done = reviewedCount(files, reviewed)
+
+  const openRowMenu = useCallback((event: React.MouseEvent, file: RemoteChangedFile): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const cannotRevert = file.revert === undefined
+    rowMenu.open(event.clientX, event.clientY, [
+      { label: t('changes.menuOpen'), onSelect: () => { void openChanged(file) } },
+      {
+        label: file.revert === 'delete' ? t('changes.revertCreation') : t('changes.revertFile'),
+        danger: true,
+        disabled: cannotRevert,
+        ...(cannotRevert ? { hint: t('changes.revertNotPossible') } : {}),
+        separated: true,
+        onSelect: () => { void revertRow(file) },
+      },
+      { label: t('changes.openInScm'), separated: true, onSelect: () => { setView('scm') } },
+      { label: t('changes.copyPath'), onSelect: () => { void copyText(file.path) } },
+    ])
+  }, [openChanged, revertRow, rowMenu, t])
+
+  /** The header counter doubles as the "mark all / clear all" menu. */
+  const openReviewMenu = useCallback((event: React.MouseEvent): void => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    reviewMenu.open(rect.left, rect.bottom + 4, [
+      { label: t('changes.reviewAll'), onSelect: () => { setReviewed(setAllReviewed(files, true)) } },
+      { label: t('changes.reviewNone'), onSelect: () => { setReviewed(setAllReviewed(files, false)) } },
+    ])
+  }, [files, reviewMenu, t])
+
   const activeTab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
   const visible = useMemo(() => {
     if (summary === null) return false
@@ -318,6 +460,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
             <span className="rvs-chg-del">−{summary?.deleted ?? 0}</span>
           </span>
         )}
+        {done > 0 && (
+          <button
+            type="button"
+            className="rvs-changes-reviewed"
+            title={t('changes.reviewMenu')}
+            onClick={openReviewMenu}
+          >
+            {t('changes.reviewCount').replace('{done}', String(done)).replace('{total}', String(files.length))}
+          </button>
+        )}
         {summary?.pending === true && <span className="rvs-changes-pending">{t('changes.pending')}</span>}
         <span className="rvs-changes-spacer" />
         {stale && <span className="rvs-changes-stale" title={t('changes.staleHint')}>{t('changes.stale')}</span>}
@@ -339,36 +491,86 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
           )}
           {files.map(file => {
             const { dir, name } = splitDisplay(file.display)
+            const marked = isReviewed(file, reviewed)
             return (
-              <button
-                type="button"
+              <div
                 key={file.path}
                 className={`rvs-chg-row${busy === file.path ? ' rvs-chg-loading' : ''}`}
-                title={`${file.path}\n${statusWord(file, t)}`}
-                onClick={() => { void openChanged(file) }}
+                data-reviewed={marked ? '1' : '0'}
               >
-                <span className="rvs-chg-icon" aria-hidden="true"><FileIcon path={file.display} size={14} /></span>
-                <span className="rvs-chg-path">
-                  <span className="rvs-chg-dir">{dir}</span>
-                  <span className="rvs-chg-name">{name}</span>
-                </span>
-                <span className="rvs-chg-counts">
-                  {file.oversized === true
-                    ? <span className="rvs-chg-note">{t('changes.oversized')}</span>
-                    : file.binary === true
-                      ? <span className="rvs-chg-note">{t('changes.binary')}</span>
-                      : (
-                        <>
-                          <span className="rvs-chg-add">+{file.added}</span>
-                          <span className="rvs-chg-del">−{file.deleted}</span>
-                        </>
-                        )}
-                </span>
-              </button>
+                {/*
+                  Two buttons, not one: a whole-row <button> cannot legally contain
+                  the review toggle, and the toggle must not open the file. The
+                  status letter is decoration here — its meaning is in the title.
+                */}
+                <button
+                  type="button"
+                  className="rvs-chg-open"
+                  title={`${file.path}\n${statusWord(file, t)}`}
+                  onClick={() => { void openChanged(file) }}
+                  onContextMenu={(event) => { openRowMenu(event, file) }}
+                >
+                  <span className="rvs-chg-status" data-status={file.status ?? 'M'} aria-hidden="true">
+                    {file.status ?? 'M'}
+                  </span>
+                  <span className="rvs-chg-icon" aria-hidden="true"><FileIcon path={file.display} size={14} /></span>
+                  <span className="rvs-chg-path">
+                    <span className="rvs-chg-dir">{dir}</span>
+                    <span className="rvs-chg-name">{name}</span>
+                  </span>
+                  <span className="rvs-chg-counts">
+                    {file.oversized === true
+                      ? <span className="rvs-chg-note">{t('changes.oversized')}</span>
+                      : file.binary === true
+                        ? <span className="rvs-chg-note">{t('changes.binary')}</span>
+                        : (
+                          <>
+                            <span className="rvs-chg-add">+{file.added}</span>
+                            <span className="rvs-chg-del">−{file.deleted}</span>
+                          </>
+                          )}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`rvs-chg-review${marked ? ' is-on' : ''}`}
+                  aria-pressed={marked}
+                  title={marked ? t('changes.unmarkReviewed') : t('changes.markReviewed')}
+                  onClick={() => { toggleReviewed(file) }}
+                >{marked ? '✓' : ''}</button>
+              </div>
             )
           })}
           {summary?.truncated === true && <div className="rvs-changes-note">{t('changes.truncated')}</div>}
+          {/*
+            Which paths the new-file scan skipped. Stated, never silent: a file
+            the user expected to see must not be missing without a reason, and
+            the SCM panel is where every path (build output included) is listed.
+          */}
+          {(summary?.excludedDirs?.length ?? 0) > 0 && (
+            <div className="rvs-changes-note" title={summary?.excludedDirs?.join(', ')}>
+              {t('changes.excluded').replace('{dirs}', summary?.excludedDirs?.join(', ') ?? '')}
+            </div>
+          )}
         </div>
+      )}
+      {rowMenu.menu !== undefined && (
+        <ContextMenu
+          x={rowMenu.menu.x}
+          y={rowMenu.menu.y}
+          entries={rowMenu.menu.entries}
+          onClose={rowMenu.close}
+          className="rvs-menu-dock"
+        />
+      )}
+      {reviewMenu.menu !== undefined && (
+        <ContextMenu
+          x={reviewMenu.menu.x}
+          y={reviewMenu.menu.y}
+          entries={reviewMenu.menu.entries}
+          onClose={reviewMenu.close}
+          className="rvs-menu-dock"
+        />
       )}
     </div>
   )

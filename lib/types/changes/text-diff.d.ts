@@ -63,3 +63,21 @@ export declare function diffText(before: string, after: string, context?: number
  * @param hunk - one hunk of {@link diffText}.
  */
 export declare function hunkPatch(displayPath: string, hunk: TextHunk): string;
+/**
+ * Serialize a WHOLE file comparison as ONE patch (one header, every hunk).
+ *
+ * "Revert everything this session did to this file" is `git apply -R` of the
+ * file's complete diff, and that is a single write instead of one write per
+ * hunk. Concatenating `hunkPatch` output would also apply (git tolerates the
+ * repeated headers and re-anchors each block by offset), but it says the same
+ * file begins twice and depends on offset guessing — a real unified diff names
+ * the file once and lets git place every hunk against one picture.
+ *
+ * Verified against git 2.x: the result reverse-applies to a file whose content
+ * is `hunks`' new side, and leaves it byte-identical to the old side.
+ *
+ * @param displayPath - repo-relative path, as the panel shows it.
+ * @param hunks - every hunk of the comparison, in ascending order.
+ * @returns the patch, or '' when there is nothing to write (no hunks).
+ */
+export declare function filePatch(displayPath: string, hunks: readonly TextHunk[]): string;

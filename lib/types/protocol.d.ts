@@ -471,6 +471,18 @@ export interface RemoteChangedFile {
     oversized?: true;
     /** Change kind from --name-status; undefined when git gave none. */
     status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
+    /**
+     * What "undo this file" may do, decided by the HOST (the client never guesses).
+     *
+     * - `patch`: a real reverse patch exists — reverting restores the session
+     *   baseline in one `git apply -R`.
+     * - `delete`: the file is a whole-file CREATION git has a copy of (a tracked
+     *   addition), so the only reverse is deleting it. Recoverable from the index,
+     *   but still a destructive write, so the client must confirm it.
+     * - absent: nothing can be undone — an UNTRACKED creation (git holds no copy),
+     *   a binary, or a file whose bytes were withheld by the size caps.
+     */
+    revert?: 'patch' | 'delete';
 }
 /**
  * What one session changed on its remote host since the session's baseline.
@@ -492,8 +504,23 @@ export interface RemoteChangesSummary {
     deleted: number;
     /** Wall-clock ms when this summary was last recomputed. */
     at: number;
-    /** More files than the cap: `files` is truncated but the totals are whole. */
+    /**
+     * More files than the cap: `files` is truncated and so are `added` / `deleted`.
+     *
+     * The totals are summed from the rows that made it into `files` (the cost of
+     * counting the rest is a read per path), which is why the panel says "N files
+     * changed" about a subset and must not present the counts as whole-tree
+     * totals.
+     */
     truncated?: true;
+    /**
+     * Directory names the new-file scan was told to skip (build output, caches).
+     *
+     * Present only when the exclusion ran, and listed rather than merely applied:
+     * a file the user expected to see must never be missing without a reason. The
+     * SCM panel stays the surface that shows every path.
+     */
+    excludedDirs?: string[];
     /** A scan is running right now (the slow one counts); the list will refresh. */
     pending: boolean;
     /** Why this session has no ledger (local session, no git, timeout, …). */
@@ -507,6 +534,15 @@ export interface RemoteChangesDiff {
     display: string;
     /** Text hunks (empty for binary/missing). */
     hunks: UnifiedHunk[];
+    /**
+     * The WHOLE file as one reverse-applicable patch (`git apply -R`).
+     *
+     * One write instead of one per hunk, which is what "revert everything this
+     * session did to this file" needs. Empty when the reverse is not expressible
+     * as a patch (see `RemoteChangedFile.revert`), which is the fail-closed answer
+     * the client must not try to build itself.
+     */
+    patch?: string;
     /** File status at turn end (A/M/D/…), when git reported one. */
     status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
     /** The diff was cut at the byte cap: `hunks` is a prefix. */

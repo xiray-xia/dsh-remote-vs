@@ -12,8 +12,15 @@
  * written with `node:fs`), which the probe measured as 58 remote sessions with
  * zero change events.
  *
- * Clicking a row opens the file in the remote editor and hands the editor the
- * same hunks, so the changed lines are painted in place.
+ * Three things happen here, and they are deliberately different in kind:
+ * - a row's LEFT click opens the file and hands the editor the same hunks, so the
+ *   changed lines are painted in place;
+ * - a row's RIGHT click offers the writes ("revert everything this session did to
+ *   this file", "undo a tracked creation") plus the navigation shortcuts. The
+ *   host decides which of those exist (`RemoteChangedFile.revert`), because only
+ *   git knows whether a creation has a copy to fall back on;
+ * - the ✓ on a row is a LOCAL review note (`review-state.ts`): it writes nothing,
+ *   it is what makes a thirty-file refactor converge.
  */
 import './changes.css';
 /**

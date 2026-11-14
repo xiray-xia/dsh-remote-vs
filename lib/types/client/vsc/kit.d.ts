@@ -195,6 +195,15 @@ export declare function ContextMenu(props: {
     y: number;
     entries: MenuEntry[];
     onClose: () => void;
+    /**
+     * Extra class on the menu box, for a surface that lives OUTSIDE `.rvs-root`.
+     *
+     * The menu is portalled to `document.body`, so the `--rvs-*` variables defined
+     * on the root never reach it: an outside surface (the change panel above the
+     * composer) supplies its own palette through this hook instead of forking the
+     * component.
+     */
+    className?: string;
 }): ReactNode;
 /** Hook: context-menu state + the handler that opens it. */
 export declare function useContextMenu(): {
