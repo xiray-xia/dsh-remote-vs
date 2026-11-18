@@ -18,7 +18,8 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { RemoteStore } from '../store.ts'
 import type { RemotePool } from '../pool.ts'
-import { EXPECTED_HELPER_PROTOCOL, deployFailure, probe, protocolOfStoredHelper, pushPipeline } from '../deploy.ts'
+import { EXPECTED_HELPER_PROTOCOL, deployFailure, probe, protocolOfStoredHelper, pushPipeline, type PushReport } from '../deploy.ts'
+import { pushHostNotice } from '../notices.ts'
 import { aliasRoot } from '../paths.ts'
 import type { RemoteHostEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RpcConnection } from './helper-rpc.ts'
@@ -738,6 +739,7 @@ export class RemoteWorlds {
       if (report.action === 'failed') {
         throw new Error(`helper auto-deploy failed: ${report.detail}`)
       }
+      if (report.action === 'pushed') this.notifyHelperPush(alias, report)
       deploy = this.deps.store.require(alias).deploy
     }
     const helper = deploy?.helper
@@ -776,6 +778,7 @@ export class RemoteWorlds {
       if (report.action === 'failed') {
         throw new Error(`helper re-deploy after a wire-protocol change failed: ${report.detail}`)
       }
+      if (report.action === 'pushed') this.notifyHelperPush(alias, report)
       // Re-read the refreshed record; a second mismatch is handed to the
       // handshake so its error explains what the pipeline could not fix.
       return this.createRpc(alias, false)
@@ -795,5 +798,20 @@ export class RemoteWorlds {
       throw error
     }
     return conn
+  }
+
+  /**
+   * Queue a browser notice for an automatic helper push.
+   *
+   * Only a REAL push is announced: `skipped-same` means the host already runs
+   * this build (the self-heal case where an earlier push updated the remote),
+   * and announcing an upload that did not happen would be a lie. The notice
+   * rides the next JSON response (`src/notices.ts`), which is exactly the
+   * request whose dial needed the helper — the surface the user is looking at.
+   */
+  private notifyHelperPush(alias: string, report: PushReport): void {
+    const version = report.installed?.helper?.version ?? this.deps.store.require(alias).deploy?.helper?.version
+    if (version === undefined || version === '') return
+    pushHostNotice({ kind: 'helper-pushed', alias, version })
   }
 }

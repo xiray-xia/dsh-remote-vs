@@ -33,6 +33,7 @@ import {
 import { DEFAULT_TIMEOUTS, normalizeTimeouts, timeoutSeconds } from '../timeouts.ts'
 import { activeConnectionAlias, currentConnection, isConnectionFailure, noteConnectionFailure } from './connection.ts'
 import { detectLang, makeT } from './i18n.ts'
+import { dispatchHostNotices } from './notices.ts'
 import { parseSseFrame, takeSseFrames } from './exec-output.ts'
 import {
   branchesCommand,
@@ -141,6 +142,10 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw failure
   }
+  // One-shot Host notices (an automatic helper push that THIS request
+  // triggered) ride the response; render them here so the surface that needed
+  // the helper reports it without the user opening Settings.
+  dispatchHostNotices(data)
   return data as T
 }
 

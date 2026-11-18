@@ -29,7 +29,8 @@ import { ChangesDock, type ChangesDockProps } from './changes/ChangesDock.tsx'
 import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts.tsx'
 import { openFloatingEditor, setEditorSurface } from './store.tsx'
 import { detectLang, makeT } from './i18n.ts'
-import { setIconService, type IconServiceLike } from './vsc/kit.tsx'
+import { DialogHost, setIconService, toast, type IconServiceLike } from './vsc/kit.tsx'
+import { setHostNoticeEmitter } from './notices.ts'
 
 /** Services required before mounting (slots/uiWorkspace are core web services). */
 export const inject = ['slots', 'uiWorkspace']
@@ -310,6 +311,7 @@ export function apply(ctx: Context): void {
   // the menu entry can never point at a window that cannot paint.
   ctx.effect(() => {
     let dispose: (() => void) | undefined
+    let disposeNotices: (() => void) | undefined
     try {
       const slots = ctx.slots as unknown as {
         inject(slot: string, register: () => () => void): () => void
@@ -323,16 +325,33 @@ export function apply(ctx: Context): void {
         id: 'remote-vs:floating-editor',
         order: 40,
       }, () => <FloatingEditorWindow ctx={ctx} />))
+      // A frame-wide toast/confirm host. DialogHost arbitrates a single portal
+      // (the first mounted host renders), so this seat only guarantees one exists
+      // while the Web app runs: an automatic helper push is announced even when
+      // no remote-workspace surface — RemoteRoot, the editor view — is mounted.
+      disposeNotices = slots.inject('shell.overlay', () => slots.register({
+        name: 'shell.overlay',
+        id: 'remote-vs:toast-host',
+        order: 41,
+      }, () => <DialogHost />))
     } catch (error) {
       console.warn('[dsh-remote-vs] shell.overlay registration failed (floating editor unavailable):', error)
       return () => {}
     }
     return () => {
-      try {
-        dispose?.()
-      } catch {
-        // Ignore.
+      for (const teardown of [dispose, disposeNotices]) {
+        try {
+          teardown?.()
+        } catch {
+          // Ignore.
+        }
       }
     }
   }, 'dsh-remote-vs: floating editor window')
+  // Host notices (an automatic helper push) become the plugin's toast; the
+  // emitter lives here because the API layer must stay JSX-free.
+  ctx.effect(() => {
+    setHostNoticeEmitter(toast)
+    return () => setHostNoticeEmitter(undefined)
+  }, 'dsh-remote-vs: host notice toasts')
 }

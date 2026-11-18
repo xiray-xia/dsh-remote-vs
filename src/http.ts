@@ -2,6 +2,7 @@
  * Small JSON body/response helpers for the /api/dsh-remote route family.
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+import { drainHostNotices } from './notices.ts'
 import { DeadlineError } from './timeouts.ts'
 
 const JSON_HEADERS = {
@@ -102,8 +103,18 @@ export function writeJson(
   body: unknown,
   headers: OutgoingHttpHeaders = {},
 ): void {
+  // Piggyback Host notices (an automatic helper push happened during this
+  // request) on any plain-object body: the browser's API wrapper renders them
+  // after parsing, so the user learns about the push without opening Settings.
+  // Arrays and scalars cannot carry extra keys — their notices stay queued for
+  // the next object response instead of being silently dropped.
+  const attachable = typeof body === 'object' && body !== null && !Array.isArray(body)
+  const notices = attachable ? drainHostNotices() : []
+  const payload = notices.length > 0
+    ? { ...body as Record<string, unknown>, notices }
+    : body
   res.writeHead(status, { ...JSON_HEADERS, ...headers })
-  res.end(JSON.stringify(body))
+  res.end(JSON.stringify(payload))
 }
 
 /**

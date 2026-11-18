@@ -187,4 +187,14 @@ export declare class RemoteWorlds {
     private assertDialAllowed;
     private noteDialFailure;
     private createRpc;
+    /**
+     * Queue a browser notice for an automatic helper push.
+     *
+     * Only a REAL push is announced: `skipped-same` means the host already runs
+     * this build (the self-heal case where an earlier push updated the remote),
+     * and announcing an upload that did not happen would be a lie. The notice
+     * rides the next JSON response (`src/notices.ts`), which is exactly the
+     * request whose dial needed the helper — the surface the user is looking at.
+     */
+    private notifyHelperPush;
 }
