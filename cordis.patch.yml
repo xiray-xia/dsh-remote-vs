@@ -54,6 +54,9 @@
       inject: [localFileReferences, remoteWorlds]
 
     # Remote agent preset, bound to this bundle's lifecycle.
+    # Mirrored from preset-standard @ dsh 0.2.2-rc.4. rc.4 note: the stock
+    # `presets/standard.patch.yml` is byte-identical to rc.2 (verified by hash),
+    # so this round adds no mirror delta — only the intentional diffs below.
     # Mirrored from preset-standard @ dsh 0.2.2-rc.2. rc.2 deltas adopted:
     #   skill-filesystem customSkillDirs, tool-subagent-control interrupt:false,
     #   tool-office row.
@@ -61,7 +64,12 @@
     #   1. persona prefix reframed for remote SSH work (transparent routing);
     #   2. tool-bash moved into an isolated shell group with our routed bash
     #      executor (stock root shell stays pwsh on Windows);
-    #   3. tool-pwsh row dropped.
+    #   3. tool-pwsh row dropped;
+    #   4. tool-fs `applyPatch: true` — intentional divergence from stock's
+    #      `false`: 0.23.0 speaks helper protocol 3, so the remote half really
+    #      implements patch/delete/move (fs.patch/fs.delete/fs.move) and the
+    #      apply_patch tool is no longer a local-only promise. Stock default stays
+    #      false for compositions that do not mount our remote fs.
     # Everything else is byte-identical so future diffs against stock stay obvious.
     # alpha.3 note: stock dropped `toolFilter` (subagent children now inherit
     # the parent composition; fork must not select presets) — our mirror drops
@@ -115,10 +123,10 @@
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
             config:
-              # alpha.3 stock pins this explicitly; false is the alpha.3 default.
-              # Kept explicit so the remote mirror cannot silently grow apply_patch
-              # (its remote half is protocol-2 and has no patch/delete/move yet).
-              applyPatch: false
+              # Intentional divergence from the stock `false`: the remote world
+              # serves protocol 3 (fs.patch/fs.delete/fs.move), so apply_patch is
+              # real for remote files as well as local ones. Stock stays false.
+              applyPatch: true
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:

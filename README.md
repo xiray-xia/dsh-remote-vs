@@ -34,11 +34,15 @@ dsh plugin --profile web add dsh-remote-vs
 
 （从 npm 装，推荐；也可以直接跟仓库装：`dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`。）
 
-**需要 DSH `0.2.2-rc.2` 及以上、`0.3.0` 以下**（`engines.dsh` 门到底；已按 rc.2 适配并通过类型检查与本地全量门禁）。
-Host 仍是 `0.2.2-alpha.3` / `0.2.2-rc.1` 的请用插件 `0.20.1`；`0.2.2-alpha.2` 一代请用 `0.17.0`；`0.2.1-rc.2` 一代请用 `0.9.3`。
+**需要 DSH `0.2.2-rc.4` 及以上、`0.3.0` 以下**（`engines.dsh` 门到底；已按 rc.4 适配并通过类型检查与本地全量门禁）。
+Host 仍是 `0.2.2-rc.2` / `0.2.2-rc.3` 的请用插件 `0.22.0`；`0.2.2-alpha.3` / `0.2.2-rc.1` 的请用 `0.20.1`；`0.2.2-alpha.2` 一代请用 `0.17.0`；`0.2.1-rc.2` 一代请用 `0.9.3`。
 `--profile web` 指明装进哪个 profile —— 本插件是 Web 插件，
 要装进 Web GUI 所用的那个（`web` 是常见命名，以你自己的 profile 名为准）；
 桌面端用的是保留 profile `desktop`，见下面「桌面端」。
+
+> **从 `0.22.0` 升级要注意**：远端 helper 的 wire 协议由 **2 升到 3**。已有主机的部署记录会被识别为旧代，
+> 首次连接该主机时自动重推新 helper（本机缓存里还留有旧版构建即可自动判定；缓存被清理过时，在设置页点一次
+> 「推送」即可），每台主机首次会多一次约 47 MB 的上传。旧 helper 目录会保留，回滚就是推回旧版本。
 
 **这一条命令就够了，不需要放行任何构建脚本**：包本身没有 `prepare`/`postinstall`，依赖树里也没有任何
 带安装脚本的包（`ssh2` 是**打进产物**的，不是依赖）；走仓库安装时还带着构建好的 `lib/`。
@@ -63,11 +67,11 @@ Host 仍是 `0.2.2-alpha.3` / `0.2.2-rc.1` 的请用插件 `0.20.1`；`0.2.2-alp
 注意：`desktop` 是桌面端独占的保留 profile，**npm 全局安装的 `dsh` 不能管理它**
 （会报 `profile "desktop" is managed exclusively by the Electron application`），
 只能走上面两条路径。桌面端的版本号等于它捆绑的 DSH 运行时版本，同样要满足
-`engines.dsh` 要求（`>=0.2.2-rc.2`，关于面板可看）；低于该版本时插件页会直接拒绝
+`engines.dsh` 要求（`>=0.2.2-rc.4`，关于面板可看）；低于该版本时插件页会直接拒绝
 安装。桌面端没有可见的 Web 端口，但本插件的 HTTP 路由与终端 socket 都经桌面端的
 Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无需额外设置。
 
-> 包内含预编译的 helper（`vendor/dsh-remote-helpers/`，约 45 MB），所以首次安装下载量偏大 ——
+> 包内含预编译的 helper（`vendor/dsh-remote-helpers/`，约 47 MB），所以首次安装下载量偏大 ——
 > 它是**唯一**的 helper 投放渠道（官方 Release 不带 helper 可执行文件），去掉它就没法给新主机部署。
 
 ## 能力
@@ -77,7 +81,7 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | 能力 | 说明 |
 | --- | --- |
 | 资源管理器 | 懒加载目录树 + 单击目录即展开/折叠 + 隐藏文件开关；**新增悬停 150 ms 预取**下一层列表（展开时先用缓存上屏、后台再校验；预取仍未返回时点开会等它，与冷启动一样显示加载行）；Host 侧浏览请求复用**一条常驻 SFTP 会话**，一次列目录的往返从 2 个降到 1 个（**冷启动或空闲 2 分钟关闭后的第一次仍要开会话**）；右键菜单：新建/改名/删除/复制/移动/粘贴/在此文件夹查找/插入 `@` 引用/**下载到本地**（文件流式下载、目录或**多选**在远端打包成 `.tar.gz` 流式下载，不占 Host 内存；浏览器支持时先弹**另存为**对话框选保存路径，不支持时落到默认下载目录；右下角**下载面板**显示实时进度、可取消，并提示完成/失败；搜索结果右键同样支持；下载结果分「已保存 / 已交给浏览器 / 失败」三态，交给浏览器后**不再显示成已完成**，Host 失败也不会被当成文件存下；树空白区也有右键菜单（新建/上传/粘贴），上传、粘贴、拖放等写操作**串行**（另一个传输进行中会拒绝并提示）；键盘可用（`↑↓` 选择、`←→` 折叠/展开、`Enter` 打开、`Shift+F10` 菜单），对话框有焦点陷阱与 `Esc` 关闭）；git 状态色与文件夹聚合标记；**文件/目录按类型着色**（彩色纸张 + 类别标记、琥珀色目录开合，与本地侧栏同款；仅目录树，其它列表保持单色）；**拖拽悬停展开**：拖动行或拖入系统文件时，指针在收起目录上停留约 650 ms 就自动展开该目录（spring-loaded folder，松手即落在已展开的目标里；中途取消不会留下自动展开） |
-| 传输性能 | 上传/下载走 SSH 的 **256 KiB × 32 并发窗口**（ssh2 pipelined SFTP）：单文件下载与拖放上传比单流快约 8 倍，helper 推送（45 MB 包）同样走并行 `fastPut`；大文件上传不再被 60 秒期限误杀（改用进度看门狗）。**大于 4 MiB 的下载再开一条专用 SFTP 通道**（单条 SSH 通道的窗口上限是 2 MiB，多一条通道多一个窗口）：同进程交错 A/B 实测**约 1.1–1.4×**（多次采样中位 1.08–1.43×，随链路波动；原始读探针 1.6–1.8×，产品只开两条通道，不开四条）；小文件不开第二条，省一个通道槽。上传保持单通道（服务端写入是瓶颈，多通道无收益） |
+| 传输性能 | 上传/下载走 SSH 的 **256 KiB × 32 并发窗口**（ssh2 pipelined SFTP）：单文件下载与拖放上传比单流快约 8 倍，helper 推送（47 MB 包）同样走并行 `fastPut`；大文件上传不再被 60 秒期限误杀（改用进度看门狗）。**大于 4 MiB 的下载再开一条专用 SFTP 通道**（单条 SSH 通道的窗口上限是 2 MiB，多一条通道多一个窗口）：同进程交错 A/B 实测**约 1.1–1.4×**（多次采样中位 1.08–1.43×，随链路波动；原始读探针 1.6–1.8×，产品只开两条通道，不开四条）；小文件不开第二条，省一个通道槽。上传保持单通道（服务端写入是瓶颈，多通道无收益） |
 | 搜索 | 两档：**文件名**（远端 `find`）与**内容**（远端 `grep`）。内容档带范围目录、`Aa`（大小写）/`ab_`（全字）/`.*`（正则）、结果按文件分组、命中高亮，点条目跳到该行；**内容档可中止**（改写或清空查询会终止正在跑的远端 `grep`；老 Host 无流式路由时退化为不可取消的一次性查询），成功但远端给了 stderr 警告时在结果上方提示；文件名档里命中**目录**时在树中定位，而不是当文件打开 |
 | 连接状态与离线只读 | 顶部栏与编辑器信息栏显示当前工作区的 SSH 连接状态（**连接正常 / 连接异常 / 就绪·按需连接**）：断线不再静默——已打开的编辑器标签保留缓存内容并切为**只读**（保存被拦截并说明原因），目录树继续显示已缓存目录、后台刷新静默，未缓存目录显示离线提示；连接恢复后自动刷新目录、Git 状态、**未修改的文件标签和只读 diff 标签**（有未保存改动的标签不动并提示）。错误态不会无限重连：每 30 秒最多自动重试 3 次，之后点状态图标手动重试。断线时「撤销这处改动」和 diff 的 hunk 操作同样被拦截；**单次操作的超时（deadline）不当作链路故障**——chip 保持正常，只有该次操作失败并说明原因；断线且该工作区没有缓存时，SCM 面板直接说明无法读取，而不是停在「加载中」。**不做**跨页面刷新的持久化缓存（远端源码不落盘），这是有意的隐私取舍 |
 | 源代码管理 | **仓库目录选择器**（工作区里的 git 在子目录时用：浏览远端目录、一键跳到工作区内发现的仓库、手输相对/绝对路径，并逐目录提示会落在哪个仓库）；变更/暂存/未跟踪/忽略分桶，**未跟踪目录行可点击展开**，逐文件与**逐 hunk** 暂存/还原、丢弃（带确认）、提交；分支/远程/stash 面板；同步（fetch/pull/push），**推送支持自定义 refspec**（如 Gerrit `HEAD:refs/for/<分支>`；留空 = 普通 `git push`，非空值会记住）；fetch/pull/push/sync 有**实时输出面板**（SSE 流式显示 git/远端输出、运行计时、**可取消**（杀掉远端进程组）、完成后可复制完整输出；老 Host 无流式路由时自动回退到一次性结果） |
@@ -117,6 +121,7 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | --- | --- |
 | Agent 工具 | `remote_hosts` / `remote_exec` / `remote_read` / `remote_write` / `remote_ls` |
 | **P2 透明远端执行** | 远端工作区里原生 `read/write/edit/bash/glob/grep/jobs` 直接跑在远端 |
+| **P2 远端 apply_patch** | Remote 预设启用 `apply_patch`（**有意与 stock 的 `applyPatch: false` 不同**）：它的 Update/Delete/Move 走 `fs.patchText` / `deleteFile` / `moveFile`，再路由到 helper 的 `fs.patch` / `fs.delete` / `fs.move`（wire 协议 3），远端文件真的能打补丁、删除、移动，而不是只回一句 "不支持" |
 | **P3 远端 @ 引用** | 远端会话 `@` 出远端文件候选（路由 fileReferences，scoped 实时/bare 走远端 rg 索引） |
 
 ## 工程结构
@@ -205,7 +210,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper 种子（随包发布，启动铺缓存，见下）
 ├── docs/                   # 本地工作文档（不推送 GitHub；只有 docs/media/ 的截图随仓库公开）
 │   ├── MAINTENANCE.md      # 本地私有（.gitignore，不入库）：升级影响面/检查清单/踩坑/发布流程
-│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.22.0）
+│   ├── VERSION-HISTORY.md  # 本地私有：逐版本变更纪要（0.7.1 → 0.23.0）
 │   └── GATES.md            # 本地私有：本地门禁清单与实跑条数
 ├── locale/                 # 插件元信息双语
 └── lib/                    # 构建产物（**必须入库**，只有 .map 忽略；link 安装后重启即生效）
@@ -213,8 +218,8 @@ dsh_remote_vs/
 
 `vendor/dsh-remote-helpers/`（入库）是 helper 种子：插件启动时自动铺到
 `$DSH_HOME/dsh-remote-helpers/`（缺啥补啥，永不覆盖），新机器装完即能推送。
-新版本 helper 编好后把 4 件套（tarball + sha256 + helper.json + 补丁说明）
-换进 vendor 并提交即可（详细步骤在本地维护文档 `docs/MAINTENANCE.md` §4，该文件被 .gitignore，不随仓库分发）。
+新版本 helper 编好后把 5 件套（tarball + sha256 + helper.json + `glibc-ceiling.patch` + `ssh-helper-runtime-deps.patch`）
+换进 vendor、删掉旧版三个文件并提交即可（详细步骤在本地维护文档 `docs/MAINTENANCE.md` §4，该文件被 .gitignore，不随仓库分发）。
 
 `.spike/` 与 `scripts/`（都 gitignored，**不随仓库分发**）是开发期的验证与自检脚本：
 `.spike/` 里是真机验证脚本 —— `p2-router.ts` 主回归（真远端 + 真 Cordis + 真路由类）+
@@ -335,16 +340,21 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 
 官方从未发布 helper 二进制（Release assets 全空），本插件走自编译：
 
-- 构建机：WSL2 Ubuntu-22.04（glibc 2.35，与目标远端一致），Node v24.21.0 + pnpm 11.28.5
-- 源码：`dsh-v0.2.1-alpha.2` tag（**构建基线**：对齐的是 wire 协议号，不是 Host 版本号 —— 我们用到的
-  协议号仍是 **2**，Host 升到 `0.2.2-alpha.3` 也不需要重编：插件自行停在 `dsh-ssh@0.2.1-rc.2`，
-  新 Host 那一代 `dsh-ssh` 的协议 3 我们故意不跟，差异见维护文档 §2.26）
+- 构建机：WSL2 Ubuntu-22.04（glibc 2.35，与目标远端一致），构建机 Node v24.21.0 + pnpm 11.28.5；
+  pkg 内嵌的 node 是 **v24.22.3**（`helper.json` 的 `nodeVersion` 记它）
+- 源码：`dsh-v0.2.2-rc.4` tag（commit `3f321d32…`）—— **构建基线对齐的是 wire 协议号，不是 Host 版本号**；
+  这一代是**协议 3（G2 代）**：除 hello 的协议字面量与 `policySchema.additionalWritableRoots` 外，
+  还多出 `fs.patch` / `fs.delete` / `fs.move` 三个方法（31 vs 28）。**"协议 3"不等于有这三个方法**：
+  G1 代（`dsh-v0.2.2-alpha.2`）自报的也是协议 3，但没有它们，必须按 G2 tag（≥ alpha.3）编
 - 命令：官方原脚本 `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
-- 唯一偏离：无 docker 跑不了 manylinux 2.28 重编，加了 `DSH_GLIBC_CEILING`
-  环境覆盖（默认仍 2.28），本次以 2.35 构建（见缓存目录 `glibc-ceiling.patch`）
-- 校验：官方 `verify-ssh-helper-artifact.ts --sandbox=required` 8 项全绿
-- 缓存：`$DSH_HOME/dsh-remote-helpers/`（`*.tar.gz` + `.sha256` + `.helper.json`
-  含 binarySha256，供 P2 的 helperHash）
+- 偏离一：无 docker 跑不了 manylinux 2.28 重编，加了 `DSH_GLIBC_CEILING`
+  环境覆盖（默认仍 2.28），本次以 2.35 构建（见 `glibc-ceiling.patch`）
+- 偏离二：上游 tag 的 helper 构建路径自身缺两个依赖（`@deepseek-ai/dsh-error` 是必需 peer、
+  `@deepseek-ai/dsh-fs-patch` 没被 `compileRuntime()` 编进运行时），不补就是闭包门中止 / 握手
+  `ERR_MODULE_NOT_FOUND`；补丁留档为 `ssh-helper-runtime-deps.patch`
+- 校验：官方 `verify-ssh-helper-artifact.ts --archive=<tarball> --sandbox=required` 8 项全绿
+- 体积与缓存：linux-x64 包 **47 MB**（47,234,718 B）；缓存 `$DSH_HOME/dsh-remote-helpers/`
+  （`*.tar.gz` + `.sha256` + `.helper.json` 含 binarySha256，供 P2 的 helperHash）
 - 升级重编全流程见本地维护文档 `docs/MAINTENANCE.md` §4（.gitignore，不随仓库分发）
 
 ## 安全模型
@@ -419,6 +429,6 @@ DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦�
 
 MIT © 2026 xiray-xia —— 见 [LICENSE](./LICENSE)。
 
-`vendor/` 里的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.1-alpha.2`
-tag 以官方原脚本构建，具体流程与唯一有记录的偏离见上文"Helper 自编译"节
-（种子包里的 `glibc-ceiling.patch`）。
+`vendor/` 里的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.2-rc.4`
+tag 以官方原脚本构建，具体流程与两处有记录的偏离见上文"Helper 自编译"节
+（种子包里的 `glibc-ceiling.patch` 与 `ssh-helper-runtime-deps.patch`）。

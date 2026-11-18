@@ -1,0 +1,14 @@
+diff --git a/packages/ssh/ssh-helper-runtime/package.json b/packages/ssh/ssh-helper-runtime/package.json
+index f58eabc2..34dd09c8 100644
+--- a/packages/ssh/ssh-helper-runtime/package.json
++++ b/packages/ssh/ssh-helper-runtime/package.json
+@@ -62,6 +62,8 @@
+     "@deepseek-ai/dsh-util-values": "workspace:*",
+     "@deepseek-ai/dsh-win32-process": "workspace:*",
+     "@deepseek-ai/node-addon-system": "workspace:~",
+-    "@deepseek-ai/schemastery": "workspace:~"
++    "@deepseek-ai/schemastery": "workspace:~",
++    "@deepseek-ai/dsh-error": "workspace:*",
++    "@deepseek-ai/dsh-fs-patch": "workspace:*"
+   }
+ }

@@ -37,12 +37,19 @@ dsh plugin --profile web add dsh-remote-vs
 (From npm, recommended; installing straight from the repository also works:
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
-**Requires DSH `0.2.2-rc.2` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
-**adapted to and typechecked against `0.2.2-rc.2`**). On Host `0.2.2-alpha.3` / `0.2.2-rc.1` use plugin `0.20.1`; the
+**Requires DSH `0.2.2-rc.4` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
+**adapted to and typechecked against `0.2.2-rc.4`**). On Host `0.2.2-rc.2` / `0.2.2-rc.3` use plugin `0.22.0`; on `0.2.2-alpha.3` / `0.2.2-rc.1` use `0.20.1`; the
 `0.2.2-alpha.2` generation needs `0.17.0` and the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
 profile instead — see [Desktop](#desktop-dsh-desktop) below.
+
+> **Upgrading from `0.22.0`**: the remote helper's wire protocol moves from **2 to 3**.
+> Existing host records are recognised as an older generation and the new helper is pushed
+> automatically on the first connection (this needs the old build to still be in the local
+> helper cache; if that cache was cleared, press **Push** once in Settings). Each host pays
+> one ~47 MB upload on that first contact. The old helper directory is kept, so rolling back
+> is just pushing the old version again.
 
 **That one command is all it takes — no build scripts have to be approved.** The package
 has no `prepare`/`postinstall` and no package in the dependency tree carries an install
@@ -74,13 +81,13 @@ Install either way:
 `desktop` is reserved for the Electron application: an **npm-installed `dsh` cannot manage
 it** (it answers `profile "desktop" is managed exclusively by the Electron application`),
 so one of the two routes above is required. The Desktop release version equals the DSH
-runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-rc.2`; check About);
+runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-rc.4`; check About);
 older releases make the Plugins page refuse the install. Desktop opens no visible Web
 port, but the plugin's HTTP routes and terminal socket are forwarded through Desktop's
 Host (the terminal resolves its address from `__DSH_TRANSPORT__.streamBaseUrl`), so no
 extra configuration is needed.
 
-> The package carries the prebuilt helper (`vendor/dsh-remote-helpers/`, ~45 MB), so the
+> The package carries the prebuilt helper (`vendor/dsh-remote-helpers/`, ~47 MB), so the
 > first install is a large download — it is the **only** channel that delivers a helper
 > (the official releases ship no helper executable), and dropping it would leave new hosts
 > undeployable.
@@ -92,7 +99,7 @@ extra configuration is needed.
 | Capability | Notes |
 | --- | --- |
 | Explorer | Lazy tree + one click expands/collapses a directory + hidden-files toggle; **new: a 150 ms hover prefetches** that folder's listing (the expand paints from cache and revalidates in the background; if the prefetch is still in flight, the click waits for it and shows the loading line like a cold directory). On the Host every browse request shares **one long-lived SFTP session**, cutting a listing from two round trips to one (**the first one after a cold start or after the 2 idle minutes still pays the channel open**); context menu: new / rename / delete / copy / move / paste / find in folder / insert `@` reference / **download to local** (files stream to this machine; a directory **or a multi-selection** is archived on the remote host as one `.tar.gz` and streamed, so nothing is buffered in Host memory; a native **Save as** dialog picks the destination when the browser supports it, otherwise the browser's download folder; a bottom-right **download panel** shows live progress, allows cancel, and reports completion/failure; the search-hit menu offers it too; a download ends in one of three honest states — **saved / handed to the browser / failed** — and a hand-off never reads as "done", nor does a Host failure get saved as a file; the tree's empty area has its own context menu (new / upload / paste) and uploads, pastes and drops are **serialized** (a second transfer is refused with an explanation); the tree is keyboard-operable (`↑↓` move, `←→` collapse/expand, `Enter` open, `Shift+F10` menu) and dialogs trap focus and close on `Esc`); git status colours and folder roll-up marks; **type-coloured file and folder icons** (coloured sheet + category mark, amber folders that open, same set as the local sidebar; the tree only — other lists keep the neutral glyph); **drag-hover expand**: while dragging a row or dropping OS files, resting the pointer on a collapsed directory for ~650 ms opens it (spring-loaded folder, so the drop lands inside the folder you just revealed; cancelling the drag leaves nothing half-open) |
-| Transfer speed | Uploads/downloads use a **256 KiB × 32 in-flight window** over SSH (pipelined SFTP): single-file downloads and drag-and-drop uploads run ~8× faster than one stream, and the helper push (45 MB) uses parallel `fastPut` too; large uploads are no longer killed by a 60 s deadline (progress watchdog instead). A **download above 4 MiB gets a second dedicated SFTP channel** (one SSH channel caps its window at 2 MiB, so each extra channel adds a window): an interleaved same-process A/B measured **about 1.1–1.4×** (medians of 1.08–1.43× across samples, link-dependent; raw read probes 1.6–1.8× — the product opens two channels, not four); small files keep one channel and one less channel slot, and uploads stay single-channel (the remote write path is the bound, extra channels gain nothing) |
+| Transfer speed | Uploads/downloads use a **256 KiB × 32 in-flight window** over SSH (pipelined SFTP): single-file downloads and drag-and-drop uploads run ~8× faster than one stream, and the helper push (47 MB) uses parallel `fastPut` too; large uploads are no longer killed by a 60 s deadline (progress watchdog instead). A **download above 4 MiB gets a second dedicated SFTP channel** (one SSH channel caps its window at 2 MiB, so each extra channel adds a window): an interleaved same-process A/B measured **about 1.1–1.4×** (medians of 1.08–1.43× across samples, link-dependent; raw read probes 1.6–1.8× — the product opens two channels, not four); small files keep one channel and one less channel slot, and uploads stay single-channel (the remote write path is the bound, extra channels gain nothing) |
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line; **content mode can be aborted** (changing or clearing the query kills the running remote `grep`; an older Host without the streaming route degrades to a one-shot, non-cancellable query), success with stderr warnings is reported above the results, and a **directory** hit in name mode is revealed in the tree instead of being opened as a file |
 | Connection status and offline read-only | The top bar and the editor info bar show the current workspace's SSH link state (**connection OK / connection issue / ready, connects on demand**): a drop is no longer silent — open editor tabs keep their cached content and turn **read-only** (saves are blocked with an explanation), the tree keeps showing cached directories while background refreshes stay quiet, and uncached directories say they are offline. When the link recovers, directories, git status, **unmodified file tabs and read-only diff tabs** refresh automatically (tabs with unsaved edits are left alone and the user is told). An errored link is retried at most three times, 30 s apart, then the chip is a manual retry control. While the link is down, "Undo this change" and the diff's hunk actions are blocked too; **a single operation's deadline is NOT treated as a broken link** — the chip stays ok and only that operation fails, with the real reason; when the link is down and the workspace has no cache, the SCM panel says it cannot read instead of sitting on "loading". **No cross-reload persistent cache** (remote source never lands on disk) — a deliberate privacy trade-off |
 | Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; **untracked directory rows expand on click**; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push), with **push refspec support** (Gerrit style `HEAD:refs/for/<branch>`; empty = plain `git push`, a non-empty value is remembered); fetch/pull/push/sync get a **live output panel** (server-sent events showing git/remote output, a running clock, **cancel** that kills the remote process group, and the full log for copying afterwards; an older Host without the streaming route falls back to the one-shot result) |
@@ -132,6 +139,7 @@ extra configuration is needed.
 | --- | --- |
 | Agent tools | `remote_hosts` / `remote_exec` / `remote_read` / `remote_write` / `remote_ls` |
 | **P2 transparent remote execution** | Native `read/write/edit/bash/glob/grep/jobs` inside remote workspaces run directly on the far end |
+| **P2 remote apply_patch** | The Remote preset enables `apply_patch` (**an intentional divergence from stock's `applyPatch: false`**): its Update/Delete/Move operations call `fs.patchText` / `deleteFile` / `moveFile`, which route to the helper's `fs.patch` / `fs.delete` / `fs.move` (wire protocol 3), so remote files really can be patched, deleted and moved instead of answering "not supported" |
 | **P3 remote @ references** | `@` in remote sessions completes remote files (fileReferences router: scoped live listings / bare queries via a remote rg index) |
 
 ## Project structure
@@ -220,7 +228,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.22.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.23.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
@@ -228,8 +236,8 @@ dsh_remote_vs/
 
 `vendor/dsh-remote-helpers/` (committed) holds helper seeds: at startup the plugin spreads them into
 `$DSH_HOME/dsh-remote-helpers/` (copy-if-absent, never overwrites), so fresh installs can push right away.
-When a new helper is built, swap the 4-piece set (tarball + sha256 + helper.json + patch notes)
-into vendor and commit (details live in the local-only `docs/MAINTENANCE.md` §4, which is gitignored and not distributed).
+When a new helper is built, swap the 5-piece set (tarball + sha256 + helper.json + `glibc-ceiling.patch` + `ssh-helper-runtime-deps.patch`)
+into vendor, delete the three old-version files, and commit (details live in the local-only `docs/MAINTENANCE.md` §4, which is gitignored and not distributed).
 
 `.spike/` and `scripts/` (both gitignored, **never distributed with the repository**) hold the
 development-time verification and self-check scripts: `.spike/` has the live-host ones — `p2-router.ts`
@@ -378,14 +386,22 @@ over helper RPC (fs) / ssh2 (processes), local stays untouched; both share one H
 
 Upstream never published helper binaries (all Release assets are empty), so this plugin builds its own:
 
-- Build machine: WSL2 Ubuntu-22.04 (glibc 2.35, matching the remote targets), Node v24.21.0 + pnpm 11.28.5
-- Sources: the `dsh-v0.2.1-alpha.2` tag (the **build baseline**: what must match is the wire protocol version, not the Host version — our protocol is still **2**, so a Host upgrade to `0.2.2-alpha.3` needs no rebuild either: the plugin intentionally stays on `dsh-ssh@0.2.1-rc.2`, and the new generation's protocol 3 is deliberately not followed — see §2.26 of the maintenance notes)
+- Build machine: WSL2 Ubuntu-22.04 (glibc 2.35, matching the remote targets), build-host Node v24.21.0 + pnpm 11.28.5;
+  the node **embedded by pkg is v24.22.3** (that is what `helper.json`'s `nodeVersion` records)
+- Sources: the `dsh-v0.2.2-rc.4` tag (commit `3f321d32…`) — the **build baseline tracks the wire protocol version, not the Host version**;
+  this generation is **protocol 3 (G2)**: besides the hello protocol literal and `policySchema.additionalWritableRoots`,
+  it adds `fs.patch` / `fs.delete` / `fs.move` (31 vs 28 methods). **"Protocol 3" does not imply those three methods**:
+  the G1 generation (`dsh-v0.2.2-alpha.2`) also reports protocol 3 but lacks them, so the helper must be built from a
+  G2 tag (≥ alpha.3)
 - Command: stock script `pnpm exec tsx scripts/build-exe-for-ssh-helper.ts --target=node24-linux-x64`
-- Only deviation: no docker for the manylinux 2.28 rebuild, so a `DSH_GLIBC_CEILING`
-  env override was added (default stays 2.28); this build targets 2.35 (see `glibc-ceiling.patch` in the cache dir)
-- Checks: stock `verify-ssh-helper-artifact.ts --sandbox=required`, all 8 green
-- Cache: `$DSH_HOME/dsh-remote-helpers/` (`*.tar.gz` + `.sha256` + `.helper.json`
-  with binarySha256, feeding P2's helperHash)
+- Deviation 1: no docker for the manylinux 2.28 rebuild, so a `DSH_GLIBC_CEILING`
+  env override was added (default stays 2.28); this build targets 2.35 (see `glibc-ceiling.patch`)
+- Deviation 2: the upstream tag's own helper build path is missing two dependencies (`@deepseek-ai/dsh-error` is a
+  required peer, `@deepseek-ai/dsh-fs-patch` is never built into the runtime by `compileRuntime()`); without them the
+  closure gate aborts / the handshake fails with `ERR_MODULE_NOT_FOUND`. The patch is archived as `ssh-helper-runtime-deps.patch`
+- Checks: stock `verify-ssh-helper-artifact.ts --archive=<tarball> --sandbox=required`, all 8 green
+- Size and cache: the linux-x64 archive is **47 MB** (47,234,718 B); cache `$DSH_HOME/dsh-remote-helpers/`
+  (`*.tar.gz` + `.sha256` + `.helper.json` with binarySha256, feeding P2's helperHash)
 - Full rebuild procedure for upgrades: the local-only `docs/MAINTENANCE.md` §4 (gitignored, not distributed)
 
 ## Security model
@@ -468,6 +484,6 @@ Before touching anything for a new DSH release, read the local-only `docs/MAINTE
 
 MIT © 2026 xiray-xia — see [LICENSE](./LICENSE).
 
-The `vendor/` helper seed is built from DeepSeek Harness sources (MIT) at tag `dsh-v0.2.1-alpha.2`
-with the stock build script; see "Self-built helper" above for the exact procedure and the single
-documented deviation (`glibc-ceiling.patch` in the seed set).
+The `vendor/` helper seed is built from DeepSeek Harness sources (MIT) at tag `dsh-v0.2.2-rc.4`
+with the stock build script; see "Self-built helper" above for the exact procedure and the two
+documented deviations (`glibc-ceiling.patch` and `ssh-helper-runtime-deps.patch` in the seed set).

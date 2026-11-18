@@ -49,8 +49,16 @@ export interface HelperCacheEntry {
     protocol: number;
     nodeVersion: string;
 }
-/** Wire protocol this plugin's `dsh-ssh` generation speaks (see MAINTENANCE §2.7). */
-export declare const EXPECTED_HELPER_PROTOCOL = 2;
+/**
+ * Wire protocol this plugin's `dsh-ssh` generation speaks (see MAINTENANCE §2.7).
+ *
+ * Derived from the installed package instead of hardcoded: helper and client
+ * handshake on a strict literal, so a constant that drifts from the package
+ * silently selects a helper the handshake will reject. Before 0.23.0 this was a
+ * hand-maintained `2`; the protocol-3 move (MAINTENANCE §2.51) is why it can no
+ * longer be a second source of truth.
+ */
+export declare const EXPECTED_HELPER_PROTOCOL = 3;
 /** Absolute path of one cached helper tarball; throws when it is not inside the cache. */
 export declare function helperTarballPath(helper: HelperCacheEntry, dir?: string): string;
 /** Scan the local helper cache; invalid/incomplete entries are skipped. */
@@ -73,6 +81,24 @@ export declare function compareHelperVersions(left: string, right: string): numb
  * then fail the runtime handshake, so it is not a candidate at all.
  */
 export declare function pickCached(platform: string, version?: string, expectedProtocol?: number): HelperCacheEntry | undefined;
+/**
+ * Wire protocol of the helper build a deploy record points at, when this machine
+ * still has that build cached.
+ *
+ * Upgrade-day support for `createRpc`: it re-runs the deploy pipeline only when
+ * the record carries NO helper, so a host deployed by an older plugin keeps
+ * dialing a binary from another protocol generation — both sides pin a literal,
+ * so the handshake can only fail and nothing self-heals. The local cache is the
+ * one place that still knows that build's protocol, so the record is classified
+ * here:
+ * - unknown build (not cached here, e.g. deployed from another machine) →
+ *   `undefined`: keep the record and let the handshake report the real error;
+ * - cached build of THIS protocol → returns the expected value, so a deliberate
+ *   rollback pin (an older build of the same generation) stays pinned;
+ * - cached build of ANOTHER protocol → returns the foreign value; the caller
+ *   re-deploys instead of dialing a doomed handshake.
+ */
+export declare function protocolOfStoredHelper(binarySha256: string, platform: string | undefined, entries?: HelperCacheEntry[]): number | undefined;
 /** Honest availability of the helper channels. */
 export declare function helperAvailability(): HelperAvailability[];
 export declare function isHelperAvailable(kind: HelperKind): boolean;

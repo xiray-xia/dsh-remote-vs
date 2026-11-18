@@ -18,7 +18,7 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { RemoteStore } from '../store.ts'
 import type { RemotePool } from '../pool.ts'
-import { deployFailure, probe, pushPipeline } from '../deploy.ts'
+import { EXPECTED_HELPER_PROTOCOL, deployFailure, probe, protocolOfStoredHelper, pushPipeline } from '../deploy.ts'
 import { aliasRoot } from '../paths.ts'
 import type { RemoteHostEntry, RemoteWorkspaceBinding } from '../protocol.ts'
 import { RpcConnection } from './helper-rpc.ts'
@@ -716,7 +716,7 @@ export class RemoteWorlds {
     })
   }
 
-  private async createRpc(alias: string): Promise<RpcConnection> {
+  private async createRpc(alias: string, allowRedeploy = true): Promise<RpcConnection> {
     const entry: RemoteHostEntry = this.deps.store.require(alias)
     let deploy = entry.deploy
     if (deploy?.artifact === undefined || !deploy.artifact.startsWith('dsh-ssh-helper/') || deploy.helper === undefined) {
@@ -753,6 +753,32 @@ export class RemoteWorlds {
       home = probed.home
       platform = platform && platform !== '' ? platform : probed.platform === 'unknown' ? undefined : probed.platform
       if (platform === undefined) throw new Error(`cannot locate helper platform for ${alias}`)
+    }
+    // Upgrade-day self-heal: a record written by an older plugin names a helper
+    // of another wire protocol. Both sides pin the protocol as a literal, so
+    // dialing it can only fail — and the first-contact predicate above never
+    // re-runs the pipeline for a record that already has a helper. The local
+    // cache still knows that build's protocol, so a foreign generation is
+    // treated as stale and the cached build this plugin speaks is pushed. A pin
+    // to an older build of the SAME protocol is left alone (rollback stays
+    // intact); an uncached build is left for the handshake to explain.
+    const storedProtocol = protocolOfStoredHelper(helper.sha256, platform)
+    if (allowRedeploy && storedProtocol !== undefined && storedProtocol !== EXPECTED_HELPER_PROTOCOL) {
+      try {
+        this.ctx.logger.info(
+          `[remote-vs] helper on ${alias} speaks wire protocol ${storedProtocol}, this build speaks `
+          + `${EXPECTED_HELPER_PROTOCOL}; re-deploying before dialing`,
+        )
+      } catch {
+        // Logging must never prevent the heal.
+      }
+      const report = await pushPipeline(this.deps.pool, this.deps.store, alias)
+      if (report.action === 'failed') {
+        throw new Error(`helper re-deploy after a wire-protocol change failed: ${report.detail}`)
+      }
+      // Re-read the refreshed record; a second mismatch is handed to the
+      // handshake so its error explains what the pipeline could not fix.
+      return this.createRpc(alias, false)
     }
     const helperPath = `${home}/.dsh-helpers/dsh-ssh-helper-${helper.version}-${platform}/dsh-ssh-helper`
     const conn = new RpcConnection({

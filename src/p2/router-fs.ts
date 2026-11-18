@@ -324,15 +324,14 @@ export default class TransparentFileSystem extends FileSystem {
 
   /**
    * alpha.3 added patch/delete/move to the FileSystem contract for the
-   * apply_patch tool. Local providers implement all three; the deliberately
-   * pinned protocol-2 remote backend (dsh-fs-ssh 0.2.1-rc.2) predates them, so
-   * remote targets get a typed error instead of a TypeError. The apply_patch
-   * tool is off by default in every stock preset (alpha.3 dsh-base and presets
-   * pin `applyPatch: false`), so this only matters when it is enabled.
+   * apply_patch tool. As of 0.23.0 every provider this plugin mounts implements
+   * all three — fs-ssh 0.2.2 talks the protocol-3 helper, which serves
+   * `fs.patch`/`fs.delete`/`fs.move` — so the guards below are defensive: they
+   * turn a thinner provider into a typed FsError instead of a TypeError.
    */
   private unsupportedRemote(what: string): FsError {
     return new FsError(
-      `${what} is not supported on remote workspaces yet (fs-ssh protocol 2); run it in a local workspace`,
+      `${what} is not supported by the remote fs provider mounted for this world; run it in a local workspace`,
       'FS_IO_ERROR',
     )
   }
