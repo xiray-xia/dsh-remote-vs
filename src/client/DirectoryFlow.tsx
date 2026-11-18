@@ -27,6 +27,24 @@ import { WorkspaceWizard } from './WorkspaceWizard.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { Btn, Notice } from './ui.tsx'
 
+/**
+ * Opt-in trace for the directory flow, silent unless the operator sets
+ * `localStorage['dsh-remote-vs.debug'] = '1'` and reopens the dialog.
+ *
+ * The native-chooser interaction crosses three parties — this dialog, the stock
+ * owner that adopts the path, and the host-side OS chooser — so "the dialog did
+ * not close" needs to say WHICH stage was reached before it can be diagnosed.
+ * Without this the only observable is the symptom.
+ */
+function traceFlow(...parts: unknown[]): void {
+  try {
+    if (typeof localStorage === 'undefined' || localStorage.getItem('dsh-remote-vs.debug') !== '1') return
+  } catch {
+    return
+  }
+  console.info('[rvs-flow]', ...parts)
+}
+
 /** Injected face: uiWorkspace directory primitives (bound in apply's closure). */
 export interface DirectoryFlowInjected {
   listDirectory: (path?: string, signal?: AbortSignal) => Promise<DirectoryListing>
@@ -62,6 +80,8 @@ function LocalLeg(props: {
   t: (k: string) => string
   busy: boolean
   injected: DirectoryFlowInjected
+  /** Monotonic id of the open request this leg belongs to (shared across remounts). */
+  flowEpoch: { current: number }
   onPicked: (path: string) => void
 }): ReactNode {
   const { t, busy, injected } = props
@@ -88,8 +108,10 @@ function LocalLeg(props: {
     } catch (e) {
       if (gen !== generation.current) return
       if (isUnavailable(e)) {
+        traceFlow('browse unavailable -> native')
         setMode('native')
       } else {
+        traceFlow('browse failed', errText(e))
         setMode(mode === 'browse' ? 'browse' : 'failed')
         setError(errText(e))
       }
@@ -128,12 +150,23 @@ function LocalLeg(props: {
 
   const nativePick = (): void => {
     const gen = ++generation.current
+    // The open request this pick belongs to. A REMOUNT (same request) must still
+    // deliver its result — the OS chooser can take long enough for an unrelated
+    // re-render to replace this instance — while a result from a PREVIOUS open
+    // must be dropped. `generation` cannot tell those apart; the flow epoch can.
+    const epoch = props.flowEpoch.current
     setLoading(true)
     setError(undefined)
     setNotice(undefined)
+    traceFlow('native chooser requested')
     injected.pickDirectory().then(
       (picked) => {
-        if (gen !== generation.current) return
+        if (props.flowEpoch.current !== epoch) {
+          traceFlow('native chooser result dropped (another open request)', picked)
+          return
+        }
+        if (gen !== generation.current) traceFlow('native chooser result adopted after remount', picked)
+        traceFlow('native chooser returned', picked === null ? 'cancelled' : picked)
         setLoading(false)
         if (picked === null) {
           setNotice(t('flow.nativeCancelled'))
@@ -142,7 +175,8 @@ function LocalLeg(props: {
         }
       },
       (e: unknown) => {
-        if (gen !== generation.current) return
+        if (props.flowEpoch.current !== epoch) return
+        traceFlow('native chooser failed', errText(e))
         setLoading(false)
         setError(errText(e))
       },
@@ -327,6 +361,7 @@ function RemoteLeg(props: {
         onCancel={props.onCancel}
         onSaved={(_workspace, aliasPath) => {
           setDone(true)
+          traceFlow('remote wizard saved', aliasPath)
           props.onPicked(aliasPath)
         }}
       />
@@ -338,6 +373,8 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
   const [t] = useState(() => makeT(detectLang()))
   const [tab, setTab] = useState<'local' | 'remote'>('local')
   const [epoch, setEpoch] = useState(0)
+  /** Mirrors `epoch` without a render lag; the local leg compares it on resolve. */
+  const epochRef = useRef(0)
 
   /**
    * Hand the picked path to the owner and close the dialog in one step.
@@ -355,6 +392,7 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
    * the owner's picked-handler throws.
    */
   const finish = (path: string): void => {
+    traceFlow('finish', path)
     props.onCancel()
     props.onPicked(path)
   }
@@ -363,8 +401,10 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
   useEffect(() => {
     if (props.open && !wasOpen.current) {
       setTab('local')
-      setEpoch((n) => n + 1)
+      epochRef.current += 1
+      setEpoch(epochRef.current)
     }
+    traceFlow('open', props.open)
     wasOpen.current = props.open
   }, [props.open])
 
@@ -474,7 +514,7 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {tab === 'local'
-            ? <LocalLeg key={`local-${epoch}`} t={t} busy={props.busy} injected={injected} onPicked={finish} />
+            ? <LocalLeg key={`local-${epoch}`} t={t} busy={props.busy} injected={injected} flowEpoch={epochRef} onPicked={finish} />
             : <RemoteLeg key={`remote-${epoch}`} t={t} busy={props.busy} onPicked={finish} onCancel={props.onCancel} />}
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
