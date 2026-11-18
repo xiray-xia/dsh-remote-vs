@@ -339,6 +339,26 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
   const [tab, setTab] = useState<'local' | 'remote'>('local')
   const [epoch, setEpoch] = useState(0)
 
+  /**
+   * Hand the picked path to the owner and close the dialog in one step.
+   *
+   * The owner adopts a picked path asynchronously (`createWorkspace`), and only
+   * then flips `open` back to false. For the in-app browser that round trip is
+   * a local listing, but the native chooser makes the operator wait for the OS
+   * dialog to return and for the host to create the Workspace — and until the
+   * owner's state lands, this dialog sits on screen. Operators reported it as
+   * "the dialog only disappears after I click or press a key": that next input
+   * is what re-rendered the owner's surface. `onCancel` is the same owner's
+   * "withdraw the request / just close the flow" signal, so sending it with the
+   * path closes immediately and independently of adoption timing; the owner's
+   * own close is then a no-op. Cancel goes first so the dialog closes even if
+   * the owner's picked-handler throws.
+   */
+  const finish = (path: string): void => {
+    props.onCancel()
+    props.onPicked(path)
+  }
+
   const wasOpen = useRef(false)
   useEffect(() => {
     if (props.open && !wasOpen.current) {
@@ -454,8 +474,8 @@ export function RemoteDirectoryFlow(props: DirectoryFlowOwnerProps & DirectoryFl
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {tab === 'local'
-            ? <LocalLeg key={`local-${epoch}`} t={t} busy={props.busy} injected={injected} onPicked={props.onPicked} />
-            : <RemoteLeg key={`remote-${epoch}`} t={t} busy={props.busy} onPicked={props.onPicked} onCancel={props.onCancel} />}
+            ? <LocalLeg key={`local-${epoch}`} t={t} busy={props.busy} injected={injected} onPicked={finish} />
+            : <RemoteLeg key={`remote-${epoch}`} t={t} busy={props.busy} onPicked={finish} onCancel={props.onCancel} />}
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
           <Btn onClick={props.onCancel} disabled={props.busy}>{t('hosts.cancel')}</Btn>
