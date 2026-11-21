@@ -33,7 +33,7 @@ function asSubscribe(value: unknown): SubscribeFn | undefined {
 }
 
 /** The on-screen session id, or undefined (no seat mounted / no feed). */
-function mountedSessionId(ctx: Context): string | undefined {
+export function mountedSessionId(ctx: Context): string | undefined {
   try {
     const get = (ctx as unknown as { get?(name: string): unknown }).get
     if (typeof get !== 'function') return undefined

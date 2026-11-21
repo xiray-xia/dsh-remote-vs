@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteViewSettings, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     /**
@@ -218,6 +218,9 @@ export declare const api: {
         diff: (sessionId: string, path: string, repoSubdir?: string) => Promise<RemoteChangesDiff | null>;
     };
     setRoutingMode: (mode: "off" | "shadow" | "enforce") => Promise<"off" | "shadow" | "enforce">;
+    getViewSettings: () => Promise<RemoteViewSettings>;
+    /** Flat patch: unknown keys are ignored, unusable values keep the stored one. */
+    setViewSettings: (patch: Partial<RemoteViewSettings>) => Promise<RemoteViewSettings>;
     deployStatus: (alias: string) => Promise<{
         deploy: RemoteDeployState;
         helpers: HelperAvailability[];

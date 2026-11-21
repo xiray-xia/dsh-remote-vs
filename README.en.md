@@ -37,14 +37,14 @@ dsh plugin --profile web add dsh-remote-vs
 (From npm, recommended; installing straight from the repository also works:
 `dsh plugin --profile web add github:xiray-xia/dsh-remote-vs`.)
 
-**Requires DSH `0.2.2-rc.4` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
-**adapted to and typechecked against `0.2.2-rc.4`**). On Host `0.2.2-rc.2` / `0.2.2-rc.3` use plugin `0.22.0`; on `0.2.2-alpha.3` / `0.2.2-rc.1` use `0.20.1`; the
+**Requires DSH `0.2.2-rc.5` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
+**adapted to and typechecked against `0.2.2-rc.5`**). On Host `0.2.2-rc.4` use plugin `0.23.0`; `0.2.2-rc.2` / `0.2.2-rc.3` use plugin `0.22.0`; on `0.2.2-alpha.3` / `0.2.2-rc.1` use `0.20.1`; the
 `0.2.2-alpha.2` generation needs `0.17.0` and the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
 this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
 profile instead — see [Desktop](#desktop-dsh-desktop) below.
 
-> **Upgrading from `0.22.0`**: the remote helper's wire protocol moves from **2 to 3**.
+> **Upgrading from `0.22.0` (or older)**: the remote helper's wire protocol moves from **2 to 3** (`0.23.0` onward keeps the helper stable, and `0.23.0 → 0.24.0` re-pushes nothing).
 > Existing host records are recognised as an older generation and the new helper is pushed
 > automatically on the first connection (this needs the old build to still be in the local
 > helper cache; if that cache was cleared, press **Push** once in Settings). Each host pays
@@ -81,7 +81,7 @@ Install either way:
 `desktop` is reserved for the Electron application: an **npm-installed `dsh` cannot manage
 it** (it answers `profile "desktop" is managed exclusively by the Electron application`),
 so one of the two routes above is required. The Desktop release version equals the DSH
-runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-rc.4`; check About);
+runtime it bundles, and it must satisfy `engines.dsh` (`>=0.2.2-rc.5`; check About);
 older releases make the Plugins page refuse the install. Desktop opens no visible Web
 port, but the plugin's HTTP routes and terminal socket are forwarded through Desktop's
 Host (the terminal resolves its address from `__DSH_TRANSPORT__.streamBaseUrl`), so no
@@ -115,6 +115,7 @@ extra configuration is needed.
 | Jump | Clicking a search hit opens the file at that line, centres it and **lights the landing line** (fades after ~2.6s); repeat jumps in the same file work |
 | Terminals | Tabbed multi-terminal (`+` to create, `✕`/middle-click to close behind a confirm), across hosts; session ids are persisted so a page refresh reattaches to the running shells, and a session is kept for **10 minutes after its last socket goes away** (enough for a refresh or a browser-tab switch) before the remote shell is closed; **a socket drop (as opposed to a shell exit) keeps the session and offers a one-click reattach** (the same session id reattaches, and the Host still reclaims it after the 10-minute TTL above), and only a real exit clears it |
 | Workspaces | Binding list + routing-mode dropdown + the dual-mode (local / remote) new-workspace wizard; **unbinding asks first** (sessions and history stay readable, new remote calls are refused) |
+| View preferences | The two controls at the bottom of Settings → Remote hosts: **open the remote workspace for a new remote session** (off by default; only remote-workspace sessions trigger it, local sessions never do, it is decided once per session per page load, and a panel you close stays closed) and the **remote workspace width share** (45% by default, 20%–70%): when the plugin opens its “Remote Workspace” right-panel page, the column takes that share of the window width, and changing the share applies immediately while the panel is open. Both live host-side (`$DSH_HOME/dsh-remote-view.json`) so every window of the profile agrees |
 | Port forwarding | A sidebar **"Ports"** page: lists the remote host's listening TCP ports (`ss`, falling back to `netstat`) and forwards any of them to a local port in one click, with the local URL for copying/opening. Manual rules ("remote address:port → local port, which may be auto-assigned") are supported too. **The local listener binds `127.0.0.1` only** (`ssh -L` semantics — never exposed to the LAN); each rule has its own channel budget and never consumes one of the six exec/SFTP slots. An SSH drop or the idle eviction does not kill the listener: the next local connection simply re-dials. Rules live in the browser (restored after a reload) and every one can be stopped; disabling the plugin, deleting the host, or unloading it releases the local ports. When the remote has neither `ss` nor `netstat`, or the probe times out or is interrupted, the panel says "cannot enumerate" instead of showing an empty list |
 
 ### Hosts and transport
@@ -150,8 +151,9 @@ dsh_remote_vs/
 ├── src/
 │   ├── index.ts            # plugin entry: store/pool/worlds/routes/tools/preset-switch wiring
 │   ├── protocol.ts         # frontend/backend wire contract (route table + pure types, shared)
-│   ├── paths.ts            # four-piece addressing under $DSH_HOME (store/keys/build cache/alias dirs)
+│   ├── paths.ts            # addressing under $DSH_HOME (store/view preferences/keys/build cache/alias dirs)
 │   ├── store.ts            # host + binding + tombstone persistence (0600 JSON, atomic writes)
+│   ├── view-settings.ts    # client view-preference persistence (auto-open remote workspace / panel width share, 0600 JSON, atomic writes)
 │   ├── pool.ts             # ssh2 long-lived pool (exec/shell/sftp/putFile, TOFU host keys)
 │   ├── sftp.ts             # remote file engine (SFTP windowed reads-writes/tree ops)
 │   ├── keygen.ts           # password-host key bootstrap (generate→deploy→flip)
@@ -183,6 +185,8 @@ dsh_remote_vs/
 │   │   └── bridge-refs.ts  # standalone refs bridge (local-refs needs workingDirectory: must split)
 │   └── client/             # ── browser half (React, bundled into lib/client.js) ──
 │       ├── index.tsx       # surface decision (better-first/settle-boost/native fallback) + settings + directoryFlow takeover
+│       ├── auto-open-remote.ts # a remote session's first appearance opens the plugin's right-panel page at the configured width share
+│       ├── view-settings.ts    # client view-preference cache (load/save/subscribe; shared by the settings page and the auto-open behaviour)
 │       ├── store.tsx       # module-level state shared by both surfaces (useSyncExternalStore; open files/terminals/view live here)
 │       ├── RemoteRoot.tsx  # sidebar surface: VS Code activity rail (explorer/search/SCM/history/editor/terminal/workspaces)
 │       ├── RemoteEditorView.tsx # conversation-view surface (the "remote editor" tab next to 对话/轨迹, full width)
@@ -228,7 +232,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.23.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.24.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)

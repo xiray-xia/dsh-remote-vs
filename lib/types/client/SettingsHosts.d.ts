@@ -2,6 +2,9 @@
  * Settings section occupants (`settings.section`, ids `remote-hosts` and
  * `remote-workspaces`): the full host manager plus the binding list/wizard,
  * living in the DSH Settings dialog instead of the Remote tab.
+ * The `remote-hosts` page also carries the plugin's two view preferences at the
+ * bottom (auto-open the remote workspace, and its share of the frame width) —
+ * see `auto-open-remote.ts` for the behaviour they drive.
  * Self-contained: each section fetches its own data so they work without any
  * injected face or sidebar.
  *

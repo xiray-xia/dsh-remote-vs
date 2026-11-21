@@ -2,6 +2,9 @@
  * Settings section occupants (`settings.section`, ids `remote-hosts` and
  * `remote-workspaces`): the full host manager plus the binding list/wizard,
  * living in the DSH Settings dialog instead of the Remote tab.
+ * The `remote-hosts` page also carries the plugin's two view preferences at the
+ * bottom (auto-open the remote workspace, and its share of the frame width) —
+ * see `auto-open-remote.ts` for the behaviour they drive.
  * Self-contained: each section fetches its own data so they work without any
  * injected face or sidebar.
  *
@@ -11,10 +14,19 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts'
+import {
+  REMOTE_VIEW_SETTINGS_DEFAULTS,
+  REMOTE_VIEW_WIDTH_MAX,
+  REMOTE_VIEW_WIDTH_MIN,
+  type RemoteHostSummary,
+  type RemoteRoutingStatus,
+  type RemoteViewSettings,
+  type RemoteWorkspaceBinding,
+} from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { HostsView } from './HostsView.tsx'
 import { refreshAll as refreshSidebarStore } from './store.tsx'
+import { loadViewSettings, saveViewSettings } from './view-settings.ts'
 import { WorkspacesView } from './WorkspacesView.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
@@ -27,14 +39,23 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
   const [version, setVersion] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  /** View preferences (the page's third block); defaults until the host answers. */
+  const [view, setView] = useState<RemoteViewSettings>(() => ({ ...REMOTE_VIEW_SETTINGS_DEFAULTS }))
+  /** The width slider's live value while dragging; persisted on release. */
+  const [ratio, setRatio] = useState(REMOTE_VIEW_SETTINGS_DEFAULTS.remoteWorkspaceWidthRatio)
+  const [viewSaving, setViewSaving] = useState(false)
 
   const refresh = useCallback(() => {
     setError(undefined)
-    Promise.all([api.getHosts(), api.getWorkspaces()]).then(
-      ([rows, w]) => {
+    Promise.all([api.getHosts(), api.getWorkspaces(), loadViewSettings()]).then(
+      ([rows, w, settings]) => {
         setHosts(rows)
         setMode(w.mode)
         setVersion(w.version)
+        if (settings !== undefined) {
+          setView(settings)
+          setRatio(settings.remoteWorkspaceWidthRatio)
+        }
       },
       (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
     )
@@ -69,6 +90,29 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
     ).finally(() => setSaving(false))
   }
 
+  /**
+   * Persist one view preference. The module cache behind `saveViewSettings`
+   * publishes the answer, so the frame-wide auto-open behaviour sees the new
+   * value in this same page (a width save then applies to an open panel).
+   */
+  const saveView = useCallback((patch: Partial<RemoteViewSettings>): void => {
+    setViewSaving(true)
+    setError(undefined)
+    saveViewSettings(patch).then(
+      (next) => {
+        setView(next)
+        setRatio(next.remoteWorkspaceWidthRatio)
+      },
+      (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
+    ).finally(() => setViewSaving(false))
+  }, [])
+
+  /** Commit the slider on release/keyboard blur, not on every drag tick. */
+  const commitRatio = (): void => {
+    if (viewSaving || ratio === view.remoteWorkspaceWidthRatio) return
+    saveView({ remoteWorkspaceWidthRatio: ratio })
+  }
+
   return (
     <div style={{ padding: '4px 2px', fontSize: 13, lineHeight: 1.5 }}>
       <div style={{ ...hairline, borderTop: 'none', borderBottom: '1px solid rgba(127,127,127,.25)', marginBottom: 10, paddingBottom: 8 }}>
@@ -95,6 +139,40 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
       </div>
       {error !== undefined && <Notice kind="error">{error}</Notice>}
       <HostsView t={t} hosts={hosts} onChanged={reload} />
+      <div style={{ ...hairline, marginTop: 12, paddingTop: 10 }}>
+        <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>{t('viewSettings.title')}</div>
+        <Row>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: viewSaving ? 0.5 : 1 }}>
+            <input
+              type="checkbox"
+              checked={view.autoOpenRemoteWorkspace}
+              disabled={viewSaving}
+              onChange={(e) => saveView({ autoOpenRemoteWorkspace: e.target.checked })}
+            />
+            {t('viewSettings.autoOpen')}
+          </label>
+          {viewSaving && <span style={{ fontSize: 12, opacity: 0.6 }}>{t('route.saving')}</span>}
+        </Row>
+        <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>{t('viewSettings.autoOpenHint')}</div>
+        <Row>
+          <span style={{ fontSize: 12, opacity: 0.75 }}>{t('viewSettings.width')}</span>
+          <input
+            type="range"
+            min={REMOTE_VIEW_WIDTH_MIN}
+            max={REMOTE_VIEW_WIDTH_MAX}
+            step={0.05}
+            value={ratio}
+            disabled={viewSaving}
+            onChange={(e) => setRatio(Number(e.target.value))}
+            onPointerUp={commitRatio}
+            onKeyUp={commitRatio}
+            onBlur={commitRatio}
+            style={{ width: 180, accentColor: 'inherit', opacity: viewSaving ? 0.5 : 1 }}
+          />
+          <span style={{ fontSize: 12, opacity: 0.75 }}>{Math.round(ratio * 100)}%</span>
+        </Row>
+        <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>{t('viewSettings.widthHint')}</div>
+      </div>
     </div>
   )
 }

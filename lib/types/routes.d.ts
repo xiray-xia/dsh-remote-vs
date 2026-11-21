@@ -7,6 +7,7 @@ import type { RemoteWorlds } from './p2/worlds.ts';
 import { TerminalSessionRegistry } from './terminal.ts';
 import { ForwardManager } from './forward.ts';
 import type { SessionChanges } from './changes/recorder.ts';
+import { RemoteViewSettingsStore } from './view-settings.ts';
 /**
  * Wrap one archive command in a remote-side deadline.
  *
@@ -44,6 +45,12 @@ export interface RemoteRoutesDeps {
      * instead of pretending the feature exists.
      */
     forwards?: ForwardManager;
+    /**
+     * Client view preferences. Absent in route-only probes, which then get a
+     * store on the real path — its first touch is a read, so constructing one
+     * costs nothing until a request actually asks.
+     */
+    viewSettings?: RemoteViewSettingsStore;
 }
 export declare function makeRoutes(deps: RemoteRoutesDeps): {
     routes: WebRoute[];

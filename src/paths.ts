@@ -3,6 +3,7 @@
  * (default ~/.dsh), next to — but independent from — dsh-ssh.json:
  *
  * - dsh-remote.json          host + workspace store (0600)
+ * - dsh-remote-view.json     client view preferences (auto-open + panel width)
  * - dsh-remote-keys/         plugin-managed keypairs (0700 dir, 0600 keys)
  * - dsh-remote-helpers/      cached helper tarballs + .sha256 + .helper.json
  * - remote-ssh/aliases/      local alias dirs, one per remote workspace binding
@@ -21,6 +22,18 @@ export function dshHome(): string {
 /** Absolute path of the remote store file. */
 export function storePath(home: string = dshHome()): string {
   return join(home, 'dsh-remote.json')
+}
+
+/**
+ * Absolute path of the client view-preferences file.
+ *
+ * Its own file, not a section of `dsh-remote.json`: hosts and bindings are
+ * routing data read by the routers on every operation, while these two fields
+ * are GUI behaviour. Keeping them apart means a hand-edited preference can never
+ * cost the routing store (see `RemoteViewSettingsStore` for the defaults).
+ */
+export function viewSettingsPath(home: string = dshHome()): string {
+  return join(home, 'dsh-remote-view.json')
 }
 
 /** Absolute path of the managed-keys directory (created 0700 on demand). */

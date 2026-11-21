@@ -27,6 +27,7 @@ import { LISTEN_PORTS_TIMEOUT_MS, listenPortsCommand, parseListenPorts } from '.
 import { HostMonitor } from './monitor.ts'
 import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
+import { RemoteViewSettingsStore } from './view-settings.ts'
 
 /** One noServer WebSocket server for terminal upgrades (RFC 6455). */
 // `maxPayload` is the authoritative frame bound: without it ws buffers up to its
@@ -193,6 +194,12 @@ export interface RemoteRoutesDeps {
    * instead of pretending the feature exists.
    */
   forwards?: ForwardManager
+  /**
+   * Client view preferences. Absent in route-only probes, which then get a
+   * store on the real path — its first touch is a read, so constructing one
+   * costs nothing until a request actually asks.
+   */
+  viewSettings?: RemoteViewSettingsStore
 }
 
 /** Package name our loader row is mounted from (ns discovery key). */
@@ -261,6 +268,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   // fiber-scoped effect like the forward manager.
   const monitor = new HostMonitor(pool)
   const forwards = deps.forwards
+  const viewSettings = deps.viewSettings ?? new RemoteViewSettingsStore()
 
   /**
    * Stream one remote `tar -czf -` command into a `.tar.gz` download response.
@@ -1199,6 +1207,45 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           const ns = ownSettingsNs(ctx) ?? 'remote-vs'
           await settings.update(ns, { routingMode: mode })
           writeJson(res, 200, { mode: worlds.mode })
+        } catch (error) {
+          writeRouteError(res, error)
+        }
+      },
+    },
+    // ------------------------------------------------- view preferences
+    // The two Settings → 远程主机 controls at the bottom of the page: auto-open
+    // the plugin's right-panel page for a remote session, and the share of the
+    // frame width that page takes. Flat PATCH semantics (unknown keys ignored),
+    // persisted host-side so every window of this profile follows the same
+    // answer — see `RemoteViewSettingsStore`.
+    {
+      kind: 'exact',
+      path: REMOTE_API.viewSettings,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        const method = req.method ?? 'GET'
+        if (method === 'GET') {
+          try {
+            writeJson(res, 200, { settings: viewSettings.get() })
+          } catch (error) {
+            // A corrupt preferences file is a real failure the page should name
+            // (the alternative — silently answering the defaults — hides it and
+            // then overwrites the user's file on the next save).
+            writeRouteError(res, error)
+          }
+          return
+        }
+        if (method !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${method}` })
+          return
+        }
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        try {
+          writeJson(res, 200, { settings: viewSettings.patch(read.body ?? {}) })
         } catch (error) {
           writeRouteError(res, error)
         }

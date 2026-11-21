@@ -29,6 +29,8 @@ export declare const REMOTE_API: {
     readonly terminal: "/api/dsh-remote/terminal";
     readonly terminalClose: "/api/dsh-remote/terminal-close";
     readonly routing: "/api/dsh-remote/routing";
+    /** Client view preferences (auto-open the remote page + its width share). */
+    readonly viewSettings: "/api/dsh-remote/view-settings";
     /** Current working directory of one live session (click resolution helper). */
     readonly sessionCwd: "/api/dsh-remote/session-cwd";
     /** What one live session changed on its remote host (the review panel). */
@@ -117,6 +119,39 @@ export interface RemoteRoutingStatus {
     /** Removed alias dirs that fail closed (history kept). */
     tombstones: string[];
 }
+/**
+ * Client view preferences: what the RIGHT PANEL does when this plugin opens it.
+ *
+ * Host-persisted rather than browser-local on purpose: the same user drives the
+ * Web GUI and the Desktop shell, and these describe how the plugin behaves on
+ * both. They are per PROFILE, not per workspace.
+ */
+export interface RemoteViewSettings {
+    /**
+     * Open this plugin's right-panel page when a session that the plugin considers
+     * REMOTE first appears on screen (once per session per page load). Default off:
+     * the panel is the user's space unless they asked for this.
+     */
+    autoOpenRemoteWorkspace: boolean;
+    /**
+     * Share of the frame width the right panel takes when this plugin opens it.
+     * Bounded by {@link REMOTE_VIEW_WIDTH_MIN} … {@link REMOTE_VIEW_WIDTH_MAX}.
+     */
+    remoteWorkspaceWidthRatio: number;
+}
+/** The answers a fresh profile gets before anything is saved. */
+export declare const REMOTE_VIEW_SETTINGS_DEFAULTS: RemoteViewSettings;
+/** Narrowest useful share of the frame width (a smaller panel hides its tools). */
+export declare const REMOTE_VIEW_WIDTH_MIN = 0.2;
+/** Widest share the column itself allows (DSH caps the column at 70 %). */
+export declare const REMOTE_VIEW_WIDTH_MAX = 0.7;
+/**
+ * Clamp one width share into the allowed band.
+ *
+ * Pure and shared by both halves: the Host validates what it stores, and the
+ * browser clamps what it applies (an older Host may omit or round the field).
+ */
+export declare function clampViewWidthRatio(value: number): number;
 /** Plugin identity (workspaces GET extension for the Settings display). */
 export interface RemotePluginMeta {
     /** Version from the shipped package.json ('unknown' when unreadable). */

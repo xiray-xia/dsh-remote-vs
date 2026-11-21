@@ -5,6 +5,8 @@ export interface RemoteChatTarget {
     /** The canonical host dir of the workspace that session belongs to. */
     sessionWorkspacePath: string | undefined;
 }
+/** The on-screen session id, or undefined (no seat mounted / no feed). */
+export declare function mountedSessionId(ctx: Context): string | undefined;
 /** Host-confirmed workspace path for one session (exact membership). */
 export declare function workspacePathOf(ctx: Context, sessionId: string): string | undefined;
 /**

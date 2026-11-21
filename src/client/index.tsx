@@ -18,6 +18,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import './vsc/vsc.css'
+import { installAutoOpenRemote } from './auto-open-remote.ts'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
 import { FloatingEditorWindow } from './FloatingEditorWindow.tsx'
 import { installFloatTabTrigger } from './float-tab-trigger.ts'
@@ -248,6 +249,13 @@ export function apply(ctx: Context): void {
       label: () => settingsT('settings.workspaces'),
     }, SettingsWorkspacesSection),
   ), 'dsh-remote-vs: settings workspaces')
+  // The behaviour behind those settings' third block: open this plugin's page
+  // when a REMOTE session first appears, and size the right column. Frame-wide
+  // on purpose — the page it opens is usually closed, so no seat of ours is
+  // mounted when the trigger happens. All service reads are soft (a host without
+  // `sidebarRight` degrades to a no-op); see `auto-open-remote.ts` for how
+  // "remote" is proven and why the width goes through the drag handle.
+  ctx.effect(() => installAutoOpenRemote(ctx), 'dsh-remote-vs: auto-open remote workspace')
   // The editor tab in the conversation view (right next to 对话 / 轨迹): at
   // full width the file editor and the side-by-side diff stop competing with
   // the tree for a narrow sidebar column. The store then flips the editor

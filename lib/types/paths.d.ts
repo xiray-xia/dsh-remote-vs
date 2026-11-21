@@ -2,6 +2,15 @@
 export declare function dshHome(): string;
 /** Absolute path of the remote store file. */
 export declare function storePath(home?: string): string;
+/**
+ * Absolute path of the client view-preferences file.
+ *
+ * Its own file, not a section of `dsh-remote.json`: hosts and bindings are
+ * routing data read by the routers on every operation, while these two fields
+ * are GUI behaviour. Keeping them apart means a hand-edited preference can never
+ * cost the routing store (see `RemoteViewSettingsStore` for the defaults).
+ */
+export declare function viewSettingsPath(home?: string): string;
 /** Absolute path of the managed-keys directory (created 0700 on demand). */
 export declare function keysDir(home?: string): string;
 /** Absolute path of the helper tarball cache directory. */

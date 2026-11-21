@@ -26,6 +26,7 @@ import {
   type RemoteRead,
   type RemoteRoutingStatus,
   type RemoteTimeouts,
+  type RemoteViewSettings,
   type RemoteWorkspaceBinding,
   type RemoteWriteConflict,
   type RemoteWriteResult,
@@ -564,6 +565,12 @@ export const api = {
   // -- routing mode (volatile, persists to the profile patch)
   setRoutingMode: (mode: 'off' | 'shadow' | 'enforce') =>
     post<{ mode: 'off' | 'shadow' | 'enforce' }>(REMOTE_API.routing, { mode }).then((r) => r.mode),
+  // -- view preferences (auto-open remote page + its width share)
+  getViewSettings: () =>
+    call<{ settings: RemoteViewSettings }>(REMOTE_API.viewSettings).then((r) => r.settings),
+  /** Flat patch: unknown keys are ignored, unusable values keep the stored one. */
+  setViewSettings: (patch: Partial<RemoteViewSettings>) =>
+    post<{ settings: RemoteViewSettings }>(REMOTE_API.viewSettings, patch).then((r) => r.settings),
   // -- deploy
   deployStatus: (alias: string) =>
     call<{ deploy: RemoteDeployState; helpers: HelperAvailability[] }>(

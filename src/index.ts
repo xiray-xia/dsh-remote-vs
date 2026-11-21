@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { RemoteStore } from './store.ts'
+import { RemoteViewSettingsStore } from './view-settings.ts'
 import type { RemoteTimeouts } from './protocol.ts'
 import { RemotePool } from './pool.ts'
 import { ForwardManager } from './forward.ts'
@@ -180,6 +181,10 @@ function workspaceMappingText(worlds: RemoteWorlds, store: RemoteStore, cwd: str
 
 export function apply(ctx: Context, config?: ResolvedConfig): void {
   const store = new RemoteStore()
+  // Client view preferences (auto-open + right-panel width): a separate file so
+  // a hand-edited preference can never cost the routing store. Lazy on read, so
+  // constructing it costs nothing at load.
+  const viewSettings = new RemoteViewSettingsStore()
   const pool = new RemotePool(store)
   const worlds = new RemoteWorlds(ctx, {
     store,
@@ -359,6 +364,7 @@ export function apply(ctx: Context, config?: ResolvedConfig): void {
     timeouts: resolveTimeoutsNow,
     changes,
     forwards,
+    viewSettings,
   })
 
   /**
