@@ -172,10 +172,7 @@ export function installAutoOpenRemote(ctx: Context): () => void {
       // screen: the right column is shared with every other sidebar page (the
       // local workbench among them), and a width meant for the remote workspace
       // must not restyle a panel showing something else.
-      if (handle !== null && ownTabActive(ctx)) {
-        resizeRightbar(handle, ratio)
-        return
-      }
+      if (handle !== null && ownTabActive(ctx) && resizeRightbar(handle, ratio)) return
       frames -= 1
       // The panel renders its handle in the frame it becomes visible, so a poll
       // corrects a restored panel immediately instead of on a timer.
@@ -303,17 +300,17 @@ export function installAutoOpenRemote(ctx: Context): () => void {
  * exactly on `target` (DSH clamps the column itself, but the target is clamped
  * here too so a narrow window cannot ask for the impossible).
  */
-function resizeRightbar(handle: HTMLElement, ratio: number): void {
+function resizeRightbar(handle: HTMLElement, ratio: number): boolean {
   const viewport = document.documentElement.clientWidth
-  if (viewport <= 0) return
+  if (viewport <= 0) return false
   const target = Math.min(
     Math.max(Math.round(viewport * clampViewWidthRatio(ratio)), RIGHTBAR_MIN_WIDTH),
     Math.max(RIGHTBAR_MIN_WIDTH, Math.round(viewport * RIGHTBAR_MAX_RATIO)),
   )
   const current = currentRightbarWidth(handle, viewport)
-  if (current === undefined) return
+  if (current === undefined) return false
   const dx = Math.round(current) - target
-  if (Math.abs(dx) < 1) return
+  if (Math.abs(dx) < 1) return true
   const origin = Math.round(handle.getBoundingClientRect().left)
   withNeutralPointerCapture(handle, () => {
     withoutTrackTransition(handle, () => {
@@ -321,6 +318,7 @@ function resizeRightbar(handle: HTMLElement, ratio: number): void {
       dispatchPointer(handle, 'pointerup', origin + dx)
     })
   })
+  return true
 }
 
 /**
@@ -339,7 +337,11 @@ function currentRightbarWidth(handle: HTMLElement, viewport: number): number | u
   const positioned = Number.parseFloat(handle.style.left)
   if (Number.isFinite(positioned) && positioned >= 0 && positioned <= viewport) {
     const width = viewport - positioned
-    if (width > 0) return width
+    // A reading below the plausible minimum means the column has not settled
+    // yet (a restored panel animating in). Treating it as the base turns the
+    // delta into a huge overshoot that lands on DSH's 70 % clamp — the panel
+    // then opens far wider than the configured share (2026-11-23 report).
+    if (width >= RIGHTBAR_MIN_WIDTH / 2) return width
   }
   const column = document.querySelector<HTMLElement>(RIGHTBAR_COLUMN)
   if (column !== null) {
