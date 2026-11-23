@@ -31,6 +31,23 @@ interface Session {
    */
   outBuffer: string
   outTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * When the last `out` frame went out.
+   *
+   * Used to tell an interactive ECHO from a burst: output that starts after a
+   * quiet period is handed over immediately (a keystroke should not wait for the
+   * coalescing window), while a continuous stream keeps coalescing.
+   */
+  lastFlushAt: number
+  /**
+   * Bytes handed to each socket that have not settled yet.
+   *
+   * `pending` alone cannot be released when a socket closes with frames still in
+   * flight: ws never calls their send callbacks, so the missing bytes kept the
+   * channel paused for the rest of the session (no echo at all until a reload).
+   * Per-socket bookkeeping lets `detach` return exactly those bytes.
+   */
+  outstanding: Map<WebSocket, number>
   /** Fires once the last socket has been gone for EMPTY_SOCKET_TTL_MS. */
   reap: ReturnType<typeof setTimeout> | undefined
   /**
@@ -66,12 +83,19 @@ const EMPTY_SOCKET_TTL_MS = 10 * 60_000
  * The retained ceiling is therefore this mark plus ssh2's window (2 MiB) plus
  * whatever is in flight — bounded, but not exactly 4 MiB.
  *
+ * The mark is RESPONSIVENESS, not just memory: everything already handed to a
+ * socket has to be parsed and painted by the browser before a later keystroke's
+ * echo can appear, so a large mark means "type during a huge dump and wait
+ * seconds". 2 MiB still absorbs a burst comfortably (a keystroke is bytes) while
+ * keeping the worst-case echo delay down; ssh2's own 2 MiB window is the part we
+ * cannot shrink from here.
+ *
  * The counter is per session, not per socket: one lagging socket pauses the
  * channel for every socket attached to that shell. That is deliberate — the
  * alternative is letting the slowest consumer grow the host process.
  */
-const OUT_HIGH_WATER = 4 * 1024 * 1024
-const OUT_LOW_WATER = 1 * 1024 * 1024
+const OUT_HIGH_WATER = 2 * 1024 * 1024
+const OUT_LOW_WATER = 512 * 1024
 
 /** Default window for coalescing output frames (0 = one frame per chunk). */
 const OUT_COALESCE_MS = 8
@@ -88,6 +112,17 @@ const OUT_COALESCE_MS = 8
  * client→host direction).
  */
 const OUT_COALESCE_CHARS = 64 * 1024
+
+/**
+ * How long the output must have been quiet for the NEXT chunk to be sent at once.
+ *
+ * A terminal echoes what the user types. Holding that echo for the coalescing
+ * window is invisible at 8 ms — but under load the window itself is a timer in
+ * an event loop shared with the agent, and the delay adds up. After a quiet
+ * period the chunk is therefore flushed synchronously; only a running stream
+ * (where `lastFlushAt` is fresh) is batched.
+ */
+const OUT_ECHO_IDLE_MS = 24
 
 /** Construction options (the terminal gate drives the registry directly). */
 export interface TerminalRegistryOptions {
@@ -159,6 +194,8 @@ export class TerminalSessionRegistry {
       paused: false,
       outBuffer: '',
       outTimer: undefined,
+      lastFlushAt: 0,
+      outstanding: new Map(),
       reap: undefined,
       outDecoder: new StringDecoder('utf8'),
       errDecoder: new StringDecoder('utf8'),
@@ -242,6 +279,9 @@ export class TerminalSessionRegistry {
       }
     }
     session.sockets.clear()
+    // The sockets are gone; their unsettled frames will never settle.
+    session.outstanding.clear()
+    session.pending = 0
     return true
   }
 
@@ -295,12 +335,22 @@ export class TerminalSessionRegistry {
       // Whatever the window is holding was produced while this socket was still
       // attached: hand it over before the socket leaves the set.
       this.flushOut(session)
+      // Release the frames this socket never settled. `ws` does not call their
+      // send callbacks after a close, and the leaked `pending` bytes used to keep
+      // the channel paused for the rest of the session.
+      const unsettled = session.outstanding.get(ws)
+      if (unsettled !== undefined) {
+        session.outstanding.delete(ws)
+        session.pending = Math.max(0, session.pending - unsettled)
+        if (session.pending <= OUT_LOW_WATER) this.setPaused(session, false)
+      }
       session.sockets.delete(ws)
       if (session.sockets.size > 0) return
       // Nobody is watching any more. Release the brake first — a paused channel
       // would otherwise stay paused with no socket left to resume it — then
       // start the clock that ends the session (and with it the remote shell).
       session.pending = 0
+      session.outstanding.clear()
       this.setPaused(session, false)
       this.armReap(session)
     }
@@ -342,13 +392,15 @@ export class TerminalSessionRegistry {
    * Queue one output chunk and schedule the coalesced frame.
    *
    * `coalesceMs === 0` broadcasts immediately (the checks rely on that
-   * synchrony), which is also the behaviour when a window would send only this
-   * one chunk anyway.
+   * synchrony). A chunk that arrives after an idle gap is also sent at once —
+   * that is the interactive echo path (a keystroke must not wait for the
+   * window) — while a stream that keeps producing coalesces.
    */
   private queueOut(session: Session, text: string): void {
     if (text === '') return
+    const idle = Date.now() - session.lastFlushAt >= OUT_ECHO_IDLE_MS
     session.outBuffer += text
-    if (session.outBuffer.length >= OUT_COALESCE_CHARS || this.coalesceMs <= 0) {
+    if (session.outBuffer.length >= OUT_COALESCE_CHARS || this.coalesceMs <= 0 || idle) {
       this.flushOut(session)
       return
     }
@@ -370,6 +422,7 @@ export class TerminalSessionRegistry {
     if (session.outBuffer === '') return
     const text = session.outBuffer
     session.outBuffer = ''
+    session.lastFlushAt = Date.now()
     this.broadcast(session, { t: 'out', d: text })
   }
 
@@ -405,10 +458,18 @@ export class TerminalSessionRegistry {
       const done = (): void => {
         if (settled) return
         settled = true
+        // A socket that detached already had its outstanding bytes released
+        // (its late callback must not decrement them a second time).
+        const left = session.outstanding.get(socket)
+        if (left === undefined) return
+        const remaining = Math.max(0, left - size)
+        if (remaining === 0) session.outstanding.delete(socket)
+        else session.outstanding.set(socket, remaining)
         session.pending = Math.max(0, session.pending - size)
         if (session.pending <= OUT_LOW_WATER) this.setPaused(session, false)
       }
       session.pending += size
+      session.outstanding.set(socket, (session.outstanding.get(socket) ?? 0) + size)
       try {
         socket.send(text, done)
       } catch {

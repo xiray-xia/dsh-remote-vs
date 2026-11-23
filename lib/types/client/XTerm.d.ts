@@ -20,6 +20,15 @@ export declare function XTerm(props: {
     initialInput?: string;
     /** Translator for the right-click menu (copy / paste / select all). */
     t: (key: string) => string;
+    /** Tab identity, used by the snippet panel to target THIS terminal. */
+    tabId: string;
+    /**
+     * Ctrl/Cmd+B inside the terminal: open the "add snippet" form.
+     *
+     * Absent → the keystroke stays the shell's (readline's backward-char), which
+     * is what a host that did not wire the panel should keep.
+     */
+    onQuickAddSnippet?: () => void;
     /**
      * Remote home directory of this tab's host, when known.
      *

@@ -3698,6 +3698,237 @@ body[data-ds-dark-theme] .rvs-find {
   color: var(--rvs-code-fg);
 }
 
+/* --------------------------------------------------------- terminal snippets
+ *
+ * The "常用指令" button lives in the terminal header; its popover is portaled to
+ * <body>, so it CANNOT use the `.rvs-root`-scoped `--rvs-*` tokens (they resolve
+ * to nothing there). It follows the plugin's popup convention instead: an opaque
+ * `Canvas` base plus the skin's overlay token, and the app-wide `--dsw-alias-*`
+ * colours (with literal fallbacks) for text, hover and accents.
+ */
+.rvs-snips-btn {
+  flex: none;
+  width: auto;
+  min-width: 0;
+  gap: 3px;
+  padding: 0 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-snips-panel {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  max-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  border-radius: 8px;
+  background-color: Canvas;
+  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
+  color: var(--dsw-alias-label-primary, CanvasText);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .4);
+  font-size: 12px;
+}
+
+.rvs-snips-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+}
+
+.rvs-snips-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.rvs-snips-spacer { flex: 1; }
+
+.rvs-snips-add {
+  width: 22px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rvs-snips-add:hover {
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: #fff;
+}
+
+.rvs-snips-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  overflow: auto;
+}
+
+.rvs-snips-empty {
+  padding: 10px 8px;
+  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rvs-snips-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 3px;
+  border-radius: 5px;
+}
+
+.rvs-snips-row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14)); }
+
+/* Drop indicator: a line above the row the pointer is over. */
+.rvs-snips-row.drop { box-shadow: inset 0 2px 0 var(--dsw-alias-brand-primary, #4d6bfe); }
+
+.rvs-snips-grip {
+  flex: none;
+  padding: 0 2px;
+  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  font-size: 11px;
+  cursor: grab;
+  user-select: none;
+}
+
+.rvs-snips-grip:active { cursor: grabbing; }
+
+.rvs-snips-insert {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-snips-name {
+  flex: 0 1 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary, CanvasText);
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.rvs-snips-arrow {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  font-size: 10px;
+}
+
+.rvs-snips-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, #b9b9b9);
+  font-family: var(--rvs-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.rvs-snips-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rvs-snips-icon:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  color: var(--dsw-alias-label-primary, CanvasText);
+}
+
+.rvs-snips-icon.danger:hover { color: var(--dsw-alias-state-error-primary, #e05555); }
+
+.rvs-snips-foot {
+  flex: none;
+  padding: 4px 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  font-size: 10.5px;
+}
+
+/* The add/edit form reuses the shared modal chrome; only its fields and error
+   line are local, and they carry their own colours because the modal is
+   portaled outside `.rvs-root` as well. */
+.rvs-snips-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  color: var(--dsw-alias-label-secondary, CanvasText);
+  font-size: 11.5px;
+}
+
+.rvs-snips-field input,
+.rvs-snips-field textarea {
+  flex: none;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.rvs-snips-field input:focus,
+.rvs-snips-field textarea:focus {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+
+.rvs-snips-command {
+  font-family: var(--rvs-mono, ui-monospace, monospace) !important;
+  resize: vertical;
+}
+
+.rvs-snips-error {
+  margin: 2px 0 0;
+  color: var(--dsw-alias-state-error-primary, #e05555);
+  font-size: 11.5px;
+}
+
 /* `.rvs-toast.error` is styled with the overlay form further up, so the popup
    opacity convention (an opaque Canvas base plus a token layer) still governs
    it. A flat `background: #3a1f22` shorthand sat here and overrode that chain —

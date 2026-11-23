@@ -11,6 +11,8 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Re
 import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
+import { TerminalSnippets } from './TerminalSnippets.tsx'
+import { pasteIntoTerminal } from './terminal-input.ts'
 import { cdCommand } from './shell.ts'
 import { jumpToTerminalPath, type TerminalRequest } from './store.tsx'
 import { optionStyle } from './ui.tsx'
@@ -20,6 +22,7 @@ import {
   IconPlus,
   IconTerminal,
   confirmDialog,
+  toast,
 } from './vsc/kit.tsx'
 
 const ALIAS_KEY = 'dsh-remote-vs.term.alias'
@@ -221,6 +224,14 @@ export function TerminalView(props: {
     connected: true,
   })))
   const [activeId, setActiveId] = useState<string | undefined>(() => tabs[0]?.id)
+  /**
+   * Bumped by Ctrl+B inside a terminal to open the "add snippet" form.
+   *
+   * A counter rather than a callback prop: the shortcut lives in `XTerm` while
+   * the form lives in the header, and a counter is the one value that both sides
+   * can share without lifting xterm state into React.
+   */
+  const [snippetAddRequest, setSnippetAddRequest] = useState(0)
 
   const effectiveAlias = (alias !== '' && props.hosts.some(host => host.alias === alias))
     ? alias
@@ -404,6 +415,17 @@ export function TerminalView(props: {
     <div className="rvs-pane grow">
       <div className="rvs-header">
         <span className="rvs-title">{t('tab.terminal')}</span>
+        {/* The "常用指令" library: a personal list of name+command pairs that
+            paste into the active terminal without pressing Enter. */}
+        <TerminalSnippets
+          t={t}
+          addRequest={snippetAddRequest}
+          onInsert={(command) => {
+            if (pasteIntoTerminal(active?.id, command)) return true
+            toast(t('term.snippetNoTerminal'), true)
+            return false
+          }}
+        />
         <select
           className="rvs-select"
           value={effectiveAlias}
@@ -493,6 +515,8 @@ export function TerminalView(props: {
                 })}
                 visible={props.visible && tab.id === active?.id}
                 t={t}
+                tabId={tab.id}
+                onQuickAddSnippet={() => setSnippetAddRequest(value => value + 1)}
                 {...(homeFor(tab.alias) === undefined ? {} : { home: homeFor(tab.alias) })}
                 onPathClick={(token, context) => {
                   // Ctrl+Click in the terminal: validated against the host, then

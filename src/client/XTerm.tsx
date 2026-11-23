@@ -18,6 +18,8 @@ import {
 } from './vsc/terminal-clipboard.ts'
 import { terminalTheme } from './vsc/terminal-theme.ts'
 import { findTerminalPathTokens } from './vsc/terminal-links.ts'
+import { registerTerminalPaste } from './terminal-input.ts'
+import { createTerminalWriter } from './vsc/terminal-writer.ts'
 
 /**
  * Send one frame; `false` means it was NOT handed to the socket.
@@ -85,6 +87,15 @@ export function XTerm(props: {
   initialInput?: string
   /** Translator for the right-click menu (copy / paste / select all). */
   t: (key: string) => string
+  /** Tab identity, used by the snippet panel to target THIS terminal. */
+  tabId: string
+  /**
+   * Ctrl/Cmd+B inside the terminal: open the "add snippet" form.
+   *
+   * Absent → the keystroke stays the shell's (readline's backward-char), which
+   * is what a host that did not wire the panel should keep.
+   */
+  onQuickAddSnippet?: () => void
   /**
    * Remote home directory of this tab's host, when known.
    *
@@ -210,6 +221,22 @@ export function XTerm(props: {
       },
     }
     const linkRegistration = term.registerLinkProvider(linkProvider)
+    /**
+     * The snippet panel's handle on THIS terminal: insert a command at the prompt
+     * without pressing Enter (see `terminal-input.ts`).
+     *
+     * `term.paste` is the honest primitive — it goes through xterm's own bracketed
+     * paste handling and the normal input path, so the shell sees typed text and
+     * still decides when to run it.
+     */
+    const unregisterPaste = registerTerminalPaste(propsRef.current.tabId, (text: string) => {
+      try {
+        term.paste(text)
+        term.focus()
+      } catch {
+        // Terminal disposed mid-call.
+      }
+    })
 
     const ws = new WebSocket(propsRef.current.wsUrl)
     let opened = false
@@ -300,38 +327,18 @@ export function XTerm(props: {
     term.onData(sendInput)
 
     /**
-     * Output writer: at most ONE `term.write` in flight, and everything that
-     * arrives meanwhile is concatenated into the next one.
+     * Output writer (see `vsc/terminal-writer.ts` for the full reasoning).
      *
-     * Why: a busy command (`dmesg`, `cat` of a log) delivers a burst of frames.
-     * xterm already time-slices its own parser, so the win is not CPU per byte
-     * but the per-call bookkeeping and the queue churn — and, more importantly,
-     * ordering: the exit/error notices below go through the same queue, so they
-     * can never overtake output that has not been parsed yet. An idle terminal
-     * still writes the first frame immediately (no added typing/echo latency);
-     * only BackPRESSURE-shaped bursts coalesce.
+     * Frames are appended to ONE ordered buffer and handed to xterm on a timer,
+     * instead of one `term.write` per frame — and, importantly, NOT chained on
+     * the xterm write callback. That callback waits for parse+render, which a
+     * throttled/occluded window can delay indefinitely; the echo of what the user
+     * types then sat in this queue with no echo on screen until the callback
+     * finally fired. Nothing here waits for a write to finish.
      */
-    let writeQueue: string[] = []
-    let writeBusy = false
-    const flushWrites = (): void => {
-      if (writeBusy || writeQueue.length === 0) return
-      const chunk = writeQueue.length === 1 ? writeQueue[0] : writeQueue.join('')
-      writeQueue = []
-      writeBusy = true
-      try {
-        term.write(chunk, () => {
-          writeBusy = false
-          flushWrites()
-        })
-      } catch {
-        // Terminal disposed mid-write.
-        writeBusy = false
-      }
-    }
+    const writer = createTerminalWriter({ write: (text) => { term.write(text) } })
     const writeOut = (text: string): void => {
-      if (text === '') return
-      writeQueue.push(text)
-      flushWrites()
+      writer.push(text)
     }
     ws.addEventListener('open', () => {
       opened = true
@@ -455,7 +462,29 @@ export function XTerm(props: {
         alt: e.altKey,
         meta: e.metaKey,
       })
-      if (chord === undefined) return true
+      if (chord === undefined) {
+        /**
+         * Ctrl/Cmd+B opens "add snippet".
+         *
+         * Note the trade-off: in a plain readline, ^B is backward-char. The
+         * shortcut is a user requirement, and it is only claimed while the panel
+         * is wired (`onQuickAddSnippet` present) — the terminal's own Ctrl+F etc.
+         * stay untouched because they go through xterm's keymap, not here.
+         */
+        if (
+          e.type === 'keydown'
+          && (e.ctrlKey || e.metaKey)
+          && !e.shiftKey
+          && !e.altKey
+          && (e.key === 'b' || e.key === 'B')
+          && propsRef.current.onQuickAddSnippet !== undefined
+        ) {
+          e.preventDefault()
+          propsRef.current.onQuickAddSnippet()
+          return false
+        }
+        return true
+      }
       if (chord === 'copy-interrupt') {
         // Ctrl+C: with a selection the convention is COPY (never SIGINT); without
         // one the key falls through so the remote shell interrupts as usual.
@@ -505,6 +534,7 @@ export function XTerm(props: {
     return () => {
       liveRef.current = undefined
       unflip()
+      unregisterPaste()
       linkRegistration.dispose()
       osc7.dispose()
       window.clearTimeout(timer)

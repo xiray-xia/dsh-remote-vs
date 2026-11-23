@@ -62,8 +62,9 @@ export declare class TerminalSessionRegistry {
      * Queue one output chunk and schedule the coalesced frame.
      *
      * `coalesceMs === 0` broadcasts immediately (the checks rely on that
-     * synchrony), which is also the behaviour when a window would send only this
-     * one chunk anyway.
+     * synchrony). A chunk that arrives after an idle gap is also sent at once —
+     * that is the interactive echo path (a keystroke must not wait for the
+     * window) — while a stream that keeps producing coalesces.
      */
     private queueOut;
     /** Send the buffered output as ONE `out` frame (no-op when empty). */
