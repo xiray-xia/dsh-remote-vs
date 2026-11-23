@@ -20,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import './vsc/vsc.css'
 import { installAutoOpenRemote } from './auto-open-remote.ts'
 import { RemoteDirectoryFlow } from './DirectoryFlow.tsx'
+import { noteEditorSeatAvailable, noteEditorSeatGone } from './editor-capability.ts'
 import { FloatingEditorWindow } from './FloatingEditorWindow.tsx'
 import { installFloatTabTrigger } from './float-tab-trigger.ts'
 import { registerNativeExplorer } from './NativeExplorer.tsx'
@@ -114,6 +115,9 @@ export function apply(ctx: Context): void {
       } catch {
         return false
       }
+      // A tab exists: this page now has a seat that can render our editor, so
+      // file clicks may be intercepted (see `editor-capability.ts`).
+      noteEditorSeatAvailable()
       done = true
       stopTimer()
       return true
@@ -125,6 +129,8 @@ export function apply(ctx: Context): void {
       // Undefined when the registry is unavailable (older host): stay quiet,
       // directoryFlow + settings work standalone.
       disposeNative = registerNativeExplorer(ctx, nativeT) ?? undefined
+      // A registered native page is a seat too; `undefined` (no registry) is not.
+      if (disposeNative !== undefined) noteEditorSeatAvailable()
     }
     if (!goBetter()) {
       // Early-settle signal: once every profile entry has mounted, a still
@@ -162,6 +168,7 @@ export function apply(ctx: Context): void {
       } catch {
         // Ignore.
       }
+      if (disposeBetter !== undefined || disposeNative !== undefined) noteEditorSeatGone()
     }
   }, 'dsh-remote-vs: explorer surface (better tab preferred, native fallback)')
   // Phase 4: shadow the stock directory picker in both directory-flow holes
@@ -288,6 +295,10 @@ export function apply(ctx: Context): void {
         order: 30,
         label: () => viewT('view.editor'),
       }, () => <RemoteEditorView ctx={ctx} />))
+      // The full-width seat exists (even while another conversation tab is
+      // selected): together with the docked pane it makes this page able to show
+      // a remote file, which is what the click interceptor asks.
+      noteEditorSeatAvailable()
     } catch (error) {
       console.warn('[dsh-remote-vs] conversation.view registration failed:', error)
       return () => {}
@@ -295,6 +306,7 @@ export function apply(ctx: Context): void {
     return () => {
       // The slot went away: if the editor was living in it, dock it back rather
       // than leaving the store pointing at a surface that no longer exists.
+      noteEditorSeatGone()
       setEditorSurface('sidebar')
       try {
         dispose?.()

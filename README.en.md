@@ -266,8 +266,9 @@ when the seat changes.
   (`#1e1e1e` / `#ffffff`) with editor-panel tokens, a 30px tab strip (dirty dot, middle-click close, diff/image
   glyphs), an info bar with reload / save / word-wrap / font A−A+ / float / seat switch, and — in the full-width
   seat — a **clickable breadcrumb** (sibling-file picker over the remote listing route) plus a **status bar**
-  (language, line:column, selected characters, indent, wrap, font size, save state, UTF-8). Word wrap and font
-  size (Ctrl+wheel) are one shared preference persisted in localStorage, so every seat agrees.
+  (language, line:column, selected characters, indent, wrap, font size, save state, UTF-8). Word wrap is one
+  shared preference persisted in localStorage (all seats); font size is shared by the docked and full-width
+  seats, while the floating window keeps its own per-window `Ctrl+wheel` zoom.
 - **Image preview**: png/jpg/jpeg/gif/webp/bmp/ico/avif render in the tab with a click-to-toggle
   fit/actual size and the file size plus pixel dimensions; a capped read says "image too large" instead of
   drawing a broken thumbnail. SVG keeps opening as TEXT (editable) — it is markup, not a raster image.

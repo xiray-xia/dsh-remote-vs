@@ -153,37 +153,3 @@ export function pruneEditorViewStates(liveIds: ReadonlySet<string>): void {
     if (!liveIds.has(id)) viewStates.delete(id)
   }
 }
-
-// ------------------------------------------- mounted editor surfaces (capability)
-
-/**
- * How many `EditorPane` mounts currently exist.
- *
- * The file-click interceptor asks whether OUR editor can render the file at all
- * (see `isEditorTakeoverActive`). "The plugin is installed" is not the same
- * answer: a host without a better-sidebar tab and without the native
- * right-sidebar registry never mounts `RemoteRoot`, and a per-session native
- * page only exists while it is open — in both cases a tab opened by the
- * interceptor would have nowhere to paint, while the host's native preview could
- * have shown the file. Counting real mounts answers the question the gate
- * actually needs, instead of hardcoding "always on".
- *
- * Module scope (not React state): the interceptor runs inside a service method
- * call, synchronously, outside any render.
- */
-let mountedSurfaces = 0
-
-/** One `EditorPane` mounted (called from its mount effect). */
-export function noteEditorSurfaceMounted(): void {
-  mountedSurfaces += 1
-}
-
-/** One `EditorPane` unmounted; the count never goes negative. */
-export function noteEditorSurfaceUnmounted(): void {
-  mountedSurfaces = Math.max(0, mountedSurfaces - 1)
-}
-
-/** Whether ANY editor surface is mounted right now (i.e. a click can be shown). */
-export function editorSurfacesMounted(): number {
-  return mountedSurfaces
-}

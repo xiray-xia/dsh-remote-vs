@@ -27,7 +27,6 @@ import { ConnectionStatusChip } from './ConnectionStatus.tsx'
 import { isConnectionFailure, useConnectionStatus } from './connection.ts'
 import { sameLocalDir } from './composer.ts'
 import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
-import { noteEditorSurfaceMounted, noteEditorSurfaceUnmounted } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
@@ -199,6 +198,19 @@ function dropOversized(prev: Record<string, string>, keep: string | undefined): 
   return next
 }
 
+/**
+ * Cache key of one image PREVIEW: the path PLUS the tab's reload nonce.
+ *
+ * The base64 payload is a snapshot of one read. Keying by path alone kept
+ * painting the old bytes after a reload (and after a reconnect's background
+ * re-read of an inactive tab, which has no cache-clearing effect running); the
+ * nonce changes with every successful re-read, so a stale entry is simply never
+ * looked up again and ages out of the bounded cache.
+ */
+function imageCacheKey(tab: { fullPath: string; reloadNonce?: number }): string {
+  return `${tab.fullPath}@${tab.reloadNonce ?? 0}`
+}
+
 /** Which chrome variant this mount renders (see the file header). */
 type EditorVariant = 'sidebar' | 'center' | 'float'
 
@@ -342,18 +354,6 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const connection = useConnectionStatus()
   const offline = connection?.state === 'error'
 
-  /**
-   * Advertise this mount to the file-click gate.
-   *
-   * `isEditorTakeoverActive` answers "can a click be SHOWN right now", so the
-   * count of live mounts is the honest signal: a host with no sidebar surface
-   * mounted must fall back to the native preview instead of swallowing the click.
-   */
-  useEffect(() => {
-    noteEditorSurfaceMounted()
-    return () => noteEditorSurfaceUnmounted()
-  }, [])
-
   // Image data URL cache, keyed by path (remote reads are not free). Bounded —
   // see `rememberRecent` / `dropOversized`.
   const [images, setImages] = useState<Record<string, string>>({})
@@ -400,20 +400,23 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     // partial base64 never becomes a cached (undecodable) data URL. The
     // "too large" notice is rendered from `truncated` instead.
     if (tab.truncated) return
-    if (images[tab.fullPath] !== undefined || imageError[tab.fullPath] !== undefined) return
+    // Keyed by path + reload nonce, so a re-read shows the new bytes and a
+    // truncated read never caches a partial payload (see `imageCacheKey`).
+    const key = imageCacheKey(tab)
+    if (images[key] !== undefined || imageError[key] !== undefined) return
     let cancelled = false
     void (async () => {
       try {
         const read = await api.fileOp.read(alias, tab.fullPath)
         if (cancelled) return
         if (read.base64 === undefined) {
-          setImageError(prev => rememberRecent(prev, tab.fullPath, t('editor.imageFailed')))
+          setImageError(prev => rememberRecent(prev, key, t('editor.imageFailed')))
           return
         }
-        setImages(prev => rememberRecent(prev, tab.fullPath, `data:${mimeFor(tab.fullPath)};base64,${read.base64}`))
+        setImages(prev => rememberRecent(prev, key, `data:${mimeFor(tab.fullPath)};base64,${read.base64}`))
       } catch (error) {
         if (!cancelled) {
-          setImageError(prev => rememberRecent(prev, tab.fullPath, error instanceof Error ? error.message : String(error)))
+          setImageError(prev => rememberRecent(prev, key, error instanceof Error ? error.message : String(error)))
         }
       }
     })()
@@ -421,44 +424,13 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   }, [activeTab, alias, images, imageError, t, props.visible])
 
   /**
-   * A re-read of one image drops its cached decode.
-   *
-   * `reloadTab` bumps `reloadNonce` after loading new bytes, but the decoded
-   * `data:` URL from the PREVIOUS version would otherwise keep painting (the
-   * cache is keyed by path, not by version). Tracking the nonce per path means a
-   * tab switch does not throw the cache away, while a real reload does.
-   */
-  const imageNonces = useRef<Record<string, number>>({})
-  useEffect(() => {
-    const tab = activeTab
-    if (tab === undefined) return
-    const path = tab.fullPath
-    const nonce = tab.reloadNonce ?? 0
-    const previous = imageNonces.current[path]
-    imageNonces.current[path] = nonce
-    if (previous === undefined || nonce === previous) return
-    setImages((prev) => {
-      if (prev[path] === undefined) return prev
-      const next = { ...prev }
-      delete next[path]
-      return next
-    })
-    setImageError((prev) => {
-      if (prev[path] === undefined) return prev
-      const next = { ...prev }
-      delete next[path]
-      return next
-    })
-  }, [activeTab?.fullPath, activeTab?.reloadNonce])
-
-  /**
    * An oversized image is shown but not cached, so it may only live as long as
    * its tab is the one on screen: leaving that tab hands its megabytes back
    * instead of parking them until the page is reloaded.
    */
   useEffect(() => {
-    setImages(prev => dropOversized(prev, activeTab?.fullPath))
-  }, [activeTab?.fullPath])
+    setImages(prev => dropOversized(prev, activeTab === undefined ? undefined : imageCacheKey(activeTab)))
+  }, [activeTab?.fullPath, activeTab?.reloadNonce])
 
   const closeWithGuard = async (tab: EditorTab): Promise<void> => {
     if (tab.dirty) {
@@ -821,8 +793,13 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const language = isDiff
     ? 'Diff'
     : activeTab?.image === true ? 'Image' : langLabel(langFromPath(activeTab?.rel ?? ''))
-  const imageSrc = activeTab !== undefined && activeTab.image ? images[activeTab.fullPath] : undefined
-  const imageFailure = activeTab !== undefined && activeTab.image ? imageError[activeTab.fullPath] : undefined
+  const activeImageKey = activeTab === undefined ? undefined : imageCacheKey(activeTab)
+  const imageSrc = activeTab !== undefined && activeTab.image && activeImageKey !== undefined
+    ? images[activeImageKey]
+    : undefined
+  const imageFailure = activeTab !== undefined && activeTab.image && activeImageKey !== undefined
+    ? imageError[activeImageKey]
+    : undefined
 
   return (
     <div className="rvs-pane grow rvs-edge" style={fontStyle}>
