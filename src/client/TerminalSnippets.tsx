@@ -33,6 +33,11 @@ export interface TerminalSnippetsProps {
   onInsert: (command: string) => boolean
   /** Bumped by the Ctrl+B shortcut; each change opens the ADD dialog. */
   addRequest: number
+  /**
+   * Draft the Ctrl+B form starts with (the terminal selection, else the line
+   * reconstructed from keystrokes). Empty for the panel's own "+" button.
+   */
+  addContent: string
 }
 
 /** Where the popover is anchored (viewport coordinates of the button). */
@@ -43,7 +48,7 @@ interface Anchor {
 }
 
 /** What the form dialog is doing. */
-type FormState = { mode: 'add' } | { mode: 'edit'; snippet: TerminalSnippet }
+type FormState = { mode: 'add'; content: string } | { mode: 'edit'; snippet: TerminalSnippet }
 
 /** One row, identified for drag & drop. */
 interface DragState {
@@ -82,13 +87,14 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
     setDropIndex(undefined)
   }, [])
 
-  // Ctrl+B from the terminal: open the ADD form (and the panel behind it).
+  // Ctrl+B from the terminal: open the ADD form (and the panel behind it) with
+  // the draft the terminal handed over — selection first, else the typed line.
   useEffect(() => {
     if (props.addRequest === handledAdd.current) return
     handledAdd.current = props.addRequest
     openPanel()
-    setForm({ mode: 'add' })
-  }, [props.addRequest, openPanel])
+    setForm({ mode: 'add', content: props.addContent })
+  }, [props.addRequest, props.addContent, openPanel])
 
   // Close on outside click / Esc / window resize (a fixed popover would be left
   // pointing at nothing). Capture phase so xterm's own mousedown cannot refocus
@@ -162,7 +168,7 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
             className="rvs-snips-add"
             title={t('term.snippetAdd')}
             aria-label={t('term.snippetAdd')}
-            onClick={() => setForm({ mode: 'add' })}
+            onClick={() => setForm({ mode: 'add', content: '' })}
           >+</button>
         </div>
         <div className="rvs-snips-list">
@@ -254,7 +260,7 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
         <SnippetForm
           t={t}
           mode={form.mode}
-          {...(form.mode === 'edit' ? { snippet: form.snippet } : {})}
+          {...(form.mode === 'edit' ? { snippet: form.snippet } : { initialCommand: form.content })}
           onCancel={() => setForm(undefined)}
           onSubmit={(input) => {
             if (form.mode === 'add') {
@@ -276,12 +282,14 @@ function SnippetForm(props: {
   t: (key: string) => string
   mode: 'add' | 'edit'
   snippet?: TerminalSnippet
+  /** Draft for a NEW snippet (Ctrl+B hands over the selection / typed line). */
+  initialCommand?: string
   onCancel: () => void
   onSubmit: (input: { name: string; command: string }) => void
 }): ReactNode {
   const t = props.t
   const [name, setName] = useState(props.snippet?.name ?? '')
-  const [command, setCommand] = useState(props.snippet?.command ?? '')
+  const [command, setCommand] = useState(props.snippet?.command ?? props.initialCommand ?? '')
   const [error, setError] = useState<string | undefined>(undefined)
   const nameRef = useRef<HTMLInputElement>(null)
   const openerRef = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null)

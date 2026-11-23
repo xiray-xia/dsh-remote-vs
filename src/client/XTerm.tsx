@@ -20,6 +20,7 @@ import { terminalTheme } from './vsc/terminal-theme.ts'
 import { findTerminalPathTokens } from './vsc/terminal-links.ts'
 import { registerTerminalPaste } from './terminal-input.ts'
 import { createTerminalWriter } from './vsc/terminal-writer.ts'
+import { applyTerminalInput } from './vsc/terminal-line.ts'
 
 /**
  * Send one frame; `false` means it was NOT handed to the socket.
@@ -92,10 +93,14 @@ export function XTerm(props: {
   /**
    * Ctrl/Cmd+B inside the terminal: open the "add snippet" form.
    *
+   * Receives a best-effort draft so the form can pre-fill its command: the
+   * current terminal SELECTION when there is one (the user picked exactly what
+   * they want), else the line reconstructed from this session's keystrokes.
+   *
    * Absent → the keystroke stays the shell's (readline's backward-char), which
    * is what a host that did not wire the panel should keep.
    */
-  onQuickAddSnippet?: () => void
+  onQuickAddSnippet?: (draft: { selection?: string; line?: string }) => void
   /**
    * Remote home directory of this tab's host, when known.
    *
@@ -307,9 +312,20 @@ export function XTerm(props: {
      * characters — far under that cap either way, and far above a keystroke.
      */
     const INPUT_CHUNK_CHARS = 64 * 1024
+    /**
+     * Best-effort reconstruction of the line the user is typing, for Ctrl+B.
+     *
+     * Fed from the SAME `onData` stream that goes to the PTY (see
+     * `vsc/terminal-line.ts`): printable text appends, backspace removes,
+     * Enter/Ctrl+C/Ctrl+U clear, escape sequences are ignored. Used only to
+     * pre-fill the snippet form, so an inexact line (history recall, cursor
+     * movement) costs nothing.
+     */
+    let inputLine = ''
     const sendInput = (rawData: string): void => {
       const data = stripBracketedPasteMarkers(rawData)
       if (data === '') return
+      inputLine = applyTerminalInput(inputLine, data)
       if (data.length <= INPUT_CHUNK_CHARS) {
         send(ws, { t: 'in', d: data })
         return
@@ -480,7 +496,11 @@ export function XTerm(props: {
           && propsRef.current.onQuickAddSnippet !== undefined
         ) {
           e.preventDefault()
-          propsRef.current.onQuickAddSnippet()
+          const selection = term.getSelection()
+          propsRef.current.onQuickAddSnippet({
+            ...(selection !== '' ? { selection } : {}),
+            ...(inputLine !== '' ? { line: inputLine } : {}),
+          })
           return false
         }
         return true

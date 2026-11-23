@@ -225,13 +225,14 @@ export function TerminalView(props: {
   })))
   const [activeId, setActiveId] = useState<string | undefined>(() => tabs[0]?.id)
   /**
-   * Bumped by Ctrl+B inside a terminal to open the "add snippet" form.
+   * The "quick add snippet" request from Ctrl+B: a counter (so the same draft
+   * repeated still opens the form) plus the draft to pre-fill.
    *
-   * A counter rather than a callback prop: the shortcut lives in `XTerm` while
-   * the form lives in the header, and a counter is the one value that both sides
-   * can share without lifting xterm state into React.
+   * A value rather than a callback prop: the shortcut lives in `XTerm` while the
+   * form lives in the header, and this is the one value both sides can share
+   * without lifting xterm state into React.
    */
-  const [snippetAddRequest, setSnippetAddRequest] = useState(0)
+  const [snippetAdd, setSnippetAdd] = useState<{ id: number; content: string } | undefined>(undefined)
 
   const effectiveAlias = (alias !== '' && props.hosts.some(host => host.alias === alias))
     ? alias
@@ -419,7 +420,8 @@ export function TerminalView(props: {
             paste into the active terminal without pressing Enter. */}
         <TerminalSnippets
           t={t}
-          addRequest={snippetAddRequest}
+          addRequest={snippetAdd?.id ?? 0}
+          addContent={snippetAdd?.content ?? ''}
           onInsert={(command) => {
             if (pasteIntoTerminal(active?.id, command)) return true
             toast(t('term.snippetNoTerminal'), true)
@@ -516,7 +518,12 @@ export function TerminalView(props: {
                 visible={props.visible && tab.id === active?.id}
                 t={t}
                 tabId={tab.id}
-                onQuickAddSnippet={() => setSnippetAddRequest(value => value + 1)}
+                onQuickAddSnippet={(draft) => {
+                  // Ctrl+B: pre-fill the form with what the user selected, else
+                  // with the line reconstructed from this session's keystrokes.
+                  const content = (draft.selection ?? draft.line ?? '').trim()
+                  setSnippetAdd(previous => ({ id: (previous?.id ?? 0) + 1, content }))
+                }}
                 {...(homeFor(tab.alias) === undefined ? {} : { home: homeFor(tab.alias) })}
                 onPathClick={(token, context) => {
                   // Ctrl+Click in the terminal: validated against the host, then

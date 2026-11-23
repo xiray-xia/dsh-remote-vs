@@ -45,6 +45,24 @@ export interface SftpOptions {
 export declare class RemotePool {
     private readonly store;
     private readonly conns;
+    /**
+     * Dedicated connections for PTY shells (one per alias).
+     *
+     * Why a SECOND connection instead of a channel on the shared one: ssh2
+     * multiplexes channels over ONE TCP connection, and SSH has no per-channel
+     * priority or flow control. A large SFTP transfer / git output on that
+     * connection therefore delays everything else on it — including the echo of a
+     * keystroke — which is exactly the "typing stutters when something else is
+     * moving data" report. A terminal gets its own connection, so its bytes never
+     * queue behind browse/exec traffic, and shells stop consuming the shared
+     * connection's channel budget as well.
+     *
+     * Cost: one extra SSH handshake per alias the first time a terminal opens,
+     * plus one held TCP connection per host with a terminal. `shell()` falls back
+     * to the shared connection if this one cannot be established at all, so a host
+     * that refuses extra connections still gets a working terminal.
+     */
+    private readonly shellConns;
     /** TOFU fingerprints observed this process (alias -> sha256). */
     private readonly hostKeys;
     /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
@@ -285,8 +303,15 @@ export declare class RemotePool {
     private supportsSetsid;
     /** Hold the connection against idle eviction (balanced by release). */
     private hold;
+    private holdIn;
     private release;
+    private releaseIn;
     private acquire;
+    /** `acquire` for the dedicated PTY connection map. */
+    private acquireShell;
+    private acquireIn;
+    /** Evict ONE alias from ONE map (host removal drops both maps explicitly). */
+    private evictFrom;
     /**
      * The ssh2 client factory.
      *

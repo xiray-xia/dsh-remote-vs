@@ -25,10 +25,17 @@ export declare function XTerm(props: {
     /**
      * Ctrl/Cmd+B inside the terminal: open the "add snippet" form.
      *
+     * Receives a best-effort draft so the form can pre-fill its command: the
+     * current terminal SELECTION when there is one (the user picked exactly what
+     * they want), else the line reconstructed from this session's keystrokes.
+     *
      * Absent → the keystroke stays the shell's (readline's backward-char), which
      * is what a host that did not wire the panel should keep.
      */
-    onQuickAddSnippet?: () => void;
+    onQuickAddSnippet?: (draft: {
+        selection?: string;
+        line?: string;
+    }) => void;
     /**
      * Remote home directory of this tab's host, when known.
      *

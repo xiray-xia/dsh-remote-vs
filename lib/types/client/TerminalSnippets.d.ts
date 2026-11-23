@@ -20,6 +20,11 @@ export interface TerminalSnippetsProps {
     onInsert: (command: string) => boolean;
     /** Bumped by the Ctrl+B shortcut; each change opens the ADD dialog. */
     addRequest: number;
+    /**
+     * Draft the Ctrl+B form starts with (the terminal selection, else the line
+     * reconstructed from keystrokes). Empty for the panel's own "+" button.
+     */
+    addContent: string;
 }
 /**
  * The panel.
