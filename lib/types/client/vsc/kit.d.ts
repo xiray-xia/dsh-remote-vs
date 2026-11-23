@@ -83,6 +83,8 @@ export declare function IconCode(props: IconProps): ReactNode;
 export declare function IconCheck(props: IconProps): ReactNode;
 export declare function IconUndo(props: IconProps): ReactNode;
 export declare function IconDiff(props: IconProps): ReactNode;
+/** Float / pop-out: a small frame with an arrow leaving its top-right corner. */
+export declare function IconFloat(props: IconProps): ReactNode;
 export declare function IconImage(props: IconProps): ReactNode;
 export declare function IconSync(props: IconProps): ReactNode;
 export declare function IconSave(props: IconProps): ReactNode;

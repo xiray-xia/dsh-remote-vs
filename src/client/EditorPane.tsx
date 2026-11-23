@@ -11,8 +11,9 @@
  *
  * Three variants share this component, chosen from the store's effective
  * surface — never from a prop, so a surface can never mount two live buffers:
- *  - `sidebar`: the docked pane (split under the tree, or the rail's editor
- *    page) — the default surface;
+ *  - `sidebar`: the docked pane — a FULL-COLUMN rail page and the default seat
+ *    (opening a file switches the rail to it; closing the last file switches
+ *    back to the directory);
  *  - `center`: the conversation-view tab next to 对话 / 轨迹 (optional, full
  *    width, breadcrumb + status bar);
  *  - `float`: the frame-wide floating window (its own font zoom applies).
@@ -26,6 +27,7 @@ import { ConnectionStatusChip } from './ConnectionStatus.tsx'
 import { isConnectionFailure, useConnectionStatus } from './connection.ts'
 import { sameLocalDir } from './composer.ts'
 import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
+import { noteEditorSurfaceMounted, noteEditorSurfaceUnmounted } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
@@ -50,6 +52,7 @@ import {
   IconCollapse,
   IconDiff,
   IconExpand,
+  IconFloat,
   IconRefresh,
   IconSave,
   IconWrap,
@@ -339,6 +342,18 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const connection = useConnectionStatus()
   const offline = connection?.state === 'error'
 
+  /**
+   * Advertise this mount to the file-click gate.
+   *
+   * `isEditorTakeoverActive` answers "can a click be SHOWN right now", so the
+   * count of live mounts is the honest signal: a host with no sidebar surface
+   * mounted must fall back to the native preview instead of swallowing the click.
+   */
+  useEffect(() => {
+    noteEditorSurfaceMounted()
+    return () => noteEditorSurfaceUnmounted()
+  }, [])
+
   // Image data URL cache, keyed by path (remote reads are not free). Bounded —
   // see `rememberRecent` / `dropOversized`.
   const [images, setImages] = useState<Record<string, string>>({})
@@ -381,6 +396,10 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     // (see the editor host below), so it cannot be gated wholesale.
     if (props.visible === false) return
     if (tab === undefined || !tab.image || alias === '') return
+    // A capped read has no decodable payload: skip the read entirely so a
+    // partial base64 never becomes a cached (undecodable) data URL. The
+    // "too large" notice is rendered from `truncated` instead.
+    if (tab.truncated) return
     if (images[tab.fullPath] !== undefined || imageError[tab.fullPath] !== undefined) return
     let cancelled = false
     void (async () => {
@@ -400,6 +419,37 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     })()
     return () => { cancelled = true }
   }, [activeTab, alias, images, imageError, t, props.visible])
+
+  /**
+   * A re-read of one image drops its cached decode.
+   *
+   * `reloadTab` bumps `reloadNonce` after loading new bytes, but the decoded
+   * `data:` URL from the PREVIOUS version would otherwise keep painting (the
+   * cache is keyed by path, not by version). Tracking the nonce per path means a
+   * tab switch does not throw the cache away, while a real reload does.
+   */
+  const imageNonces = useRef<Record<string, number>>({})
+  useEffect(() => {
+    const tab = activeTab
+    if (tab === undefined) return
+    const path = tab.fullPath
+    const nonce = tab.reloadNonce ?? 0
+    const previous = imageNonces.current[path]
+    imageNonces.current[path] = nonce
+    if (previous === undefined || nonce === previous) return
+    setImages((prev) => {
+      if (prev[path] === undefined) return prev
+      const next = { ...prev }
+      delete next[path]
+      return next
+    })
+    setImageError((prev) => {
+      if (prev[path] === undefined) return prev
+      const next = { ...prev }
+      delete next[path]
+      return next
+    })
+  }, [activeTab?.fullPath, activeTab?.reloadNonce])
 
   /**
    * An oversized image is shown but not cached, so it may only live as long as
@@ -754,6 +804,19 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   }
 
   const isDiff = activeTab?.kind === 'diff'
+  /**
+   * Whether the "switch to content editing" action makes sense for this diff.
+   *
+   * A commit drill-down compares historical blobs; opening TODAY's file from it
+   * would read as editing the commit. A deletion has no content to edit (the
+   * read would just fail), and a binary diff has nothing an editor can show.
+   */
+  const canSwitchToEdit = activeTab !== undefined
+    && activeTab.kind === 'diff'
+    && activeTab.ref === undefined
+    && activeTab.diff !== undefined
+    && !activeTab.diff.unsupported
+    && !(activeTab.diff.newText === '' && activeTab.diff.oldText !== '')
   const displayPath = activeTab?.fullPath ?? ''
   const language = isDiff
     ? 'Diff'
@@ -795,7 +858,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               <span className="rvs-etab-glyph">{tabIcon(tab)}</span>
               <span className="rvs-etab-name">
                 {baseName(tab.rel)}
-                {tabIsDiff && <span style={{ opacity: .6 }}> · diff</span>}
+                {tabIsDiff && <span style={{ opacity: .6 }}>{t('editor.diffSuffix')}</span>}
               </span>
               {tab.dirty && <span className="rvs-etab-dot" title={t('editor.unsaved')} />}
               <button
@@ -886,10 +949,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   </IconButton>
                   {/* A diff is a view of a file, not a place to edit: this opens
                       the same path as a normal content tab, next to where the
-                      save button lives for file tabs. Commit drills (a historical
-                      blob) are left out — opening TODAY's file from them would
-                      look like editing the commit. */}
-                  {activeTab.ref === undefined && (
+                      save button lives for file tabs. Commit drills (historical
+                      blobs), deletions and binary diffs are left out. */}
+                  {canSwitchToEdit && (
                     <IconButton
                       title={t('editor.switchToEdit')}
                       onClick={() => { store.openFile(activeTab.fullPath) }}
@@ -908,18 +970,30 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 </IconButton>
               )}
               <span className="rvs-einfo-actions-divider" aria-hidden="true" />
-              <IconButton
-                title={t('editor.fontSmaller')}
-                onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, -1) })}
-              >
-                <span className="rvs-font-glyph">A−</span>
-              </IconButton>
-              <IconButton
-                title={t('editor.fontLarger')}
-                onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, 1) })}
-              >
-                <span className="rvs-font-glyph">A+</span>
-              </IconButton>
+              {/* The floating window owns its OWN Ctrl+wheel zoom (a property of
+                  that window, persisted per window): the shared preference is not
+                  what paints there, so these two would look dead inside it. */}
+              {variant !== 'float' && (
+                <>
+                  <IconButton
+                    title={t('editor.fontSmaller')}
+                    onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, -1) })}
+                  >
+                    <span className="rvs-font-glyph">A−</span>
+                  </IconButton>
+                  <IconButton
+                    title={t('editor.fontLarger')}
+                    onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, 1) })}
+                  >
+                    <span className="rvs-font-glyph">A+</span>
+                  </IconButton>
+                </>
+              )}
+              {variant !== 'float' && (
+                <IconButton title={t('float.title')} onClick={() => { store.openFloatingEditor() }}>
+                  <IconFloat size={13} />
+                </IconButton>
+              )}
               {/* Same editor, another surface. One instance only: flipping the
                   store's surface unmounts this mount and the target one takes
                   the same buffer over (see the file header). */}

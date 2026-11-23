@@ -256,17 +256,14 @@ export function apply(ctx: Context): void {
   // `sidebarRight` degrades to a no-op); see `auto-open-remote.ts` for how
   // "remote" is proven and why the width goes through the drag handle.
   ctx.effect(() => installAutoOpenRemote(ctx), 'dsh-remote-vs: auto-open remote workspace')
-  // The editor tab in the conversation view (right next to 对话 / 轨迹): at
-  // full width the file editor and the side-by-side diff stop competing with
-  // the tree for a narrow sidebar column. The store then flips the editor
-  // surface to 'center' and the sidebar keeps the whole column for browsing.
-  // A host without this slot keeps the old sidebar split (nothing disappears).
-  //
-  // The DOCKED sidebar pane is the default seat (the surface stays 'sidebar'
-  // here); this tab is the optional full-width seat the user switches to with
-  // the editor's own "open in the conversation view" button. Flipping the
-  // default to 'center' on registration is what made every file click jump away
-  // from the sidebar — exactly the behaviour this port removes.
+  // The editor tab in the conversation view (right next to 对话 / 轨迹) is the
+  // OPTIONAL full-width seat: the DOCKED sidebar pane is the default one (the
+  // surface stays 'sidebar' here), and the editor's own "open in the
+  // conversation view" button moves the same buffer over when the user wants the
+  // extra width. Registering this slot must NOT flip the default — doing that is
+  // what made every file click jump away from the sidebar. A host without the
+  // slot simply keeps the single docked seat (nothing disappears, and the
+  // corresponding button is simply never the way to go anywhere).
   //
   // `conversation.view` is a runtime slot whose TYPE comes from
   // dsh-better-sidebar's declarations — and depending on that package for types

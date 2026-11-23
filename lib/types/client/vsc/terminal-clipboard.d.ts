@@ -49,6 +49,21 @@ export interface TerminalChordInput {
 export declare function clipboardChordFor(input: TerminalChordInput): TerminalClipboardChord | undefined;
 /** Copy and paste chords take the key over; the native-paste chord must not. */
 export declare function chordTakesKey(chord: TerminalClipboardChord): boolean;
+/**
+ * Map ONE keyboard event to a terminal clipboard command.
+ *
+ * xterm calls its custom key handler for keydown, keyup AND keypress. Only the
+ * keydown PRESS is a command: handling keyup too ran every chord twice, which is
+ * what made Shift+Insert paste the clipboard twice (reported 2026-11-23) — two
+ * Clipboard-API reads and two input frames for one gesture, with no native paste
+ * event involved.
+ *
+ * Pure, so the gate can pin the "keyup is not a command" rule directly instead
+ * of matching source text.
+ */
+export declare function terminalKeyCommand(input: TerminalChordInput & {
+    type: string;
+}): TerminalClipboardChord | undefined;
 /** Dependencies of {@link createPasteFallback}. */
 export interface PasteFallbackDeps {
     /** Clipboard read; `undefined` when the browser denies it. */

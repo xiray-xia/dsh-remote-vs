@@ -20,10 +20,12 @@ import { useBootstrap, useExplorer } from './store.tsx'
 import { DialogHost } from './vsc/kit.tsx'
 
 /**
- * The conversation-view body. The editor surface flag is owned by the client
- * entry (registration success decides it), NOT by this component: the view
- * may be unmounted while another conversation tab is selected, and flipping
- * the flag here would make the sidebar's rail flicker on every tab switch.
+ * The conversation-view body. The editor surface flag is the STORE's (the
+ * docked pane is the default; this view renders only while the user has moved
+ * the editor here), and deliberately not derived from this component's own
+ * mount: the view is unmounted while another conversation tab is selected, so
+ * inferring the surface from mount/unmount would flip the sidebar's rail — and
+ * its editor — on every host tab switch.
  */
 export function RemoteEditorView(props: { ctx: Context }): ReactNode {
   useBootstrap(props.ctx)

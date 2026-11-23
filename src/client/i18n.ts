@@ -77,7 +77,6 @@ export const DYNAMIC_KEYS = [
   // component.
   'editor.crumbRoot',
   'editor.crumbLabel',
-  'editor.crumbPickSibling',
   'editor.crumbUp',
   'editor.crumbEmpty',
   'editor.imageHint',
@@ -616,7 +615,6 @@ const zh: Record<string, string> = {
   'editor.diffReadOnlyTitle': '统一 diff 以只读方式渲染',
   'editor.crumbRoot': '工作区',
   'editor.crumbLabel': '文件路径',
-  'editor.crumbPickSibling': '{path}（点击选择同级文件）',
   'editor.crumbUp': '上一级',
   'editor.crumbEmpty': '空目录',
   'editor.imageHint': '点击切换适应窗口 / 原始大小',
@@ -1304,7 +1302,6 @@ const en: Record<string, string> = {
   'editor.diffReadOnlyTitle': 'A unified diff is rendered read-only',
   'editor.crumbRoot': 'Workspace',
   'editor.crumbLabel': 'File path',
-  'editor.crumbPickSibling': '{path} (click to pick a sibling file)',
   'editor.crumbUp': 'Parent folder',
   'editor.crumbEmpty': 'Empty directory',
   'editor.imageHint': 'Click to toggle fit / actual size',

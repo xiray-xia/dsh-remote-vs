@@ -1515,30 +1515,9 @@ body[data-ds-dark-theme] .rvs-root {
 
 /* ------------------------------------------------------- preview surfaces */
 
-.rvs-preview-img {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: auto;
-  background-color: var(--rvs-code-bg);
-  background-image:
-    linear-gradient(45deg, rgba(127, 127, 127, .08) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(127, 127, 127, .08) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(127, 127, 127, .08) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(127, 127, 127, .08) 75%);
-  background-size: 20px 20px, 20px 20px, 20px 20px, 20px 20px;
-  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
-}
-
-.rvs-preview-img img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  image-rendering: auto;
-}
-
+/* Image previews are the ported `.rvs-image-preview*` block above: the old
+   plain `<img>` shell (`rvs-preview-img`) had no other user and was removed
+   with the pane that rendered it. */
 .rvs-markdown {
   flex: 1;
   min-height: 0;

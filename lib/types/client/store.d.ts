@@ -643,11 +643,14 @@ export declare function openRemoteFileInBinding(bindingId: string, remotePath: s
  * Whether the plugin's own rich editor is the place a remote file click should
  * land (the click interceptor's gate, see `remote-file-open.ts`).
  *
- * Always true now that the DOCKED sidebar editor is the default surface: the
- * file belongs in OUR editor instead of the host's native preview, whichever
- * seat that editor currently occupies (docked pane, centre tab, floating
- * window). Unknown bindings are still answered by `openRemoteFileInBinding`
- * returning false, which hands the click back to the native preview.
+ * True while at least one editor surface is actually mounted — the docked pane
+ * is the default seat, and the centre tab / floating window are the other two,
+ * so "the plugin is installed" is not enough: a host whose right sidebar never
+ * mounts (no better-sidebar tab AND no native right-sidebar registry, or a
+ * per-session page that is currently closed) would swallow the click into a tab
+ * nothing can paint, while the host's native preview could have shown the file.
+ * Unknown bindings are still answered by `openRemoteFileInBinding` returning
+ * false, which also hands the click back to the native preview.
  */
 export declare function isEditorTakeoverActive(): boolean;
 /** Open (or focus) a working-tree diff of one repository path. */

@@ -58,29 +58,8 @@ export interface CodeEditorViewState {
   ranges: { anchor: number; head: number }[]
 }
 
-/** Caret readout for the status bar (1-based, matching what the user sees). */
-export interface CodeEditorCaret {
-  /** 1-based line of the caret (the selection's head). */
-  line: number
-  /** 1-based column of the caret. */
-  column: number
-  /** Number of selected characters (0 = empty selection). */
-  selected: number
-}
-
-/** The caret reading of one editor state (pure; also used by the status bar tests). */
-export function caretOf(state: {
-  doc: { lineAt(offset: number): { number: number; from: number; to: number } }
-  selection: { main: { head: number; from: number; to: number } }
-}): CodeEditorCaret {
-  const main = state.selection.main
-  const line = state.doc.lineAt(main.head)
-  return {
-    line: line.number,
-    column: main.head - line.from + 1,
-    selected: Math.max(0, main.to - main.from),
-  }
-}
+export { caretOf, type CodeEditorCaret } from './vsc/editor-caret.ts'
+import { caretOf as caretOfState, type CodeEditorCaret as CodeEditorCaretType } from './vsc/editor-caret.ts'
 
 export interface CodeEditorHandle {
   getContent: () => string
@@ -193,7 +172,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    * through an update listener, so the editor reports instead of the parent
    * polling a ref. Called once with the initial position, then on every move.
    */
-  onCaretChange?: (caret: CodeEditorCaret) => void
+  onCaretChange?: (caret: CodeEditorCaretType) => void
   /** Chat-insert target: absent/disabled hides the selection popup. */
   ctx?: Context
   sessionId?: string | undefined
@@ -797,7 +776,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
         // Status-bar readout: reported BEFORE the view-state handoff below,
         // which returns early for callers that keep no tab state (diff panes).
         const caretHandler = propsRef.current.onCaretChange
-        if (caretHandler !== undefined) caretHandler(caretOf(update.state))
+        if (caretHandler !== undefined) caretHandler(caretOfState(update.state))
         const handler = propsRef.current.onViewState
         const tabId = propsRef.current.tabId
         if (handler === undefined || tabId === undefined) return
@@ -849,7 +828,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     // 1: a remount restores the selection further down (see the restore block
     // below), and no selection event fires for a caret that never moved.
     const initialCaret = propsRef.current.onCaretChange
-    if (initialCaret !== undefined) initialCaret(caretOf(view.state))
+    if (initialCaret !== undefined) initialCaret(caretOfState(view.state))
     /**
      * Come back to where this file was left.
      *

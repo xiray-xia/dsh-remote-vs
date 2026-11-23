@@ -279,6 +279,16 @@ export function IconDiff(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M2.6 3.6h10.8M5.4 8h8M5.4 12.4h8M2.6 8h.01M2.6 12.4h.01" />, props.className)
 }
 
+/** Float / pop-out: a small frame with an arrow leaving its top-right corner. */
+export function IconFloat(props: IconProps): ReactNode {
+  return svg(props.size ?? 13, (
+    <>
+      <path d="M9.4 2.6h4v4M13.4 2.6 8.4 7.6" />
+      <path d="M12.6 9.4v3.2a.8.8 0 0 1-.8.8H3a.8.8 0 0 1-.8-.8V4a.8.8 0 0 1 .8-.8h3.4" />
+    </>
+  ), props.className)
+}
+
 export function IconImage(props: IconProps): ReactNode {
   return svg(props.size ?? 14, <path d="M2.4 3.4h11.2v9.2H2.4zM5.4 6.6h.01M9.6 12.6 6.8 9.4l-2 2.4M9.6 12.6l2.4-3.2 1.6 1.8" />, props.className)
 }
@@ -362,7 +372,16 @@ export function ExplorerFolderIcon(props: { path: string; open: boolean; size?: 
 
 // ------------------------------------------------------------- file kinds
 
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
+/**
+ * Raster formats the editor previews as pictures.
+ *
+ * SVG is deliberately NOT here: it is UTF-8 markup, editing it as text is
+ * genuinely useful, and the host only ships base64 for files it classified as
+ * binary — an SVG would arrive as text with no payload, so an "image" tab could
+ * neither render it nor edit it (reported by review 2026-11-23). `mimeFor` keeps
+ * the `image/svg+xml` entry for callers that only need a MIME type.
+ */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif'])
 const MIME: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',

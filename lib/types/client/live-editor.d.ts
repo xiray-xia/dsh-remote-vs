@@ -92,3 +92,9 @@ export declare function editorViewStateOf(tabId: string): CodeEditorViewState | 
  * long session accumulated one state object per file ever opened.
  */
 export declare function pruneEditorViewStates(liveIds: ReadonlySet<string>): void;
+/** One `EditorPane` mounted (called from its mount effect). */
+export declare function noteEditorSurfaceMounted(): void;
+/** One `EditorPane` unmounted; the count never goes negative. */
+export declare function noteEditorSurfaceUnmounted(): void;
+/** Whether ANY editor surface is mounted right now (i.e. a click can be shown). */
+export declare function editorSurfacesMounted(): number;

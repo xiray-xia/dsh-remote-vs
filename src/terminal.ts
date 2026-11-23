@@ -76,11 +76,18 @@ const OUT_LOW_WATER = 1 * 1024 * 1024
 /** Default window for coalescing output frames (0 = one frame per chunk). */
 const OUT_COALESCE_MS = 8
 /**
- * Flush immediately past this much buffered text: a producer faster than the
- * window must not turn into an unbounded string copy (the channel backpressure
- * bounds the bytes handed to the SOCKETS, not this buffer).
+ * Flush immediately past this much buffered text (measured in UTF-16 code
+ * units, i.e. `String.length`): a producer faster than the window must not turn
+ * into an unbounded string copy (the channel backpressure bounds the bytes
+ * handed to the SOCKETS, not this buffer).
+ *
+ * Code units rather than bytes on purpose: converting to a byte count would
+ * copy the whole buffer on every chunk just to compare a threshold. CJK/emoji
+ * output therefore flushes at up to ~3x this many bytes, which is still far
+ * below the 1 MiB client-frame cap this path never approaches (it is the
+ * client→host direction).
  */
-const OUT_COALESCE_BYTES = 64 * 1024
+const OUT_COALESCE_CHARS = 64 * 1024
 
 /** Construction options (the terminal gate drives the registry directly). */
 export interface TerminalRegistryOptions {
@@ -341,7 +348,7 @@ export class TerminalSessionRegistry {
   private queueOut(session: Session, text: string): void {
     if (text === '') return
     session.outBuffer += text
-    if (session.outBuffer.length >= OUT_COALESCE_BYTES || this.coalesceMs <= 0) {
+    if (session.outBuffer.length >= OUT_COALESCE_CHARS || this.coalesceMs <= 0) {
       this.flushOut(session)
       return
     }

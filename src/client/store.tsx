@@ -46,7 +46,14 @@ import {
 } from './scm/git-cache.ts'
 import { detectLang, makeT, type Lang } from './i18n.ts'
 import { effectiveEditorSurface, type EditorSurface } from './float-editor.ts'
-import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, isLiveEditorFor, markLiveEditorSaved } from './live-editor.ts'
+import {
+  captureLiveEditorPosition,
+  captureLiveEditorText,
+  editorSurfacesMounted,
+  isLiveEditorDirty,
+  isLiveEditorFor,
+  markLiveEditorSaved,
+} from './live-editor.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
 import { connectionStateOf, isConnectionFailure } from './connection.ts'
@@ -2291,14 +2298,17 @@ export function openRemoteFileInBinding(
  * Whether the plugin's own rich editor is the place a remote file click should
  * land (the click interceptor's gate, see `remote-file-open.ts`).
  *
- * Always true now that the DOCKED sidebar editor is the default surface: the
- * file belongs in OUR editor instead of the host's native preview, whichever
- * seat that editor currently occupies (docked pane, centre tab, floating
- * window). Unknown bindings are still answered by `openRemoteFileInBinding`
- * returning false, which hands the click back to the native preview.
+ * True while at least one editor surface is actually mounted — the docked pane
+ * is the default seat, and the centre tab / floating window are the other two,
+ * so "the plugin is installed" is not enough: a host whose right sidebar never
+ * mounts (no better-sidebar tab AND no native right-sidebar registry, or a
+ * per-session page that is currently closed) would swallow the click into a tab
+ * nothing can paint, while the host's native preview could have shown the file.
+ * Unknown bindings are still answered by `openRemoteFileInBinding` returning
+ * false, which also hands the click back to the native preview.
  */
 export function isEditorTakeoverActive(): boolean {
-  return true
+  return editorSurfacesMounted() > 0
 }
 
 /** Open (or focus) a working-tree diff of one repository path. */

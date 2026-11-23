@@ -8,10 +8,11 @@ SSH host management inside the DSH Host process + helper push pipeline + a **VS 
 workbench** (explorer / search / source control / commit graph with its commit-details pane / multi-tab editor / floating editor /
 side-by-side diff / multiple terminals / port forwarding). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
 there is an extra standalone "Remote Workspace" tab, otherwise it falls back to a native right-Sidebar "Remote Workspace"
-page (same content, self-opened from the guide, per-session instances). The editor is ALSO mounted into
-the conversation view slot as a "远程编辑器" (remote editor) tab next to "对话 / 轨迹", so the code area is
-full width; the sidebar copy is the narrow fallback. Since P2, native tools inside remote workspaces
-transparently run remotely (see below).
+page (same content, self-opened from the guide, per-session instances). **The sidebar's editor is the DEFAULT
+seat**: opening a file switches the whole column to it (one view at a time, no tree/editor split) and closing
+the last file returns to the directory. The conversation view slot is registered too, but as the OPTIONAL
+full-width seat — the editor's own expand/dock button moves the same buffer between the two. Since P2, native
+tools inside remote workspaces transparently run remotely (see below).
 
 ```text
 ┌─ Local DSH Host ─────────────────────────┐
@@ -255,9 +256,24 @@ checking the build artifact). Both are covered under "Development".
 
 ![The sidebar's four views: files, search, source control, history](docs/media/sidebar-views.gif)
 
-Both surfaces share one state module (`store.tsx`): **the sidebar "Remote Workspace" page** (a standalone tab when
-`dsh-better-sidebar` is installed, otherwise the native right-Sidebar page) and **the conversation-view
-"remote editor" tab** (next to 对话/轨迹, giving the code area full width).
+Both surfaces share one state module (`store.tsx`): **the sidebar "Remote Workspace" editor page** (the default
+seat — a standalone tab when `dsh-better-sidebar` is installed, otherwise the native right-Sidebar page; it owns
+the whole column) and **the conversation-view "remote editor" tab** (the optional full-width seat next to
+对话/轨迹). Only one of them is mounted at a time and the buffer, caret and scroll position are handed over
+when the seat changes.
+
+- **Editor chrome** (ported from the local sidebar plugin): an opaque VS Code Dark+/Light+ code surface
+  (`#1e1e1e` / `#ffffff`) with editor-panel tokens, a 30px tab strip (dirty dot, middle-click close, diff/image
+  glyphs), an info bar with reload / save / word-wrap / font A−A+ / float / seat switch, and — in the full-width
+  seat — a **clickable breadcrumb** (sibling-file picker over the remote listing route) plus a **status bar**
+  (language, line:column, selected characters, indent, wrap, font size, save state, UTF-8). Word wrap and font
+  size (Ctrl+wheel) are one shared preference persisted in localStorage, so every seat agrees.
+- **Image preview**: png/jpg/jpeg/gif/webp/bmp/ico/avif render in the tab with a click-to-toggle
+  fit/actual size and the file size plus pixel dimensions; a capped read says "image too large" instead of
+  drawing a broken thumbnail. SVG keeps opening as TEXT (editable) — it is markup, not a raster image.
+- **Closing the last file returns to the directory**: the editor page hands the column back to the explorer
+  (a dirty tab still asks first). A diff tab carries one extra icon: **switch to content editing**, opening the
+  same path as an editable content tab (commit drill-downs, deletions and binary diffs do not offer it).
 
 - **Activity rail**: explorer / search / source control / commit graph / editor / terminal / workspaces.
   A panel stays mounted after its first visit, so switching back neither refetches nor flashes. While it is

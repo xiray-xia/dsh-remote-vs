@@ -76,6 +76,14 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
 
   const t = props.t
   const root = props.root.replace(/\/+$/, '')
+  /**
+   * A path OUTSIDE the workspace root (a repo sitting next to the binding, a
+   * diff path that left the tree) cannot be split into root-relative crumbs:
+   * doing it anyway would build `/root/home/...` and the sibling picker would
+   * list the wrong directory. Fall back to the plain path line.
+   */
+  const underRoot = root !== ''
+    && (props.path === root || props.path.startsWith(`${root}/`))
   const segments = useMemo(() => {
     const full = props.path.replace(/\/+$/, '')
     if (root !== '' && full.startsWith(`${root}/`)) return pathSegments(full.slice(root.length + 1))
@@ -145,6 +153,14 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
     setMenu(undefined)
   }, [props.path])
 
+  if (!underRoot) {
+    return (
+      <nav className="rvs-breadcrumb" aria-label={tr(t, 'editor.crumbLabel', '文件路径')}>
+        <span className="rvs-einfo-path" title={props.path}>{props.path}</span>
+      </nav>
+    )
+  }
+
   /** Click a segment: a directory lists itself; the file lists its parent. */
   const clickCrumb = (crumb: Crumb, index: number, event: ReactMouseEvent<HTMLButtonElement>): void => {
     const isFile = index === crumbs.length - 1
@@ -169,9 +185,10 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
             <button
               type="button"
               className={`rvs-crumb${isFile ? ' rvs-crumb-file' : ''}`}
-              title={isFile
-                ? props.path
-                : tr(t, 'editor.crumbPickSibling', '{path}（点击选择同级文件）').replace('{path}', crumb.path)}
+              // The last segment is the FILE (its menu lists siblings); a
+              // directory segment lists ITSELF, so the hint must not promise
+              // sibling files there.
+              title={isFile ? props.path : crumb.path}
               aria-haspopup="menu"
               onClick={event => clickCrumb(crumb, index, event)}
             >

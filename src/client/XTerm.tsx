@@ -6,26 +6,36 @@
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
-import type { ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { TerminalClientFrame, TerminalServerFrame } from '../protocol.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
 import { ContextMenu, useContextMenu, type MenuEntry } from './vsc/kit.tsx'
 import {
-  clipboardChordFor,
   createPasteFallback,
   stripBracketedPasteMarkers,
+  terminalKeyCommand,
   terminalMenuState,
 } from './vsc/terminal-clipboard.ts'
+import { terminalTheme } from './vsc/terminal-theme.ts'
 
-function send(ws: WebSocket, frame: TerminalClientFrame): void {
+/**
+ * Send one frame; `false` means it was NOT handed to the socket.
+ *
+ * The caller that tracks "the PTY already knows this size" depends on that
+ * answer (see `pushSize`): recording a size that never left is how a terminal
+ * used to sit at the URL's 80x24 for the rest of its life.
+ */
+function send(ws: WebSocket, frame: TerminalClientFrame): boolean {
   if (ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(JSON.stringify(frame))
+      return true
     } catch {
       // Socket raced away.
+      return false
     }
   }
+  return false
 }
 
 /** Clipboard write with a legacy execCommand fallback (non-secure contexts). */
@@ -57,66 +67,6 @@ async function readClipboard(): Promise<string | undefined> {
   } catch {
     return undefined
   }
-}
-
-/**
- * Opaque high-readability palette (opaque: the contrast engine cannot reason
- * about transparency).
- *
- * The SELECTION colours are explicit per scheme: xterm's defaults are computed
- * for a dark background, so in the light theme a selected block was white on
- * white — visible as "selection does nothing" while copy actually worked.
- * These are the VS Code selection colours (dark `#264f78`, light `#add6ff`),
- * with a dimmer variant for the unfocused window.
- */
-function buildTheme(dark: boolean): ITheme {
-  return dark
-    ? {
-        background: '#0e0e13',
-        foreground: '#e8e8e8',
-        cursor: '#e8e8e8',
-        selectionBackground: '#264f78',
-        selectionInactiveBackground: '#333c48',
-        black: '#000000',
-        red: '#cd3131',
-        green: '#0dbc79',
-        yellow: '#e5e910',
-        blue: '#2472c8',
-        magenta: '#bc3fbc',
-        cyan: '#11a8cd',
-        white: '#e5e5e5',
-        brightBlack: '#7a7a7a',
-        brightRed: '#f14c4c',
-        brightGreen: '#23d18b',
-        brightYellow: '#f5f543',
-        brightBlue: '#3b8eea',
-        brightMagenta: '#d670d6',
-        brightCyan: '#29b8db',
-        brightWhite: '#ffffff',
-      }
-    : {
-        background: '#ffffff',
-        foreground: '#1a1a1a',
-        cursor: '#1a1a1a',
-        selectionBackground: '#add6ff',
-        selectionInactiveBackground: '#d7e7f5',
-        black: '#000000',
-        red: '#cd3131',
-        green: '#00bc67',
-        yellow: '#949800',
-        blue: '#0451a5',
-        magenta: '#bc05bc',
-        cyan: '#0598bc',
-        white: '#555555',
-        brightBlack: '#666666',
-        brightRed: '#f14c4c',
-        brightGreen: '#23d18b',
-        brightYellow: '#f5f543',
-        brightBlue: '#3b8eea',
-        brightMagenta: '#d670d6',
-        brightCyan: '#29b8db',
-        brightWhite: '#ffffff',
-      }
 }
 
 export function XTerm(props: {
@@ -161,12 +111,12 @@ export function XTerm(props: {
       fontSize: 13,
       fontFamily: propsRef.current.fontFamily ?? 'var(--ds-font-family-code, ui-monospace, monospace)',
       minimumContrastRatio: 7,
-      theme: buildTheme(isDarkScheme()),
+      theme: terminalTheme(isDarkScheme()),
     })
     // Re-theme live when the user flips the DSH scheme.
     const unflip = subscribeColorScheme(() => {
       try {
-        term.options.theme = buildTheme(isDarkScheme())
+        term.options.theme = terminalTheme(isDarkScheme())
       } catch {
         // Terminal gone.
       }
@@ -178,6 +128,17 @@ export function XTerm(props: {
 
     const ws = new WebSocket(propsRef.current.wsUrl)
     let opened = false
+    /**
+     * True once the HOST said `ready` for this socket.
+     *
+     * Frames sent before that are lost, not queued: the host only attaches its
+     * message listener after the shell exists (a cold dial takes seconds), so a
+     * `resize` sent on the WebSocket `open` event never reached the PTY — and
+     * because the client had already recorded the size, the later push (once the
+     * host was listening) was deduped away. The shell then stayed at the URL's
+     * 80x24 for its whole life. Sizes are only sent after `ready`.
+     */
+    let hostReady = false
     /** The seeded line is typed at most once per mount (a reconnect re-mounts). */
     let seeded = false
     let exitReported = false
@@ -187,6 +148,12 @@ export function XTerm(props: {
       propsRef.current.onExit(code, message)
     }
 
+    /**
+     * Size last pushed to the PTY (`0` = nothing sent yet, so the first push
+     * always goes). Declared BEFORE `pushSize` reads it: a `let` declared below
+     * would be in its temporal dead zone on the first call.
+     */
+    let lastSize = { cols: 0, rows: 0 }
     const pushSize = (): void => {
       if (host.clientWidth < 20 || host.clientHeight < 20) return
       try {
@@ -194,15 +161,20 @@ export function XTerm(props: {
       } catch {
         // Not laid out yet.
       }
+      // Nothing may be sent before the host is listening (see `hostReady`); the
+      // `ready` handler pushes the measured size itself.
+      if (!hostReady) return
       // Only a CHANGED size is news: the observer fires on every pixel of a
       // window drag, and a resize frame per tick makes the remote shell re-run
       // SIGWINCH handling (full-screen apps redraw) for nothing.
       if (term.cols === lastSize.cols && term.rows === lastSize.rows) return
-      lastSize = { cols: term.cols, rows: term.rows }
-      send(ws, { t: 'resize', cols: term.cols, rows: term.rows })
+      // Record the size only once it really left: the observer can fire before
+      // the socket is OPEN (and `send` then drops the frame), and remembering a
+      // size the PTY never received left the shell at the URL's 80x24 until the
+      // user dragged the window.
+      const sent = send(ws, { t: 'resize', cols: term.cols, rows: term.rows })
+      if (sent) lastSize = { cols: term.cols, rows: term.rows }
     }
-    /** Size last pushed to the PTY (`0` = nothing sent yet, so the first push always goes). */
-    let lastSize = { cols: 0, rows: 0 }
     liveRef.current = {
       refit: () => {
         pushSize()
@@ -288,6 +260,9 @@ export function XTerm(props: {
         return
       }
       if (frame.t === 'ready') {
+        hostReady = true
+        // The host is listening now: apply the size this client really has.
+        pushSize()
         propsRef.current.onReady(frame.id)
         // The shell exists now: type the seeded line (a menu entry's `cd`), as a
         // normal input line so the shell echoes it and redraws its prompt.
@@ -385,14 +360,10 @@ export function XTerm(props: {
     }
     host.addEventListener('paste', onPasteEvent, true)
     term.attachCustomKeyEventHandler((e) => {
-      /**
-       * xterm consults this handler for keyup too, so a chord that ACTS here
-       * fires twice for one gesture — Shift+Insert pasted the clipboard twice
-       * (once on keydown, once on keyup), with no native paste event involved.
-       * Only the keydown press is a command.
-       */
-      if (e.type !== 'keydown') return true
-      const chord = clipboardChordFor({
+      // `terminalKeyCommand` answers undefined for keyup/keypress: xterm invokes
+      // this hook for all three, and acting on keyup pasted twice.
+      const chord = terminalKeyCommand({
+        type: e.type,
         key: e.key,
         ctrl: e.ctrlKey,
         shift: e.shiftKey,

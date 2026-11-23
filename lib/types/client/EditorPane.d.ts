@@ -11,8 +11,9 @@
  *
  * Three variants share this component, chosen from the store's effective
  * surface — never from a prop, so a surface can never mount two live buffers:
- *  - `sidebar`: the docked pane (split under the tree, or the rail's editor
- *    page) — the default surface;
+ *  - `sidebar`: the docked pane — a FULL-COLUMN rail page and the default seat
+ *    (opening a file switches the rail to it; closing the last file switches
+ *    back to the directory);
  *  - `center`: the conversation-view tab next to 对话 / 轨迹 (optional, full
  *    width, breadcrumb + status bar);
  *  - `float`: the frame-wide floating window (its own font zoom applies).
