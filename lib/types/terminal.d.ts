@@ -1,5 +1,15 @@
 import type { WebSocket } from 'ws';
 import type { RemotePool } from './pool.ts';
+/** Construction options (the terminal gate drives the registry directly). */
+export interface TerminalRegistryOptions {
+    /**
+     * Output coalescing window in ms; `0` sends every chunk as its own frame.
+     *
+     * The existing checks use `0` so their assertions stay synchronous; one
+     * dedicated check drives a non-zero window to pin the coalescing itself.
+     */
+    coalesceMs?: number;
+}
 /**
  * The largest client frame accepted, in bytes.
  *
@@ -13,8 +23,11 @@ import type { RemotePool } from './pool.ts';
 export declare const TERMINAL_MAX_FRAME_BYTES: number;
 export declare class TerminalSessionRegistry {
     private readonly pool;
+    private readonly options;
     private readonly sessions;
-    constructor(pool: RemotePool);
+    constructor(pool: RemotePool, options?: TerminalRegistryOptions);
+    /** The window this registry coalesces within (`0` = every chunk is a frame). */
+    private get coalesceMs();
     /** Open a shell and attach the first socket. */
     open(ws: WebSocket, alias: string, cols: number, rows: number): Promise<string>;
     /**
@@ -45,6 +58,16 @@ export declare class TerminalSessionRegistry {
     /** Keep the shell for a while (reload can reattach), then close it for good. */
     private armReap;
     private cancelReap;
+    /**
+     * Queue one output chunk and schedule the coalesced frame.
+     *
+     * `coalesceMs === 0` broadcasts immediately (the checks rely on that
+     * synchrony), which is also the behaviour when a window would send only this
+     * one chunk anyway.
+     */
+    private queueOut;
+    /** Send the buffered output as ONE `out` frame (no-op when empty). */
+    private flushOut;
     private setPaused;
     private send;
     private broadcast;

@@ -1,17 +1,27 @@
 /**
  * The editor area: one tab strip for code files, previews and diffs, an info
- * row, and the body dispatch.
+ * row, the body, and (in the full-width conversation-view variant) a status bar.
  *
- * The `@文件` insertion and the selection→conversation popup are preserved
- * from the previous editor: `CodeEditor` still receives the chat target, and
- * every code pane is the same CodeMirror buffer with Ctrl+S wired to the
- * remote write route.
+ * The chrome follows the local sidebar plugin's editor (same tab strip, info
+ * row, empty states, status bar, image preview and editor background tokens),
+ * while every remote-only capability stays exactly where it was: the remote
+ * read/write routes, the save-conflict banner and its on-demand difference, the
+ * diff tabs, markdown/HTML previews, session change marks and the offline
+ * read-only degradation.
+ *
+ * Three variants share this component, chosen from the store's effective
+ * surface — never from a prop, so a surface can never mount two live buffers:
+ *  - `sidebar`: the docked pane (split under the tree, or the rail's editor
+ *    page) — the default surface;
+ *  - `center`: the conversation-view tab next to 对话 / 轨迹 (optional, full
+ *    width, breadcrumb + status bar);
+ *  - `float`: the frame-wide floating window (its own font zoom applies).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
 import { api, fileReadTimeoutMs } from './api.ts'
 import { clientDeadlineFor } from '../timeouts.ts'
 import { diffText, type TextHunk } from '../changes/text-diff.ts'
-import { CodeEditor, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
+import { CodeEditor, type CodeEditorCaret, type CodeEditorHandle, type CodeEditorViewState } from './CodeEditor.tsx'
 import { ConnectionStatusChip } from './ConnectionStatus.tsx'
 import { isConnectionFailure, useConnectionStatus } from './connection.ts'
 import { sameLocalDir } from './composer.ts'
@@ -23,12 +33,26 @@ import { Btn } from './ui.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
 import { installSaveShortcut } from './vsc/save-shortcut.ts'
+import { Breadcrumb } from './vsc/breadcrumb.tsx'
+import { ImagePreview } from './vsc/image-preview.tsx'
+import {
+  editorSettingsSnapshot,
+  stepFontSize,
+  subscribeEditorSettings,
+  updateEditorSettings,
+  type EditorSettings,
+} from './vsc/editor-settings.ts'
+import { detectIndentLabel } from './vsc/editor-langs.ts'
 import {
   IconButton,
   IconClose,
+  IconCode,
+  IconCollapse,
   IconDiff,
+  IconExpand,
   IconRefresh,
   IconSave,
+  IconWrap,
   MiniSpinner,
   Segmented,
   baseName,
@@ -112,7 +136,7 @@ function undoActionLabel(t: (key: string) => string, kind: 'add' | 'mod' | 'del'
 
 /** Tab icon: diffs, images and text files each get their own glyph. */
 function tabIcon(tab: { kind: string; image: boolean }): ReactNode {
-  if (tab.kind === 'diff') return <IconDiff size={12} />
+  if (tab.kind === 'diff') return <IconDiff size={11} />
   if (tab.image) return <span>▣</span>
   return <span>▪</span>
 }
@@ -172,9 +196,130 @@ function dropOversized(prev: Record<string, string>, keep: string | undefined): 
   return next
 }
 
+/** Which chrome variant this mount renders (see the file header). */
+type EditorVariant = 'sidebar' | 'center' | 'float'
+
+/** React binding for the shared editor view preferences. */
+function useEditorSettings(): EditorSettings {
+  return useSyncExternalStore(subscribeEditorSettings, editorSettingsSnapshot, editorSettingsSnapshot)
+}
+
+/** One status-bar entry. */
+function StatusItem(props: { title?: string; error?: boolean; children: ReactNode; onClick?: () => void }): ReactNode {
+  const className = `rvs-status-item${props.error === true ? ' rvs-status-error' : ''}`
+  if (props.onClick === undefined) {
+    return <span className={className} title={props.title}>{props.children}</span>
+  }
+  return (
+    <button type="button" className={`${className} rvs-status-btn`} title={props.title} onClick={props.onClick}>
+      {props.children}
+    </button>
+  )
+}
+
+/**
+ * Bottom status bar (full-width variant only, like the sidebar plugin).
+ *
+ * Left is "where am I" (language, line:column, selection size, indent); right is
+ * "how is it shown" (wrap, font size, save state) plus the file encoding. Wrap
+ * and font size are CLICKABLE on purpose: those are the two display switches a
+ * reader changes often, and making them hunt through a menu would be worse.
+ */
+function StatusBar(props: {
+  t: (key: string) => string
+  diff: boolean
+  caret: CodeEditorCaret | undefined
+  language: string
+  indent: string | undefined
+  wrap: boolean
+  fontSize: number
+  readOnly: boolean
+  dirty: boolean
+  loading: boolean
+  saving: boolean
+  error: string | undefined
+}): ReactNode {
+  const caret = props.caret
+  const t = props.t
+  const saveLabel = props.loading
+    ? t('common.loading')
+    : props.saving
+      ? t('editor.statusSaving')
+      : props.dirty
+        ? t('editor.unsaved')
+        : t('editor.statusClean')
+  return (
+    <div className="rvs-statusbar">
+      <div className="rvs-status-left">
+        {props.diff ? (
+          <>
+            <StatusItem title={t('editor.diffTitle')}>{t('editor.diffTitle')}</StatusItem>
+            <StatusItem title={t('editor.diffReadOnlyTitle')}>{t('editor.statusReadOnly')}</StatusItem>
+          </>
+        ) : (
+          <>
+            <StatusItem title={t('editor.statusLanguage')}>{props.language}</StatusItem>
+            <StatusItem title={t('editor.statusPosition')}>
+              {t('editor.statusPositionValue')
+                .replace('{line}', String(caret?.line ?? 1))
+                .replace('{column}', String(caret?.column ?? 1))}
+            </StatusItem>
+            {caret !== undefined && caret.selected > 0 && (
+              <StatusItem title={t('editor.statusSelected')}>
+                {t('editor.statusSelectedValue').replace('{count}', String(caret.selected))}
+              </StatusItem>
+            )}
+            {props.indent !== undefined && <StatusItem title={t('editor.statusIndent')}>{props.indent}</StatusItem>}
+          </>
+        )}
+      </div>
+      <div className="rvs-status-right">
+        {props.error !== undefined && (
+          <StatusItem title={props.error} error>
+            {t('editor.statusError')}
+          </StatusItem>
+        )}
+        {props.diff ? null : (
+          <>
+            {props.readOnly && (
+              <StatusItem title={t('editor.statusReadOnlyTitle')}>{t('editor.statusReadOnly')}</StatusItem>
+            )}
+            <StatusItem
+              title={t('editor.statusWrapToggle')}
+              onClick={() => updateEditorSettings({ wrap: !props.wrap })}
+            >
+              {props.wrap ? t('editor.statusWrapOn') : t('editor.statusWrapOff')}
+            </StatusItem>
+            <StatusItem title={t('editor.statusFont')}>{`${props.fontSize}px`}</StatusItem>
+            <StatusItem title={t('editor.statusSaved')}>{saveLabel}</StatusItem>
+          </>
+        )}
+        <StatusItem title={t('editor.statusEncoding')}>UTF-8</StatusItem>
+      </div>
+    </div>
+  )
+}
+
 export function EditorPane(props: { visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, tabs, activeTab, alias } = store
+  const settings = useEditorSettings()
+  /**
+   * Which chrome this mount renders. Derived from the store's EFFECTIVE surface
+   * (float wins over the base mount), never from a prop: the same component is
+   * mounted by the sidebar, the conversation view and the floating window, and
+   * exactly one of them may own the live buffer.
+   */
+  const variant: EditorVariant = store.editorSurface === 'center'
+    ? 'center'
+    : store.editorSurface === 'float' ? 'float' : 'sidebar'
+  const center = variant === 'center'
+  // The floating window owns its own Ctrl+wheel zoom (a property of the window,
+  // see FloatingEditorWindow), so the shared preference is set on the other two
+  // surfaces only.
+  const fontStyle = variant === 'float'
+    ? undefined
+    : ({ '--rvs-editor-font-size': `${settings.fontSize}px` } as CSSProperties)
   // Jump targets of the file on screen; empty when it carries no change data.
   const changeHunks = activeTab?.changeSet?.hunks ?? []
   const chat = useRemoteChatTarget(store.ctx)
@@ -207,6 +352,11 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const [tokenCount, setTokenCount] = useState<number | undefined>(undefined)
   useEffect(() => {
     setTokenCount(undefined)
+  }, [activeTab?.id])
+  /** Caret readout for the status bar; reset when the file changes. */
+  const [caret, setCaret] = useState<CodeEditorCaret | undefined>(undefined)
+  useEffect(() => {
+    setCaret(undefined)
   }, [activeTab?.id])
   /**
    * The "see the difference" payload of a refused save.
@@ -316,9 +466,23 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     return renderMarkdown(activeTab.text)
   }, [activeTab])
 
+  /**
+   * The status bar's indent hint, derived from the loaded text.
+   *
+   * Memoised on the tab: the status bar re-renders on every caret move, and
+   * scanning 200 lines per arrow key would be free in theory and wasteful in
+   * practice.
+   */
+  const indentLabel = useMemo(() => {
+    if (activeTab === undefined || activeTab.kind !== 'file' || activeTab.binary) return undefined
+    return detectIndentLabel(activeTab.text)
+  }, [activeTab])
+
   // The editor owns the live buffer; the save path pulls it imperatively
   // instead of mirroring every keystroke into React state.
   const editorRef = useRef<CodeEditorHandle>(null)
+  /** Editor body container: anchors the Ctrl+wheel zoom listener. */
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   /**
    * Scroll + caret per tab, so re-selecting a tab returns to where it was.
@@ -406,6 +570,30 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     if (!editorMounted || activeTab === undefined) return
     return registerLiveEditor(activeTab.id, () => editorRef.current)
   }, [editorMounted, activeTab?.id])
+
+  /**
+   * Ctrl/Cmd + wheel changes the editor font size (same feel as the floating
+   * window's zoom).
+   *
+   * A native listener, not React's `onWheel`: React attaches its wheel handler
+   * as passive at the root, so `preventDefault()` is ignored and the page
+   * zooms instead. Scoped to the editor body, so the tree/terminal keep their
+   * own gestures.
+   */
+  useEffect(() => {
+    const element = bodyRef.current
+    if (element === null) return
+    const onWheel = (event: WheelEvent): void => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      event.preventDefault()
+      const direction = event.deltaY < 0 ? 1 : -1
+      updateEditorSettings({ fontSize: stepFontSize(editorSettingsSnapshot().fontSize, direction) })
+    }
+    element.addEventListener('wheel', onWheel, { passive: false })
+    return () => element.removeEventListener('wheel', onWheel)
+    // Re-attach when the body container appears (it does not exist in the empty
+    // state) so the first opened file still gets the zoom.
+  }, [tabs.length])
 
   const saveActive = async (): Promise<void> => {
     const tab = activeTab
@@ -543,112 +731,215 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   }, [props.visible])
 
   if (tabs.length === 0) {
+    if (center) {
+      return (
+        <div className="rvs-pane grow rvs-edge">
+          <div className="rvs-editor-empty">
+            <div className="rvs-editor-empty-glyph" aria-hidden="true">✎</div>
+            <div className="rvs-editor-empty-title">{t('editor.centerEmptyTitle')}</div>
+            <div className="rvs-editor-empty-hint">{t('editor.centerEmptyHint')}</div>
+            <div className="rvs-editor-empty-hint" style={{ opacity: 0.7 }}>{t('editor.emptyShortcuts')}</div>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="rvs-pane grow rvs-edge">
         <div className="rvs-empty">
-          {t('editor.empty')}
-          <div style={{ marginTop: 8, fontSize: 11 }}>
-            <span className="rvs-kbd">Ctrl</span> + <span className="rvs-kbd">S</span> {t('editor.saveHint')}
-          </div>
+          <div className="rvs-empty-title">{t('editor.dockEmptyTitle')}</div>
+          <div className="rvs-empty-hint">{t('editor.dockEmptyHint')}</div>
         </div>
       </div>
     )
   }
 
+  const isDiff = activeTab?.kind === 'diff'
+  const displayPath = activeTab?.fullPath ?? ''
+  const language = isDiff
+    ? 'Diff'
+    : activeTab?.image === true ? 'Image' : langLabel(langFromPath(activeTab?.rel ?? ''))
+  const imageSrc = activeTab !== undefined && activeTab.image ? images[activeTab.fullPath] : undefined
+  const imageFailure = activeTab !== undefined && activeTab.image ? imageError[activeTab.fullPath] : undefined
+
   return (
-    <div className="rvs-pane grow rvs-edge">
-      <div className="rvs-etabs" role="tablist">
-        {tabs.map(tab => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={tab.id === store.activeTabId}
-            className={`rvs-etab${tab.id === store.activeTabId ? ' active' : ''}`}
-            title={tab.kind === 'diff' ? `${tab.rel} (diff)` : tab.fullPath}
-            onClick={() => store.activateTab(tab.id)}
-            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); void closeWithGuard(tab) } }}
-          >
-            <span className="rvs-node-icon" style={{ width: 14, height: 14 }}>
-              {tabIcon(tab)}
-            </span>
-            <span className="rvs-etab-name">
-              {baseName(tab.rel)}
-              {tab.kind === 'diff' && <span style={{ opacity: .6 }}> · diff</span>}
-            </span>
-            {tab.dirty && <span className="rvs-etab-dot" title={t('editor.unsaved')}>●</span>}
-            <span
-              className="rvs-etab-close"
-              role="presentation"
-              title={t('common.close')}
-              onClick={(e) => { e.stopPropagation(); void closeWithGuard(tab) }}
+    <div className="rvs-pane grow rvs-edge" style={fontStyle}>
+      {/* Tab strip: switch / close / dirty dot / diff glyph. Middle-click closes
+          too — the muscle memory shared with VS Code and browsers. */}
+      <div className="rvs-etabs" role="tablist" aria-label={t('editor.tabsLabel')}>
+        {tabs.map(tab => {
+          const active = tab.id === store.activeTabId
+          const tabIsDiff = tab.kind === 'diff'
+          return (
+            <div
+              key={tab.id}
+              role="tab"
+              tabIndex={0}
+              aria-selected={active}
+              className={`rvs-etab${active ? ' active' : ''}${tabIsDiff ? ' rvs-etab-diff' : ''}`}
+              title={tabIsDiff ? `${tab.rel}${t('editor.diffSuffix')}` : tab.fullPath}
+              onClick={() => store.activateTab(tab.id)}
+              onAuxClick={(event) => {
+                if (event.button !== 1) return
+                event.preventDefault()
+                void closeWithGuard(tab)
+              }}
+              onKeyDown={(event) => {
+                // An IME composition owns Enter/Space (the candidate list).
+                if (event.nativeEvent.isComposing) return
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  store.activateTab(tab.id)
+                }
+              }}
             >
-              <IconClose size={11} />
-            </span>
-          </button>
-        ))}
+              <span className="rvs-etab-glyph">{tabIcon(tab)}</span>
+              <span className="rvs-etab-name">
+                {baseName(tab.rel)}
+                {tabIsDiff && <span style={{ opacity: .6 }}> · diff</span>}
+              </span>
+              {tab.dirty && <span className="rvs-etab-dot" title={t('editor.unsaved')} />}
+              <button
+                type="button"
+                className="rvs-etab-close"
+                title={t('common.close')}
+                aria-label={t('common.close')}
+                onClick={(event) => { event.stopPropagation(); void closeWithGuard(tab) }}
+              >
+                <IconClose size={11} />
+              </button>
+            </div>
+          )
+        })}
       </div>
+
       {activeTab !== undefined && (
         <>
+          {/* Info row: breadcrumb in the full-width variant (sibling picker),
+              single path line in the docked one. */}
           <div className="rvs-einfo">
-            <span className="rvs-einfo-path" title={activeTab.fullPath}>{activeTab.fullPath}</span>
-            <span className="rvs-einfo-spacer" />
-            {activeTab.kind === 'file' && (activeTab.markdown || activeTab.html) && (
-              <Segmented<'preview' | 'source'>
-                value={activeTab.preview ? 'preview' : 'source'}
-                onChange={(next) => store.updateTab(activeTab.id, { preview: next === 'preview' })}
-                options={[
-                  { id: 'preview', label: t('editor.preview') },
-                  { id: 'source', label: t('editor.source') },
-                ]}
-              />
-            )}
-            {activeTab.kind === 'diff' && (
-              <span style={{ color: 'var(--rvs-fg3)' }}>
-                {activeTab.staged && activeTab.ref === undefined ? t('scm.stagedReadonly') : ''}
-                {activeTab.ref !== undefined ? `${t('scm.commitDiff')} ${activeTab.ref.slice(0, 7)}` : ''}
-              </span>
-            )}
-            <span style={{ color: 'var(--rvs-fg3)' }}>{langLabel(langFromPath(activeTab.rel))}</span>
-            {/* Connection health sits where the build stamp does: it is the
-                surface the user is looking at while they work. */}
-            <ConnectionStatusChip compact />
-            {/* Build stamp + token count (see tsdown `define.__RVS_BUILD__`).
-                The GUI serves plugin bundles captured when `dsh web` started,
-                so the stamp says WHICH code is running, and the token count
-                says whether the grammar actually produced colored tokens. */}
-            <span className="rvs-build" title={`dsh-remote-vs build ${__RVS_BUILD__}`}>{__RVS_BUILD__}</span>
-            {tokenCount !== undefined && (
-              <span className="rvs-build" title={t('editor.tokenCount')}>tok {tokenCount}</span>
-            )}
-            {activeTab.kind === 'file' && (
-              <>
-                {/* The status chip used to be a four-deep nested ternary in
-                    both the class and the label, while the project's own
-                    review checklist forbids nested ternaries. One lookup per
-                    concern instead. */}
-                <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
-                  {t(tabStatusKey(activeTab))}
+            {center && activeTab.kind === 'file'
+              ? (
+                <Breadcrumb
+                  t={t}
+                  alias={alias}
+                  root={store.root}
+                  rootName={store.workspace?.name ?? ''}
+                  path={displayPath}
+                  onOpen={(fullPath) => { store.openFile(fullPath) }}
+                />
+              )
+              : <span className="rvs-einfo-path" title={displayPath}>{displayPath}</span>}
+            <span className="rvs-einfo-actions">
+              {activeTab.kind === 'file' && (activeTab.markdown || activeTab.html) && (
+                <Segmented<'preview' | 'source'>
+                  value={activeTab.preview ? 'preview' : 'source'}
+                  onChange={(next) => store.updateTab(activeTab.id, { preview: next === 'preview' })}
+                  options={[
+                    { id: 'preview', label: t('editor.preview') },
+                    { id: 'source', label: t('editor.source') },
+                  ]}
+                />
+              )}
+              {activeTab.kind === 'diff' && (
+                <span style={{ color: 'var(--rvs-fg3)' }}>
+                  {activeTab.staged && activeTab.ref === undefined ? t('scm.stagedReadonly') : ''}
+                  {activeTab.ref !== undefined ? `${t('scm.commitDiff')} ${activeTab.ref.slice(0, 7)}` : ''}
                 </span>
-                <IconButton title={t('editor.reloadFile')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline || activeTab.loading}>
-                  <IconRefresh size={13} />
-                </IconButton>
+              )}
+              <span style={{ color: 'var(--rvs-fg3)' }}>{language}</span>
+              {/* Connection health sits where the build stamp does: it is the
+                  surface the user is looking at while they work. */}
+              <ConnectionStatusChip compact />
+              {/* Build stamp + token count (see tsdown `define.__RVS_BUILD__`).
+                  The GUI serves plugin bundles captured when `dsh web` started,
+                  so the stamp says WHICH code is running, and the token count
+                  says whether the grammar actually produced colored tokens. */}
+              <span className="rvs-build" title={`dsh-remote-vs build ${__RVS_BUILD__}`}>{__RVS_BUILD__}</span>
+              {tokenCount !== undefined && (
+                <span className="rvs-build" title={t('editor.tokenCount')}>tok {tokenCount}</span>
+              )}
+              {activeTab.kind === 'file' && (
+                <>
+                  {/* The status chip used to be a four-deep nested ternary in
+                      both the class and the label, while the project's own
+                      review checklist forbids nested ternaries. One lookup per
+                      concern instead. */}
+                  <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
+                    {t(tabStatusKey(activeTab))}
+                  </span>
+                  <IconButton title={t('editor.reloadFile')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline || activeTab.loading}>
+                    <IconRefresh size={13} />
+                  </IconButton>
+                  <IconButton
+                    title={`${t('editor.save')} (Ctrl+S)`}
+                    onClick={() => { void saveActive() }}
+                    disabled={offline || activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
+                  >
+                    <IconSave size={13} />
+                  </IconButton>
+                </>
+              )}
+              {activeTab.kind === 'diff' && (
+                <>
+                  <IconButton title={t('scm.reloadDiff')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline}>
+                    <IconRefresh size={13} />
+                  </IconButton>
+                  {/* A diff is a view of a file, not a place to edit: this opens
+                      the same path as a normal content tab, next to where the
+                      save button lives for file tabs. Commit drills (a historical
+                      blob) are left out — opening TODAY's file from them would
+                      look like editing the commit. */}
+                  {activeTab.ref === undefined && (
+                    <IconButton
+                      title={t('editor.switchToEdit')}
+                      onClick={() => { store.openFile(activeTab.fullPath) }}
+                    >
+                      <IconCode size={13} />
+                    </IconButton>
+                  )}
+                </>
+              )}
+              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && (
                 <IconButton
-                  title={`${t('editor.save')} (Ctrl+S)`}
-                  onClick={() => { void saveActive() }}
-                  disabled={offline || activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
+                  title={t('editor.wrap')}
+                  onClick={() => updateEditorSettings({ wrap: !settings.wrap })}
                 >
-                  <IconSave size={13} />
+                  <IconWrap size={13} />
                 </IconButton>
-              </>
-            )}
-            {activeTab.kind === 'diff' && (
-              <IconButton title={t('scm.reloadDiff')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline}>
-                <IconRefresh size={13} />
+              )}
+              <span className="rvs-einfo-actions-divider" aria-hidden="true" />
+              <IconButton
+                title={t('editor.fontSmaller')}
+                onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, -1) })}
+              >
+                <span className="rvs-font-glyph">A−</span>
               </IconButton>
-            )}
+              <IconButton
+                title={t('editor.fontLarger')}
+                onClick={() => updateEditorSettings({ fontSize: stepFontSize(settings.fontSize, 1) })}
+              >
+                <span className="rvs-font-glyph">A+</span>
+              </IconButton>
+              {/* Same editor, another surface. One instance only: flipping the
+                  store's surface unmounts this mount and the target one takes
+                  the same buffer over (see the file header). */}
+              {variant === 'center'
+                ? (
+                  <IconButton title={t('editor.dockToSidebar')} onClick={() => { store.dockEditorSidebar() }}>
+                    <IconCollapse size={13} />
+                  </IconButton>
+                )
+                : variant === 'sidebar'
+                  ? (
+                    <IconButton title={t('editor.openInCenter')} onClick={() => { store.openEditorInCenter() }}>
+                      <IconExpand size={13} />
+                    </IconButton>
+                  )
+                  : null}
+            </span>
           </div>
-          <div className="rvs-body">
+
+          <div className="rvs-body" ref={bodyRef}>
             {/*
               A REFUSED save: the remote file moved on, so nothing was written.
               This sits above the buffer (not in a toast) because it is a
@@ -747,14 +1038,30 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
             )}
             {!activeTab.loading && activeTab.error === undefined && activeTab.kind === 'file' && (
               <>
-                {activeTab.image && (
-                  <div className="rvs-preview-img">
-                    {images[activeTab.fullPath] !== undefined
-                      ? <img src={images[activeTab.fullPath]} alt={activeTab.rel} draggable={false} onDragStart={(e) => e.preventDefault()} />
-                      : <span className="rvs-empty">{imageError[activeTab.fullPath] ?? t('common.loading')}</span>}
+                {/* A capped read has no decodable payload: the preview component
+                    turns that into a "too large" notice instead of the browser's
+                    broken-image icon, so it is mounted for every image tab. */}
+                {activeTab.image && (imageSrc !== undefined || activeTab.truncated) && (
+                  <ImagePreview
+                    src={imageSrc ?? ''}
+                    path={activeTab.rel}
+                    size={activeTab.remoteSize ?? 0}
+                    {...(activeTab.truncated ? { truncated: true } : {})}
+                    t={t}
+                  />
+                )}
+                {activeTab.image && imageSrc === undefined && !activeTab.truncated && (
+                  <div className="rvs-editor-notice">
+                    <div>{imageFailure ?? t('common.loading')}</div>
                   </div>
                 )}
-                {!activeTab.image && activeTab.binary && <div className="rvs-empty">{t('editor.binary')}</div>}
+                {!activeTab.image && activeTab.binary && (
+                  <div className="rvs-editor-notice">
+                    <div className="rvs-editor-notice-title">{t('editor.binaryTitle')}</div>
+                    <div>{activeTab.rel}</div>
+                    <div>{t('editor.binary')}</div>
+                  </div>
+                )}
                 {!activeTab.image && !activeTab.binary && activeTab.markdown && activeTab.preview && markdownPreview}
                 {!activeTab.image && !activeTab.binary && activeTab.html && activeTab.preview && (
                   <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="allow-same-origin" srcDoc={htmlDoc} />
@@ -782,6 +1089,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       tabId={activeTab.id}
                       readOnly={activeTab.truncated || offline}
                       visible={props.visible}
+                      wrap={settings.wrap}
                       ctx={store.ctx}
                       sessionId={chat.sessionId}
                       remoteRoot={store.repoRoot ?? store.root}
@@ -796,6 +1104,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                         ? {}
                         : { viewState: editorViewStateOf(activeTab.id) })}
                       onTokens={setTokenCount}
+                      onCaretChange={setCaret}
                       onViewState={rememberViewState}
                       onStepHunk={(dir) => { gotoChange(activeTab.id, dir) }}
                       onChangeStale={() => { markChangeStale(activeTab.id) }}
@@ -810,6 +1119,24 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               </>
             )}
           </div>
+
+          {/* Status bar: full-width variant only, matching the reference editor. */}
+          {center && (
+            <StatusBar
+              t={t}
+              diff={isDiff}
+              caret={caret}
+              language={language}
+              indent={indentLabel}
+              wrap={settings.wrap}
+              fontSize={settings.fontSize}
+              readOnly={activeTab.kind === 'file' && (activeTab.binary || activeTab.truncated || offline)}
+              dirty={activeTab.dirty}
+              loading={activeTab.loading}
+              saving={activeTab.saving}
+              error={activeTab.error}
+            />
+          )}
         </>
       )}
     </div>

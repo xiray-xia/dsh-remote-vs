@@ -58,6 +58,30 @@ export interface CodeEditorViewState {
   ranges: { anchor: number; head: number }[]
 }
 
+/** Caret readout for the status bar (1-based, matching what the user sees). */
+export interface CodeEditorCaret {
+  /** 1-based line of the caret (the selection's head). */
+  line: number
+  /** 1-based column of the caret. */
+  column: number
+  /** Number of selected characters (0 = empty selection). */
+  selected: number
+}
+
+/** The caret reading of one editor state (pure; also used by the status bar tests). */
+export function caretOf(state: {
+  doc: { lineAt(offset: number): { number: number; from: number; to: number } }
+  selection: { main: { head: number; from: number; to: number } }
+}): CodeEditorCaret {
+  const main = state.selection.main
+  const line = state.doc.lineAt(main.head)
+  return {
+    line: line.number,
+    column: main.head - line.from + 1,
+    selected: Math.max(0, main.to - main.from),
+  }
+}
+
 export interface CodeEditorHandle {
   getContent: () => string
   isDirty: () => boolean
@@ -104,6 +128,17 @@ const fallbackCompartment = new Compartment()
 const readOnlyCompartment = new Compartment()
 
 /**
+ * Compartment holding the word-wrap flag.
+ *
+ * Same reasoning as the read-only one: the preference is changed from the
+ * editor's own toolbar / status bar while the buffer is mounted, and remounting
+ * to flip it would throw away the undo history and the caret. `undefined` (a
+ * caller that never passed the prop, e.g. a diff pane) keeps the historical
+ * behaviour of wrapping.
+ */
+const wrapCompartment = new Compartment()
+
+/**
  * Compartment holding the session-change marks.
  *
  * 初始为空：只有调用方真的传了 `changeSet` 才把整套扩展（行背景 + gutter）装进
@@ -144,6 +179,21 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   readOnly?: boolean
   /** Parent sub-tab visibility (views stay mounted; remeasure on show). */
   visible?: boolean
+  /**
+   * Soft wrap long lines.
+   *
+   * `undefined` = the historical behaviour (wrap on) for callers that do not
+   * own the preference (diff panes); `false` turns it off.
+   */
+  wrap?: boolean
+  /**
+   * Reports the 1-based caret line/column plus the selected character count.
+   *
+   * The status bar needs it and CodeMirror only exposes selection changes
+   * through an update listener, so the editor reports instead of the parent
+   * polling a ref. Called once with the initial position, then on every move.
+   */
+  onCaretChange?: (caret: CodeEditorCaret) => void
   /** Chat-insert target: absent/disabled hides the selection popup. */
   ctx?: Context
   sessionId?: string | undefined
@@ -540,6 +590,20 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(props.readOnly === true)) })
   }, [props.readOnly])
 
+  /**
+   * Word wrap follows the shared editor preference, live.
+   *
+   * A reconfigure (not a remount) so flipping the toolbar / status-bar toggle
+   * keeps the undo history and the caret exactly where they were.
+   */
+  useEffect(() => {
+    const view = viewRef.current
+    if (view === undefined) return
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(props.wrap === false ? [] : EditorView.lineWrapping),
+    })
+  }, [props.wrap])
+
   // Shown again after being hidden: remeasure layout.
   useEffect(() => {
     if (props.visible === false) return
@@ -639,7 +703,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // Session-change marks, off until a `changeSet` prop arrives (see
       // `changeMarksCompartment`).
       changeMarksCompartment.of([]),
-      EditorView.lineWrapping,
+      wrapCompartment.of(propsRef.current.wrap === false ? [] : EditorView.lineWrapping),
       readOnlyCompartment.of(EditorState.readOnly.of(propsRef.current.readOnly === true)),
       ...langFor(propsRef.current.path),
       EditorView.updateListener.of((update) => {
@@ -730,6 +794,10 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
         // than a new extension, and gated on `findOpenRef` so the widget being
         // closed never costs a render.
         if (findOpenRef.current) setFindTick(tick => tick + 1)
+        // Status-bar readout: reported BEFORE the view-state handoff below,
+        // which returns early for callers that keep no tab state (diff panes).
+        const caretHandler = propsRef.current.onCaretChange
+        if (caretHandler !== undefined) caretHandler(caretOf(update.state))
         const handler = propsRef.current.onViewState
         const tabId = propsRef.current.tabId
         if (handler === undefined || tabId === undefined) return
@@ -777,6 +845,11 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       }
     }
     setView(view)
+    // The status bar starts at the caret's real position instead of line 1/col
+    // 1: a remount restores the selection further down (see the restore block
+    // below), and no selection event fires for a caret that never moved.
+    const initialCaret = propsRef.current.onCaretChange
+    if (initialCaret !== undefined) initialCaret(caretOf(view.state))
     /**
      * Come back to where this file was left.
      *

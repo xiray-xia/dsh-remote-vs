@@ -2,11 +2,11 @@
  * Sidebar surface (better-sidebar tab, or the native right-Sidebar fallback):
  * a VS Code-style activity rail plus one column that shows the active view.
  *
- * The editor itself lives in the conversation view next to 轨迹 whenever that
- * registration succeeds (`editorSurface === 'center'`), so the tree keeps the
- * whole column; on a host where the conversation slot is unavailable the old
- * split (panel above the editor) still applies and nothing becomes
- * unreachable.
+ * The DOCKED editor is the default seat (`editorSurface === 'sidebar'`) and it
+ * is a FULL-COLUMN rail page — one view at a time, like the local sidebar
+ * plugin: opening a file switches the column to the editor, and closing its last
+ * file switches back to the directory. The conversation-view tab next to 轨迹 is
+ * the OPTIONAL full-width seat the editor's own button switches to.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type ReactNode } from 'react';

@@ -1,11 +1,12 @@
 /**
- * The conversation-view tab: the same editor tab strip, previews and diff as
- * the sidebar, mounted next to 对话 / 轨迹 at full width.
+ * The conversation-view tab: the same editor (tab strip, previews, diff, status
+ * bar) mounted next to 对话 / 轨迹 at full width.
  *
- * Registered into the `conversation.view` slot when that slot exists; the
- * sidebar then keeps the whole column for the explorer. Both surfaces read
- * the same module-level store, so a diff opened from source control appears
- * here, and a save here repaints the sidebar's change list.
+ * This is the OPTIONAL seat now: the docked sidebar pane is the default one, so
+ * a file click lands there and this tab shows a "docked in the sidebar"
+ * placeholder until the editor's own surface button moves it here. Both seats
+ * read the same module-level store, so a diff opened from source control
+ * appears here too and a save here repaints the sidebar's change list.
  *
  * While the editor floats (`editorSurface === 'float'`) this tab is NOT the
  * editor's mount any more, so it renders a placeholder instead: mounting a
@@ -51,7 +52,7 @@ export function RemoteEditorView(props: { ctx: Context }): ReactNode {
               </span>
             )}
           </div>
-          {store.editorSurface === 'center' ? <EditorPane visible /> : <FloatingEditorPlaceholder />}
+          {store.editorSurface === 'center' ? <EditorPane visible /> : <FloatingEditorPlaceholder mode={store.floatOpen ? 'float' : 'sidebar'} />}
         </div>
       </div>
     </>

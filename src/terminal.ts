@@ -20,6 +20,17 @@ interface Session {
   pending: number
   /** True while the channel is paused because a socket fell behind. */
   paused: boolean
+  /**
+   * Output text waiting for the next coalesced frame, and its flush timer.
+   *
+   * A burst (a log tail, `cat` of a large file) delivers one ssh2 chunk at a
+   * time; sending each chunk as its own JSON frame made the host stringify, the
+   * socket frame and the browser parse once per chunk. Coalescing into one frame
+   * per short window keeps the byte flow identical while cutting that overhead
+   * by roughly an order of magnitude for exactly the commands that felt busy.
+   */
+  outBuffer: string
+  outTimer: ReturnType<typeof setTimeout> | undefined
   /** Fires once the last socket has been gone for EMPTY_SOCKET_TTL_MS. */
   reap: ReturnType<typeof setTimeout> | undefined
   /**
@@ -62,6 +73,26 @@ const EMPTY_SOCKET_TTL_MS = 10 * 60_000
 const OUT_HIGH_WATER = 4 * 1024 * 1024
 const OUT_LOW_WATER = 1 * 1024 * 1024
 
+/** Default window for coalescing output frames (0 = one frame per chunk). */
+const OUT_COALESCE_MS = 8
+/**
+ * Flush immediately past this much buffered text: a producer faster than the
+ * window must not turn into an unbounded string copy (the channel backpressure
+ * bounds the bytes handed to the SOCKETS, not this buffer).
+ */
+const OUT_COALESCE_BYTES = 64 * 1024
+
+/** Construction options (the terminal gate drives the registry directly). */
+export interface TerminalRegistryOptions {
+  /**
+   * Output coalescing window in ms; `0` sends every chunk as its own frame.
+   *
+   * The existing checks use `0` so their assertions stay synchronous; one
+   * dedicated check drives a non-zero window to pin the coalescing itself.
+   */
+  coalesceMs?: number
+}
+
 /**
  * The largest client frame accepted, in bytes.
  *
@@ -85,7 +116,15 @@ const WS_OPEN = 1
 export class TerminalSessionRegistry {
   private readonly sessions = new Map<string, Session>()
 
-  constructor(private readonly pool: RemotePool) {}
+  constructor(
+    private readonly pool: RemotePool,
+    private readonly options: TerminalRegistryOptions = {},
+  ) {}
+
+  /** The window this registry coalesces within (`0` = every chunk is a frame). */
+  private get coalesceMs(): number {
+    return this.options.coalesceMs ?? OUT_COALESCE_MS
+  }
 
   /** Open a shell and attach the first socket. */
   async open(ws: WebSocket, alias: string, cols: number, rows: number): Promise<string> {
@@ -111,6 +150,8 @@ export class TerminalSessionRegistry {
       sockets: new Set(),
       pending: 0,
       paused: false,
+      outBuffer: '',
+      outTimer: undefined,
       reap: undefined,
       outDecoder: new StringDecoder('utf8'),
       errDecoder: new StringDecoder('utf8'),
@@ -118,11 +159,11 @@ export class TerminalSessionRegistry {
     this.sessions.set(id, session)
     channel.on('data', (chunk: Buffer) => {
       const text = session.outDecoder.write(chunk)
-      if (text !== '') this.broadcast(session, { t: 'out', d: text })
+      if (text !== '') this.queueOut(session, text)
     })
     channel.stderr.on('data', (chunk: Buffer) => {
       const text = session.errDecoder.write(chunk)
-      if (text !== '') this.broadcast(session, { t: 'out', d: text })
+      if (text !== '') this.queueOut(session, text)
     })
     channel.on('close', (code: number | null) => {
       session.alive = false
@@ -130,8 +171,11 @@ export class TerminalSessionRegistry {
       // Flush the decoder-held tail BEFORE the exit frame: a command's last
       // character may still be sitting in the decoder when the channel closes.
       for (const tail of [session.outDecoder.end(), session.errDecoder.end()]) {
-        if (tail !== '') this.broadcast(session, { t: 'out', d: tail })
+        if (tail !== '') this.queueOut(session, tail)
       }
+      // …and flush anything the coalescing window is still holding, so the exit
+      // frame can never overtake the last line the user was meant to see.
+      this.flushOut(session)
       this.broadcast(session, { t: 'exit', code })
       for (const socket of session.sockets) {
         try {
@@ -164,6 +208,9 @@ export class TerminalSessionRegistry {
     const session = this.sessions.get(id)
     if (session === undefined || !session.alive) return false
     this.hookSocket(session, ws)
+    // Deliver anything the coalescing window still holds to the newcomer too,
+    // before its `ready`: it is output the shell already produced.
+    this.flushOut(session)
     this.send(ws, { t: 'ready', id })
     return true
   }
@@ -174,6 +221,7 @@ export class TerminalSessionRegistry {
     if (session === undefined) return false
     this.sessions.delete(id)
     this.cancelReap(session)
+    this.flushOut(session)
     try {
       session.channel.close()
     } catch {
@@ -237,6 +285,9 @@ export class TerminalSessionRegistry {
       }
     })
     const detach = (): void => {
+      // Whatever the window is holding was produced while this socket was still
+      // attached: hand it over before the socket leaves the set.
+      this.flushOut(session)
       session.sockets.delete(ws)
       if (session.sockets.size > 0) return
       // Nobody is watching any more. Release the brake first — a paused channel
@@ -278,6 +329,41 @@ export class TerminalSessionRegistry {
     if (session.reap === undefined) return
     clearTimeout(session.reap)
     session.reap = undefined
+  }
+
+  /**
+   * Queue one output chunk and schedule the coalesced frame.
+   *
+   * `coalesceMs === 0` broadcasts immediately (the checks rely on that
+   * synchrony), which is also the behaviour when a window would send only this
+   * one chunk anyway.
+   */
+  private queueOut(session: Session, text: string): void {
+    if (text === '') return
+    session.outBuffer += text
+    if (session.outBuffer.length >= OUT_COALESCE_BYTES || this.coalesceMs <= 0) {
+      this.flushOut(session)
+      return
+    }
+    if (session.outTimer !== undefined) return
+    const timer = setTimeout(() => {
+      session.outTimer = undefined
+      this.flushOut(session)
+    }, this.coalesceMs)
+    timer.unref?.()
+    session.outTimer = timer
+  }
+
+  /** Send the buffered output as ONE `out` frame (no-op when empty). */
+  private flushOut(session: Session): void {
+    if (session.outTimer !== undefined) {
+      clearTimeout(session.outTimer)
+      session.outTimer = undefined
+    }
+    if (session.outBuffer === '') return
+    const text = session.outBuffer
+    session.outBuffer = ''
+    this.broadcast(session, { t: 'out', d: text })
   }
 
   private setPaused(session: Session, paused: boolean): void {

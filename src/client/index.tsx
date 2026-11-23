@@ -262,6 +262,12 @@ export function apply(ctx: Context): void {
   // surface to 'center' and the sidebar keeps the whole column for browsing.
   // A host without this slot keeps the old sidebar split (nothing disappears).
   //
+  // The DOCKED sidebar pane is the default seat (the surface stays 'sidebar'
+  // here); this tab is the optional full-width seat the user switches to with
+  // the editor's own "open in the conversation view" button. Flipping the
+  // default to 'center' on registration is what made every file click jump away
+  // from the sidebar — exactly the behaviour this port removes.
+  //
   // `conversation.view` is a runtime slot whose TYPE comes from
   // dsh-better-sidebar's declarations — and depending on that package for types
   // dragged its aging @deepseek-ai/dsh-* chain (and a second copy of zod, which
@@ -289,8 +295,9 @@ export function apply(ctx: Context): void {
       console.warn('[dsh-remote-vs] conversation.view registration failed:', error)
       return () => {}
     }
-    setEditorSurface('center')
     return () => {
+      // The slot went away: if the editor was living in it, dock it back rather
+      // than leaving the store pointing at a surface that no longer exists.
       setEditorSurface('sidebar')
       try {
         dispose?.()

@@ -44,6 +44,15 @@
   --rvs-code-bg: #ffffff;
   --rvs-code-fg: #1f1f1f;
   --rvs-code-gutter-fg: #237893;
+  /* Editor chrome (tab strip / file info bar / breadcrumb / status bar) and
+     the editor's own surfaces: Light+ defaults, flipped by the dark block
+     below. The float window inherits them because it carries `.rvs-root`. */
+  --rvs-editor-panel-bg: #f3f3f3;
+  --rvs-editor-panel-fg: #1f1f1f;
+  --rvs-editor-input-bg: #ffffff;
+  --rvs-editor-chrome-border: rgba(0, 0, 0, .12);
+  /* Reserved for the editor's own type scale (the font A−/A+ controls). */
+  --rvs-editor-font-size: 13px;
 
   display: flex;
   flex-direction: row;
@@ -66,6 +75,10 @@ body[data-ds-dark-theme] .rvs-root {
   --rvs-code-gutter-fg: #858585;
   --rvs-add-solid: #16332e;
   --rvs-del-solid: #3b2325;
+  --rvs-editor-panel-bg: #252526;
+  --rvs-editor-panel-fg: #cccccc;
+  --rvs-editor-input-bg: #3c3c3c;
+  --rvs-editor-chrome-border: rgba(255, 255, 255, .12);
 }
 
 .rvs-edge {
@@ -955,16 +968,26 @@ body[data-ds-dark-theme] .rvs-root {
 
 /* ---------------------------------------------------------------- editor */
 
+/**
+ * The editor shell keeps a code editor's proportions (30px tab strip, 26px
+ * file info bar) rather than the surrounding panel's. Everything above the
+ * code surface stays transparent and is separated only by
+ * `--rvs-editor-chrome-border`, so the shell sits on any host background
+ * without drawing a frame of its own. The `.rvs-center` rules further down
+ * scale the same shell up for the full-width (conversation view) mount; the
+ * float window keeps the compact size.
+ */
 .rvs-etabs {
   flex: none;
   display: flex;
   align-items: stretch;
-  gap: 2px;
-  height: 32px;
-  padding: 0 4px;
+  gap: 1px;
+  height: 30px;
+  padding: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  border-bottom: 1px solid var(--rvs-border);
+  background: transparent;
+  border-bottom: 1px solid var(--rvs-editor-chrome-border);
   scrollbar-width: none;
 }
 
@@ -976,27 +999,33 @@ body[data-ds-dark-theme] .rvs-root {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   max-width: 190px;
-  margin: 4px 0;
-  padding: 0 4px 0 8px;
-  border: none;
-  border-radius: 6px;
+  margin: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-right: 1px solid transparent;
+  border-radius: 4px 4px 0 0;
   background: transparent;
   color: var(--rvs-fg3);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
+  white-space: nowrap;
   cursor: pointer;
+  position: relative;
 }
 
 .rvs-etab:hover {
   background: var(--rvs-hover);
-  color: var(--rvs-fg);
+  color: var(--rvs-fg2);
 }
 
+/* The active tab is marked by the insert line under it, not by a filled
+   block: the strip sits directly on the code surface. */
 .rvs-etab.active {
-  background: var(--rvs-layer3);
+  background: var(--rvs-hover);
   color: var(--rvs-fg);
+  box-shadow: inset 0 -2px 0 var(--rvs-accent);
 }
 
 .rvs-etab-name {
@@ -1005,43 +1034,56 @@ body[data-ds-dark-theme] .rvs-root {
   white-space: nowrap;
 }
 
+.rvs-etab-glyph { color: var(--rvs-fg3); font-size: 10px; display: inline-flex; }
+
+.rvs-etab-diff .rvs-etab-glyph { color: var(--rvs-git-c); }
+
+/* Unsaved marker: a solid dot rather than a glyph, so its size does not
+   follow the tab's font size. */
 .rvs-etab-dot {
   flex: none;
-  font-size: 9px;
-  color: var(--rvs-git-m);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rvs-git-m);
 }
 
 .rvs-etab-close {
   flex: none;
-  width: 16px;
-  height: 16px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
+  padding: 0 1px;
+  border: 0;
+  border-radius: 3px;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  opacity: .65;
+  font: inherit;
+  line-height: 1;
+  opacity: .45;
 }
 
 .rvs-etab-close:hover {
-  background: var(--rvs-hover);
   opacity: 1;
+  background: var(--rvs-hover);
 }
 
+/* File info bar: path on the left, actions on the right. The sidebar mount
+   shows the path only (it has no room for a breadcrumb); the conversation
+   mount swaps the path for one and appends its own action group. */
 .rvs-einfo {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 2px 8px 2px 10px;
-  border-bottom: 1px solid var(--rvs-border);
+  gap: 6px;
+  min-width: 0;
+  min-height: 26px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--rvs-editor-chrome-border);
+  background: transparent;
+  color: inherit;
   font-size: 11px;
-  line-height: 18px;
-  color: var(--rvs-fg3);
 }
 
 .rvs-einfo-path {
@@ -1061,6 +1103,30 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-einfo-spacer {
   margin-left: auto;
 }
+
+.rvs-einfo-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.rvs-einfo-actions-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--rvs-editor-chrome-border);
+}
+
+/* Font A−/A+ glyphs: two letters read faster than two more icon shapes. */
+.rvs-font-glyph { font-size: 10.5px; font-weight: 600; letter-spacing: -.06em; }
+
+/* Conversation mount: one size up, and room to breathe. */
+.rvs-center .rvs-etabs { height: 34px; gap: 2px; padding: 0 6px; }
+
+.rvs-center .rvs-etab { font-size: 12.5px; padding: 5px 10px; max-width: 240px; gap: 6px; }
+
+.rvs-center .rvs-einfo { min-height: 32px; padding: 3px 10px; font-size: 12px; }
 
 .rvs-status.dirty { color: var(--rvs-git-m); }
 .rvs-status.saved { color: var(--rvs-git-a); }
@@ -1104,6 +1170,347 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-find-match.current {
   background-color: rgba(226, 183, 20, .48);
+}
+
+/* ------------------------------------------------------------- status bar */
+
+/**
+ * VS Code-style status line: one 22px row of muted facts under the editor.
+ * The surface is the editor panel colour (not the host background), which is
+ * what separates it from the code surface above it in both themes.
+ */
+.rvs-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--rvs-fg2);
+  background: var(--rvs-editor-panel-bg);
+  border-top: 1px solid var(--rvs-editor-chrome-border);
+}
+
+.rvs-status-left,
+.rvs-status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rvs-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--rvs-fg3);
+}
+
+.rvs-status-btn {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.rvs-status-btn:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-status-error { color: var(--rvs-danger); }
+
+/* Conversation mount: the status line belongs to the editor, so it takes the
+   panel's foreground instead of the sidebar's dimmer one. */
+.rvs-center .rvs-statusbar { background: var(--rvs-editor-panel-bg); color: var(--rvs-editor-panel-fg); }
+
+/* -------------------------------------------------------------- breadcrumb */
+
+/**
+ * Breadcrumb over the full-width editor: path segments that open a sibling
+ * picker on click. The navigation row itself is 22px and clips horizontally;
+ * the dropdown is the only part that may overflow.
+ *
+ * The two child classes shared with the SCM repository picker
+ * (`.rvs-crumb-wrap` / `.rvs-crumb`) are scoped to `.rvs-breadcrumb` here, and
+ * the picker's own rules leave this subtree alone: one class, two surfaces,
+ * neither restyled by the other.
+ */
+.rvs-breadcrumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  overflow: hidden;
+}
+
+.rvs-breadcrumb .rvs-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 240px;
+}
+
+.rvs-crumb-sep {
+  color: var(--rvs-fg3);
+  margin: 0 1px;
+  font-size: 10px;
+  flex: 0 0 auto;
+  opacity: .7;
+}
+
+.rvs-breadcrumb .rvs-crumb {
+  border: 0;
+  background: transparent;
+  color: var(--rvs-fg2);
+  font: inherit;
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-breadcrumb .rvs-crumb:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-breadcrumb .rvs-crumb-file {
+  color: var(--rvs-fg);
+  font-weight: 600;
+}
+
+/* Sibling picker, positioned against `.rvs-breadcrumb`. */
+.rvs-crumb-menu {
+  position: absolute;
+  top: 100%;
+  z-index: 30;
+  min-width: 200px;
+  max-width: 360px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--rvs-editor-panel-bg);
+  color: var(--rvs-editor-panel-fg);
+  border: 1px solid var(--rvs-editor-chrome-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+
+.rvs-crumb-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--rvs-editor-chrome-border);
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+.rvs-crumb-menu-up {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rvs-fg2);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.rvs-crumb-menu-up:hover:not(:disabled) { background: var(--rvs-hover); color: var(--rvs-fg); }
+
+.rvs-crumb-menu-up:disabled { opacity: .3; cursor: default; }
+
+.rvs-crumb-menu-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+.rvs-crumb-menu-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0;
+}
+
+.rvs-crumb-menu-note {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+/* The note doubles as the dropdown's error line (see `.rvs-status-error`);
+   the compound selector outranks the note's own muted colour. */
+.rvs-crumb-menu-note.rvs-status-error { color: var(--rvs-danger); }
+
+.rvs-crumb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--rvs-fg);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.rvs-crumb-menu-item:hover { background: var(--rvs-hover); }
+
+.rvs-crumb-menu-item.rvs-dir { color: var(--rvs-fg2); }
+
+.rvs-crumb-menu-glyph { width: 10px; flex: 0 0 auto; color: var(--rvs-fg3); font-size: 10px; }
+
+.rvs-crumb-menu-name { overflow: hidden; text-overflow: ellipsis; }
+
+/* --------------------------------------------------------- image preview */
+
+/**
+ * Binary image preview: `fit` scales the picture to the pane, `actual` keeps
+ * natural pixels inside a scrollable one. The meta line stays out of the
+ * picture's way (bottom, dim).
+ */
+.rvs-image-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  overflow: auto;
+  padding: 12px;
+  cursor: zoom-in;
+  background: var(--rvs-code-bg);
+}
+
+.rvs-image-preview.rvs-image-actual {
+  cursor: zoom-out;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.rvs-image-preview-img {
+  max-width: 100%;
+  max-height: calc(100% - 24px);
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.rvs-image-actual .rvs-image-preview-img {
+  max-width: none;
+  max-height: none;
+}
+
+.rvs-image-preview-meta {
+  display: flex;
+  gap: 10px;
+  flex: none;
+  font-size: 11px;
+  color: var(--rvs-fg3);
+}
+
+.rvs-image-preview-hint { opacity: .75; }
+
+.rvs-image-preview-failed {
+  cursor: default;
+  color: var(--rvs-fg2);
+  text-align: center;
+}
+
+/* -------------------------------------------------- editor notices / empty */
+
+/* Read-only / binary / loading copy inside the editor body. */
+.rvs-editor-notice {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  font-size: 12px;
+  color: var(--rvs-fg3);
+  background: var(--rvs-code-bg);
+  text-align: center;
+}
+
+.rvs-editor-notice-title {
+  color: var(--rvs-fg);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+/* Conversation mount with no open file: say where files come from instead of
+   leaving the pane blank. */
+.rvs-editor-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--rvs-fg3);
+}
+
+.rvs-editor-empty-glyph {
+  font-size: 34px;
+  line-height: 1;
+  opacity: .3;
+}
+
+.rvs-editor-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rvs-fg);
+}
+
+.rvs-editor-empty-hint {
+  font-size: 12px;
+  line-height: 1.7;
+  max-width: 560px;
+}
+
+/* Quieter empty state for the compact panes. */
+.rvs-empty-title {
+  font-size: 13px;
+  color: var(--rvs-fg2);
+}
+
+.rvs-empty-hint {
+  font-size: 11px;
+  color: var(--rvs-fg3);
+  margin-top: 4px;
 }
 
 /* ------------------------------------------------------- preview surfaces */
@@ -2021,7 +2428,18 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   user-select: text;
 }
 
+/**
+ * Find box, aligned with the editor panel it floats over.
+ *
+ * It is PORTALLED to <body>, i.e. OUTSIDE `.rvs-root` where the editor tokens
+ * are declared, so it carries that subset itself (same rule as the other
+ * portalled panels): the dark block right below flips it back.
+ */
 .rvs-find {
+  --rvs-editor-panel-bg: #f3f3f3;
+  --rvs-editor-panel-fg: #1f1f1f;
+  --rvs-editor-input-bg: #ffffff;
+  --rvs-editor-chrome-border: rgba(0, 0, 0, .12);
   position: absolute;
   top: 6px;
   right: 18px;
@@ -2030,22 +2448,28 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   align-items: center;
   gap: 3px;
   padding: 3px 4px 3px 7px;
-  border: 1px solid var(--rvs-border2);
+  border: 1px solid var(--rvs-editor-chrome-border);
   border-radius: 8px;
-  background-color: Canvas;
-  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
-  color: var(--rvs-fg);
+  background: var(--rvs-editor-panel-bg);
+  color: var(--rvs-editor-panel-fg);
   box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
   font-size: 12px;
+}
+
+body[data-ds-dark-theme] .rvs-find {
+  --rvs-editor-panel-bg: #252526;
+  --rvs-editor-panel-fg: #cccccc;
+  --rvs-editor-input-bg: #3c3c3c;
+  --rvs-editor-chrome-border: rgba(255, 255, 255, .12);
 }
 
 .rvs-find-input {
   width: 170px;
   padding: 2px 6px;
-  border: 1px solid var(--rvs-border2);
+  border: 1px solid var(--rvs-editor-chrome-border);
   border-radius: 5px;
-  background: var(--rvs-input);
-  color: var(--rvs-fg);
+  background: var(--rvs-editor-input-bg);
+  color: var(--rvs-editor-panel-fg);
   font: inherit;
   font-size: 12px;
   outline: none;
@@ -2059,7 +2483,7 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   flex: none;
   min-width: 54px;
   text-align: center;
-  color: var(--rvs-fg3);
+  color: var(--rvs-editor-panel-fg);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -3239,6 +3663,12 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   position: absolute;
   right: 3px;
   opacity: 0;
+  /* The shared `.rvs-etab-close` is content-sized for the editor tab strip
+     (where the ✕ sits inside a padded tab). The terminal tab pairs it with an
+     absolutely positioned wrapper, so it keeps the 16x16 box it always had
+     instead of shrinking with the new padding. */
+  width: 16px;
+  height: 16px;
 }
 
 .rvs-term-tabwrap:hover .rvs-etab-close,
@@ -4816,4 +5246,3 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-qo-note.warn {
   color: var(--rvs-git-m);
 }
-

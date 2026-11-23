@@ -632,6 +632,17 @@ export interface ExplorerValue {
   openFloatingEditor: () => void
   /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
   dockFloatingEditor: () => void
+  /**
+   * Show the SAME editor in the conversation-view tab (full width).
+   *
+   * The docked sidebar pane is the default seat; the centre tab is an optional
+   * second seat for the same buffer. Flipping the surface unmounts one mount and
+   * mounts the other, so the live buffer is captured first (see
+   * `captureLiveBuffer`).
+   */
+  openEditorInCenter: () => void
+  /** Dock the editor back into the sidebar (the reverse of `openEditorInCenter`). */
+  dockEditorSidebar: () => void
   openDiff: (rel: string, staged: boolean, untracked?: boolean) => void
   openCommitFile: (hash: string, rel: string, origPath?: string) => void
   activateTab: (id: string) => void
@@ -768,6 +779,8 @@ function build(): ExplorerValue {
     openDiffInFloatEditor,
     openFloatingEditor,
     dockFloatingEditor,
+    openEditorInCenter,
+    dockEditorSidebar,
     openDiff,
     openCommitFile,
     activateTab,
@@ -2002,16 +2015,27 @@ function upsertTab(tab: EditorTab): void {
 let revealRetry: ReturnType<typeof setTimeout> | undefined
 
 /**
- * Bring the editor into view. On the 'center' surface the shell renders only
- * the selected conversation view, so a file opened from the sidebar must also
- * select that tab — otherwise the click looks like a no-op. When the tab
- * cannot be found (another host build, or the shell's markup changed) the user
- * is told where the file opened instead of being left guessing.
+ * Bring the editor into view.
+ *
+ * The docked surface (the default) is a FULL-COLUMN rail page, so opening a file
+ * switches the column to the editor (the tree stays one click away on the rail)
+ * — without this the click looks like a no-op. Closing its last file switches
+ * back to the directory (see `closeTab`).
+ *
+ * On the 'center' surface the shell renders only the selected conversation
+ * view, so a file opened from the sidebar must also select that tab. When the
+ * tab cannot be found (another host build, or the shell's markup changed) the
+ * user is told where the file opened instead of being left guessing.
  */
 function revealEditor(): void {
-  // While the editor floats, the shell tab has no editor to reveal: the file
-  // just went into the floating window (which is already on screen).
-  if (effectiveEditorSurface(state.editorSurface, state.floatOpen) !== 'center') return
+  const surface = effectiveEditorSurface(state.editorSurface, state.floatOpen)
+  // While the editor floats, neither docked surface has an editor to reveal:
+  // the file just went into the floating window (which is already on screen).
+  if (surface === 'float') return
+  if (surface === 'sidebar') {
+    if (state.view !== 'editor') setView('editor')
+    return
+  }
   const label = t('view.editor')
   // A newer open supersedes the pending retry: arming a second one left the
   // timers piling up one per opened file (each doing its own full-document tab
@@ -2267,13 +2291,14 @@ export function openRemoteFileInBinding(
  * Whether the plugin's own rich editor is the place a remote file click should
  * land (the click interceptor's gate, see `remote-file-open.ts`).
  *
- * The centre conversation view is the normal case; while the editor floats it
- * is the floating window instead — the file still belongs in OUR editor, not in
- * the host's native preview. On the sidebar-fallback layout (`sidebar`) the
- * interceptor stays off, exactly as before this feature.
+ * Always true now that the DOCKED sidebar editor is the default surface: the
+ * file belongs in OUR editor instead of the host's native preview, whichever
+ * seat that editor currently occupies (docked pane, centre tab, floating
+ * window). Unknown bindings are still answered by `openRemoteFileInBinding`
+ * returning false, which hands the click back to the native preview.
  */
 export function isEditorTakeoverActive(): boolean {
-  return effectiveEditorSurface(state.editorSurface, state.floatOpen) !== 'sidebar'
+  return true
 }
 
 /** Open (or focus) a working-tree diff of one repository path. */
@@ -2410,6 +2435,16 @@ export function closeTab(id: string): void {
     ? (next[Math.min(index, next.length - 1)]?.id ?? next[next.length - 1]?.id)
     : state.activeTabId
   patch({ tabs: next, activeTabId })
+  // Closing the LAST file returns to the directory: an empty editor page (or a
+  // full-width tab with nothing in it) is where a reader has no next action.
+  // Dirty tabs still go through the pane's confirmation before they get here.
+  if (next.length === 0) {
+    // The centre seat has nowhere to go once its last tab is gone: dock back and
+    // show the directory. On the docked surface the editor IS the rail page, so
+    // that page hands the column back to the explorer.
+    if (state.editorSurface === 'center') setEditorSurface('sidebar')
+    if (state.view === 'editor') setView('explorer')
+  }
 }
 
 export function updateTab(id: string, next: Partial<EditorTab>): void {
@@ -2757,6 +2792,41 @@ export async function reloadTab(id: string): Promise<void> {
 /** Note where the editor pane is mounted (set by the client entry). */
 export function setEditorSurface(surface: 'center' | 'sidebar'): void {
   patch({ editorSurface: surface })
+}
+
+/**
+ * Move the editor into the conversation-view tab (full width).
+ *
+ * The live buffer is captured BEFORE the surface flips: the flip unmounts the
+ * mount that owns it (see `captureLiveBuffer`'s header), and without that
+ * handoff the edits typed since the load would disappear. The host tab is then
+ * selected so the user actually sees where the editor went.
+ */
+export function openEditorInCenter(): void {
+  if (state.editorSurface === 'center') {
+    revealEditor()
+    return
+  }
+  captureLiveBuffer()
+  patch({ editorSurface: 'center' })
+  revealEditor()
+}
+
+/**
+ * Dock the editor back into the sidebar (the reverse of `openEditorInCenter`).
+ *
+ * The docked pane is the default seat and owns the whole sidebar column, so
+ * `revealEditor` switches the rail to the editor page (from whatever view was
+ * showing) and the tree stays one click away.
+ */
+export function dockEditorSidebar(): void {
+  if (state.editorSurface === 'sidebar') {
+    revealEditor()
+    return
+  }
+  captureLiveBuffer()
+  patch({ editorSurface: 'sidebar' })
+  revealEditor()
 }
 
 /**

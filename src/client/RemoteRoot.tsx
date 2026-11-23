@@ -2,11 +2,11 @@
  * Sidebar surface (better-sidebar tab, or the native right-Sidebar fallback):
  * a VS Code-style activity rail plus one column that shows the active view.
  *
- * The editor itself lives in the conversation view next to 轨迹 whenever that
- * registration succeeds (`editorSurface === 'center'`), so the tree keeps the
- * whole column; on a host where the conversation slot is unavailable the old
- * split (panel above the editor) still applies and nothing becomes
- * unreachable.
+ * The DOCKED editor is the default seat (`editorSurface === 'sidebar'`) and it
+ * is a FULL-COLUMN rail page — one view at a time, like the local sidebar
+ * plugin: opening a file switches the column to the editor, and closing its last
+ * file switches back to the directory. The conversation-view tab next to 轨迹 is
+ * the OPTIONAL full-width seat the editor's own button switches to.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
@@ -41,7 +41,6 @@ import {
 
 type RailView = 'explorer' | 'search' | 'scm' | 'history' | 'editor' | 'terminal' | 'ports' | 'monitor' | 'workspaces'
 
-const SPLIT_KEY = 'dsh-remote-vs.split'
 const HIDDEN_KEY = 'dsh-remote-vs.showHidden'
 
 /**
@@ -105,18 +104,6 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
       return false
     }
   })
-  const [split, setSplit] = useState<number>(() => {
-    try {
-      const saved = Number(localStorage.getItem(SPLIT_KEY))
-      return Number.isFinite(saved) && saved > 0.15 && saved < 0.9 ? saved : 0.45
-    } catch {
-      return 0.45
-    }
-  })
-  const splitRef = useRef(split)
-  const [dragging, setDragging] = useState(false)
-  const dragRef = useRef<{ startY: number; startRatio: number } | undefined>(undefined)
-  const columnRef = useRef<HTMLDivElement>(null)
 
   /**
    * Visibility is measured, not promised.
@@ -339,27 +326,6 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     })
   }, [target.sessionId, target.sessionWorkspacePath, store.ready, store.workspaces, store.aliasPaths])
 
-  /**
-   * The mount surface owns the editor, so a persisted `view === 'editor'` is
-   * only reachable where the sidebar still holds the editor.
-   *
-   * `view` is restored from localStorage (where 'editor' is an allowed value)
-   * and `editorSurface` starts as 'sidebar' before index.tsx flips it once the
-   * conversation-view slot registers. A profile that last used the fallback
-   * layout therefore came back with `view === 'editor'` while the rail button
-   * that owns it was gone AND the centre tab mounted a second EditorPane on
-   * the same store tab — two live buffers with independent undo state, the one
-   * state this file declares must never happen.
-   *
-   * Only the CENTRE pixel surface triggers this redirect. While the editor
-   * floats the sidebar keeps whatever view it had: the editor panel renders a
-   * "docked elsewhere" placeholder (see panelFor), and on docking the user
-   * lands back where they were.
-   */
-  useEffect(() => {
-    if (store.editorSurface === 'center' && view === 'editor') go('explorer')
-  }, [store.editorSurface, view, go])
-
   useEffect(() => {
     try {
       localStorage.setItem(HIDDEN_KEY, showHidden ? '1' : '0')
@@ -367,42 +333,6 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
       // Ignore.
     }
   }, [showHidden])
-
-  const onDividerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {
-      // Older engine: the buttons gate below covers it.
-    }
-    dragRef.current = { startY: e.clientY, startRatio: splitRef.current }
-    setDragging(true)
-  }
-  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
-    const drag = dragRef.current
-    if (drag === undefined) return
-    if ((e.buttons & 1) === 0) {
-      dragRef.current = undefined
-      setDragging(false)
-      return
-    }
-    const total = columnRef.current?.clientHeight ?? 0
-    if (total < 200) return
-    const next = Math.min(0.88, Math.max(0.12, drag.startRatio + (e.clientY - drag.startY) / total))
-    splitRef.current = next
-    setSplit(next)
-  }
-  const onDividerEnd = (): void => {
-    if (dragRef.current === undefined) return
-    dragRef.current = undefined
-    setDragging(false)
-    try {
-      localStorage.setItem(SPLIT_KEY, String(splitRef.current))
-    } catch {
-      // Ignore.
-    }
-  }
 
   if (!store.ready) {
     return (
@@ -413,8 +343,6 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
   }
 
   const editorInSidebar = store.editorSurface === 'sidebar'
-  const browsing = view === 'explorer' || view === 'search' || view === 'scm' || view === 'history'
-  const showEditorWithView = editorInSidebar && browsing && store.tabs.length > 0
 
   /**
    * One panel body. Every visited panel stays MOUNTED (hidden by CSS), which
@@ -454,17 +382,17 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           </div>
         )
       case 'editor':
-        // The sidebar editor is the FALLBACK surface, used only when the host
-        // has no `conversation.view` slot to mount the editor in (index.tsx
-        // stays on 'sidebar' then). It must not render while the centre surface
+        // The docked editor is the DEFAULT seat: opening a file switches this
+        // column to this page, so the editor owns the whole sidebar instead of
+        // sharing it with the tree. It must not render while the centre surface
         // or the floating window owns the editor: all of them read the same
         // store, so two live editors for one tab fight over the scroll position
         // and the hidden one — sitting at scrollTop 0 — wins, which is exactly
         // why a tab switch kept snapping back to the top of the file.
         if (editorInSidebar) return <EditorPane visible={panelLive('editor')} />
-        // Floating the editor away from the sidebar: the panel stays reachable
-        // (so docking returns here) but shows where the editor went.
-        return store.floatOpen ? <FloatingEditorPlaceholder /> : null
+        // The editor lives elsewhere: the panel stays reachable (so docking
+        // returns here) but says where it went and how to bring it back.
+        return <FloatingEditorPlaceholder mode={store.floatOpen ? 'float' : 'center'} />
       default:
         return (
           <RemoteExplorer
@@ -476,22 +404,16 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     }
   }
 
-  // Without a conversation-view slot the editor has no center tab, so it keeps
-  // its rail entry (and the split) — the older layout, still fully reachable.
-  const editorInStack = editorInSidebar && !showEditorWithView
-
   const panel = (
     <div className="rvs-pane grow">
       {[...mounted].map(id => (
         <div
           key={id}
           className="rvs-viewslot"
-          // The editor slot stays MOUNTED even while the split renders the
-          // divider copy below: removing it from this list unmounted the
-          // panel, so leaving the split and re-entering it rebuilt the editor
-          // and dropped its local undo/scroll state. Hidden, not removed —
-          // that is also what keeps two live buffers from fighting.
-          style={{ display: view === id && !(showEditorWithView && id === 'editor') ? 'flex' : 'none' }}
+          // Kept MOUNTED and only hidden: removing a panel from this list
+          // unmounted it, so switching rail pages rebuilt the editor and
+          // dropped its local undo/scroll state (and re-listed the tree).
+          style={{ display: view === id ? 'flex' : 'none' }}
         >
           {panelFor(id)}
         </div>
@@ -523,14 +445,15 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         {railButton('scm', t('tab.git'), <IconBranch size={17} />, store.buckets.total)}
         {railButton('history', t('tab.history'), <IconHistory size={17} />)}
         <div className="rvs-rail-sep" />
-        {editorInStack && store.tabs.length > 0
-          && railButton('editor', store.activeTab?.rel.split('/').pop() ?? t('tab.editor'), <IconDiff size={17} />, store.tabs.length)}
+        {/* Always present, like the local sidebar: with no file open it is the
+            empty state, and a click from anywhere lands on the editor again. */}
+        {railButton('editor', store.activeTab?.rel.split('/').pop() ?? t('tab.editor'), <IconDiff size={17} />, store.tabs.length)}
         {railButton('terminal', t('tab.terminal'), <IconTerminal size={17} />)}
         {railButton('ports', t('tab.ports'), <IconPlug size={17} />)}
         {railButton('monitor', t('tab.monitor'), <IconMonitor size={17} />)}
         {railButton('workspaces', t('tab.workspaces'), <IconServer size={17} />, store.workspaces.length)}
       </div>
-      <div className="rvs-column" ref={columnRef}>
+      <div className="rvs-column">
         <div className="rvs-globalbar">
           <select
             className="rvs-select"
@@ -553,37 +476,9 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           {store.gitBusy && <MiniSpinner />}
         </div>
         {store.error !== undefined && <div className="rvs-banner error">{store.error}</div>}
-        {/* The split must not change the TYPE of the element at this position.
-            It used to swap a Fragment for a `div` here, and React reconciles
-            by type — so every flip deleted and remounted the whole subtree,
-            which is the kept-alive panel stack (`panel` below). Consequences
-            were exactly what the keep-alive design exists to prevent: the
-            explorer re-listed over SFTP and lost its expansion, and every
-            xterm was torn down and rebuilt, closing its WebSocket and
-            orphaning a tab whose session id had not arrived yet. Same element,
-            different props, always. */}
-        <div
-          className="rvs-pane"
-          style={showEditorWithView ? { height: `${Math.round(split * 1000) / 10}%`, flex: 'none', minHeight: 0 } : { flex: 1, minHeight: 0 }}
-        >
+        <div className="rvs-pane" style={{ flex: 1, minHeight: 0 }}>
           {panel}
         </div>
-        {showEditorWithView && (
-          <>
-            <div
-              className="rvs-vsplit-handle"
-              data-dragging={dragging ? 'true' : 'false'}
-              onPointerDown={onDividerDown}
-              onPointerMove={onDividerMove}
-              onPointerUp={onDividerEnd}
-              onPointerCancel={onDividerEnd}
-              title={t('editor.resizeHint')}
-            />
-            <div className="rvs-pane grow">
-              <EditorPane visible={live} />
-            </div>
-          </>
-        )}
       </div>
     </div>
   )

@@ -135,3 +135,23 @@ export function langFor(path: string): Extension[] {
       return []
   }
 }
+
+/**
+ * Guess the indentation style from the file body (status-bar hint only).
+ *
+ * Only the first stretch of lines that really starts with whitespace is
+ * inspected: the goal is a quick hint, not a formatter. `undefined` means "no
+ * indented line in the head", and the status bar then omits the item instead of
+ * inventing a default.
+ */
+export function detectIndentLabel(text: string): string | undefined {
+  const lines = text.split('\n', 200)
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    if (line.startsWith('\t')) return 'Tab'
+    const spaces = /^ +/.exec(line)
+    if (spaces === null) continue
+    return `Spaces: ${Math.min(8, spaces[0].length)}`
+  }
+  return undefined
+}

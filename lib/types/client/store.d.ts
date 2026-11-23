@@ -274,6 +274,17 @@ export interface ExplorerValue {
     openFloatingEditor: () => void;
     /** 停靠回主界面（底层的中心视图或侧栏表面）。 */
     dockFloatingEditor: () => void;
+    /**
+     * Show the SAME editor in the conversation-view tab (full width).
+     *
+     * The docked sidebar pane is the default seat; the centre tab is an optional
+     * second seat for the same buffer. Flipping the surface unmounts one mount and
+     * mounts the other, so the live buffer is captured first (see
+     * `captureLiveBuffer`).
+     */
+    openEditorInCenter: () => void;
+    /** Dock the editor back into the sidebar (the reverse of `openEditorInCenter`). */
+    dockEditorSidebar: () => void;
     openDiff: (rel: string, staged: boolean, untracked?: boolean) => void;
     openCommitFile: (hash: string, rel: string, origPath?: string) => void;
     activateTab: (id: string) => void;
@@ -632,10 +643,11 @@ export declare function openRemoteFileInBinding(bindingId: string, remotePath: s
  * Whether the plugin's own rich editor is the place a remote file click should
  * land (the click interceptor's gate, see `remote-file-open.ts`).
  *
- * The centre conversation view is the normal case; while the editor floats it
- * is the floating window instead — the file still belongs in OUR editor, not in
- * the host's native preview. On the sidebar-fallback layout (`sidebar`) the
- * interceptor stays off, exactly as before this feature.
+ * Always true now that the DOCKED sidebar editor is the default surface: the
+ * file belongs in OUR editor instead of the host's native preview, whichever
+ * seat that editor currently occupies (docked pane, centre tab, floating
+ * window). Unknown bindings are still answered by `openRemoteFileInBinding`
+ * returning false, which hands the click back to the native preview.
  */
 export declare function isEditorTakeoverActive(): boolean;
 /** Open (or focus) a working-tree diff of one repository path. */
@@ -696,6 +708,23 @@ export declare function dismissConflict(id: string): void;
 export declare function reloadTab(id: string): Promise<void>;
 /** Note where the editor pane is mounted (set by the client entry). */
 export declare function setEditorSurface(surface: 'center' | 'sidebar'): void;
+/**
+ * Move the editor into the conversation-view tab (full width).
+ *
+ * The live buffer is captured BEFORE the surface flips: the flip unmounts the
+ * mount that owns it (see `captureLiveBuffer`'s header), and without that
+ * handoff the edits typed since the load would disappear. The host tab is then
+ * selected so the user actually sees where the editor went.
+ */
+export declare function openEditorInCenter(): void;
+/**
+ * Dock the editor back into the sidebar (the reverse of `openEditorInCenter`).
+ *
+ * The docked pane is the default seat and owns the whole sidebar column, so
+ * `revealEditor` switches the rail to the editor page (from whatever view was
+ * showing) and the tree stays one click away.
+ */
+export declare function dockEditorSidebar(): void;
 /**
  * Record that the host's frame-wide overlay slot actually rendered the
  * floating window host (see `FloatingEditorWindow`).

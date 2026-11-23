@@ -59,13 +59,24 @@ async function readClipboard(): Promise<string | undefined> {
   }
 }
 
-/** Opaque high-readability palette (opaque: the contrast engine cannot reason about transparency). */
+/**
+ * Opaque high-readability palette (opaque: the contrast engine cannot reason
+ * about transparency).
+ *
+ * The SELECTION colours are explicit per scheme: xterm's defaults are computed
+ * for a dark background, so in the light theme a selected block was white on
+ * white — visible as "selection does nothing" while copy actually worked.
+ * These are the VS Code selection colours (dark `#264f78`, light `#add6ff`),
+ * with a dimmer variant for the unfocused window.
+ */
 function buildTheme(dark: boolean): ITheme {
   return dark
     ? {
         background: '#0e0e13',
         foreground: '#e8e8e8',
         cursor: '#e8e8e8',
+        selectionBackground: '#264f78',
+        selectionInactiveBackground: '#333c48',
         black: '#000000',
         red: '#cd3131',
         green: '#0dbc79',
@@ -87,6 +98,8 @@ function buildTheme(dark: boolean): ITheme {
         background: '#ffffff',
         foreground: '#1a1a1a',
         cursor: '#1a1a1a',
+        selectionBackground: '#add6ff',
+        selectionInactiveBackground: '#d7e7f5',
         black: '#000000',
         red: '#cd3131',
         green: '#00bc67',
@@ -181,8 +194,15 @@ export function XTerm(props: {
       } catch {
         // Not laid out yet.
       }
+      // Only a CHANGED size is news: the observer fires on every pixel of a
+      // window drag, and a resize frame per tick makes the remote shell re-run
+      // SIGWINCH handling (full-screen apps redraw) for nothing.
+      if (term.cols === lastSize.cols && term.rows === lastSize.rows) return
+      lastSize = { cols: term.cols, rows: term.rows }
       send(ws, { t: 'resize', cols: term.cols, rows: term.rows })
     }
+    /** Size last pushed to the PTY (`0` = nothing sent yet, so the first push always goes). */
+    let lastSize = { cols: 0, rows: 0 }
     liveRef.current = {
       refit: () => {
         pushSize()
@@ -221,6 +241,41 @@ export function XTerm(props: {
       if (chunk !== '') send(ws, { t: 'in', d: chunk })
     }
     term.onData(sendInput)
+
+    /**
+     * Output writer: at most ONE `term.write` in flight, and everything that
+     * arrives meanwhile is concatenated into the next one.
+     *
+     * Why: a busy command (`dmesg`, `cat` of a log) delivers a burst of frames.
+     * xterm already time-slices its own parser, so the win is not CPU per byte
+     * but the per-call bookkeeping and the queue churn — and, more importantly,
+     * ordering: the exit/error notices below go through the same queue, so they
+     * can never overtake output that has not been parsed yet. An idle terminal
+     * still writes the first frame immediately (no added typing/echo latency);
+     * only BackPRESSURE-shaped bursts coalesce.
+     */
+    let writeQueue: string[] = []
+    let writeBusy = false
+    const flushWrites = (): void => {
+      if (writeBusy || writeQueue.length === 0) return
+      const chunk = writeQueue.length === 1 ? writeQueue[0] : writeQueue.join('')
+      writeQueue = []
+      writeBusy = true
+      try {
+        term.write(chunk, () => {
+          writeBusy = false
+          flushWrites()
+        })
+      } catch {
+        // Terminal disposed mid-write.
+        writeBusy = false
+      }
+    }
+    const writeOut = (text: string): void => {
+      if (text === '') return
+      writeQueue.push(text)
+      flushWrites()
+    }
     ws.addEventListener('open', () => {
       opened = true
       pushSize()
@@ -242,7 +297,7 @@ export function XTerm(props: {
           send(ws, { t: 'in', d: `${seed}\n` })
         }
       } else if (frame.t === 'out') {
-        term.write(frame.d)
+        writeOut(frame.d)
       } else if (frame.t === 'exit') {
         reportExit(frame.code)
         try {
@@ -251,7 +306,7 @@ export function XTerm(props: {
           // Ignore.
         }
       } else if (frame.t === 'error') {
-        term.write(`\r\n[dsh-remote] ${frame.message}\r\n`)
+        writeOut(`\r\n[dsh-remote] ${frame.message}\r\n`)
         reportExit(null, frame.message)
       }
     })
@@ -330,6 +385,13 @@ export function XTerm(props: {
     }
     host.addEventListener('paste', onPasteEvent, true)
     term.attachCustomKeyEventHandler((e) => {
+      /**
+       * xterm consults this handler for keyup too, so a chord that ACTS here
+       * fires twice for one gesture — Shift+Insert pasted the clipboard twice
+       * (once on keydown, once on keyup), with no native paste event involved.
+       * Only the keydown press is a command.
+       */
+      if (e.type !== 'keydown') return true
       const chord = clipboardChordFor({
         key: e.key,
         ctrl: e.ctrlKey,
