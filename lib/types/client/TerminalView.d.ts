@@ -9,7 +9,7 @@
  */
 import { type ReactNode } from 'react';
 import type { RemoteHostSummary } from '../protocol.ts';
-import type { TerminalRequest } from './store.tsx';
+import { type TerminalRequest } from './store.tsx';
 /** First mount claims the panel, so a single-surface profile renders at once. */
 export declare function claimTerminalOwnerIfNone(id: symbol): void;
 /** Whether `id` is the surface that currently owns the terminal panel. */

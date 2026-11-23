@@ -12,7 +12,7 @@ import type { RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
 import { XTerm } from './XTerm.tsx'
 import { cdCommand } from './shell.ts'
-import type { TerminalRequest } from './store.tsx'
+import { jumpToTerminalPath, type TerminalRequest } from './store.tsx'
 import { optionStyle } from './ui.tsx'
 import {
   IconButton,
@@ -370,6 +370,18 @@ export function TerminalView(props: {
 
   const active = tabs.find(tab => tab.id === activeId) ?? tabs[0]
 
+  /**
+   * Remote home of a tab's host, for `~/path` tokens printed in its terminal.
+   *
+   * The SSH user is the only honest source (the PTY protocol carries no home):
+   * root lives in `/root`, everyone else in `/home/<user>`.
+   */
+  const homeFor = (hostAlias: string): string | undefined => {
+    const host = props.hosts.find(item => item.alias === hostAlias)
+    if (host === undefined) return undefined
+    return host.user === 'root' ? '/root' : `/home/${host.user}`
+  }
+
   const labelFor = (tab: TermTab): string => {
     const siblings = tabs.filter(item => item.alias === tab.alias)
     const index = siblings.findIndex(item => item.id === tab.id) + 1
@@ -481,6 +493,12 @@ export function TerminalView(props: {
                 })}
                 visible={props.visible && tab.id === active?.id}
                 t={t}
+                {...(homeFor(tab.alias) === undefined ? {} : { home: homeFor(tab.alias) })}
+                onPathClick={(token, context) => {
+                  // Ctrl+Click in the terminal: validated against the host, then
+                  // revealed in the tree (see `jumpToTerminalPath`).
+                  void jumpToTerminalPath(tab.alias, token, context)
+                }}
                 {...(tab.initialCommand === undefined ? {} : { initialInput: tab.initialCommand })}
                 onReady={(id) => patchTab(tab.id, { session: id, connected: true, note: undefined })}
                 onExit={(code, message) => {

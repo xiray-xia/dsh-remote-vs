@@ -20,6 +20,7 @@ import type {
   RemoteHostSummary,
   RemoteRoutingStatus,
   RemoteWorkspaceBinding,
+  RemoteFileEntry,
 } from '../protocol.ts'
 import { api, RemoteApiError, configureTimeouts, fileReadTimeoutMs, gitTimeoutMs } from './api.ts'
 import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
@@ -52,6 +53,12 @@ import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDec
 import { revealViewTab } from './reveal.ts'
 import { connectionStateOf, isConnectionFailure } from './connection.ts'
 import { confirmDialog, isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
+import {
+  isWithinRoot,
+  normalizeRemotePath,
+  parentDirectoryOf,
+  resolutionCandidates,
+} from './vsc/terminal-links.ts'
 
 /** One editor tab (code file, preview or diff). */
 export interface EditorTab {
@@ -1188,6 +1195,76 @@ export function revealInExplorer(dir: string): void {
   revealSeq += 1
   patch({ revealRequest: { id: revealSeq, path: dir } })
   setView('explorer')
+}
+
+/** Outcome of one terminal path click (see `jumpToTerminalPath`). */
+export type TerminalPathJump = 'revealed' | 'missing' | 'outside' | 'blocked'
+
+/**
+ * Jump from a path printed in the TERMINAL to that folder in the directory tree
+ * (Ctrl+Click in the terminal; the wiring lives in `XTerm`/`TerminalView`).
+ *
+ * The token is only text, so the absolute path is decided by a short candidate
+ * chain (`vsc/terminal-links.ts`) and then CONFIRMED against the host: the first
+ * candidate that exists wins, and its directory (the path itself for a folder,
+ * its parent for a file) is revealed in the tree. A hit outside every binding on
+ * that host is reported instead of silently jumping somewhere unrelated — the
+ * tree can only show what a binding covers.
+ *
+ * @param alias - host the terminal TAB is connected to (not the panel's host
+ *   picker: a tab can outlive a picker change).
+ * @param token - the path as printed in the terminal.
+ * @param hints - shell cwd (OSC 7) and remote home, for relative/`~` tokens.
+ */
+export async function jumpToTerminalPath(
+  alias: string,
+  token: string,
+  hints: { home?: string; cwd?: string } = {},
+): Promise<TerminalPathJump> {
+  if (alias === '' || token === '') return 'missing'
+  const bindings = state.workspaces.filter(item => item.alias === alias)
+  const roots = bindings
+    .map(item => item.remotePath)
+    .sort((left, right) => right.length - left.length)
+  const candidates = resolutionCandidates(token, {
+    ...(hints.home === undefined ? {} : { home: hints.home }),
+    ...(hints.cwd === undefined ? {} : { cwd: hints.cwd }),
+    roots,
+  })
+  if (candidates.length === 0) {
+    toast(t('term.pathOutside'), true)
+    return 'outside'
+  }
+  for (const candidate of candidates) {
+    let entry: RemoteFileEntry
+    try {
+      // Bounded: a dead link must not leave the click hanging with no answer.
+      entry = await withDeadline(
+        api.fileOp.stat(alias, candidate),
+        clientDeadlineFor(fileReadTimeoutMs()),
+        t('editor.readTimeout'),
+      )
+    } catch {
+      // Not this candidate (or the link hiccuped): try the next one.
+      continue
+    }
+    const dir = entry.isDir ? normalizeRemotePath(candidate) : parentDirectoryOf(candidate)
+    const binding = bindings.find(item => isWithinRoot(dir, item.remotePath))
+    if (binding === undefined) {
+      // The path exists but no workspace covers it: the tree has nowhere to show
+      // it, and moving the panel somewhere unrelated would be a lie.
+      toast(t('term.pathOutside'), true)
+      return 'outside'
+    }
+    if (state.workspaceId !== binding.id && !selectWorkspaceAuto(binding.id)) {
+      toast(t('term.pathBlocked'), true)
+      return 'blocked'
+    }
+    revealInExplorer(dir)
+    return 'revealed'
+  }
+  toast(t('term.pathMissing'), true)
+  return 'missing'
 }
 
 /** Monotonic ticket for "open a terminal here" requests. */

@@ -20,4 +20,21 @@ export declare function XTerm(props: {
     initialInput?: string;
     /** Translator for the right-click menu (copy / paste / select all). */
     t: (key: string) => string;
+    /**
+     * Remote home directory of this tab's host, when known.
+     *
+     * Used to resolve a `~/x` token printed by the shell. The SSH user's home is
+     * the only honest source — the terminal protocol carries no home directory.
+     */
+    home?: string;
+    /**
+     * Ctrl/Cmd + click on a path printed in the terminal.
+     *
+     * Receives the path AS PRINTED plus the hints that make sense of a relative
+     * one: the shell's cwd when it reports it (OSC 7) and the remote home.
+     */
+    onPathClick?: (token: string, context: {
+        cwd?: string;
+        home?: string;
+    }) => void;
 }): ReactNode;

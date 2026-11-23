@@ -5,7 +5,7 @@
  */
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, type ReactNode } from 'react'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ILink, type ILinkProvider } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { TerminalClientFrame, TerminalServerFrame } from '../protocol.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
@@ -17,6 +17,7 @@ import {
   terminalMenuState,
 } from './vsc/terminal-clipboard.ts'
 import { terminalTheme } from './vsc/terminal-theme.ts'
+import { findTerminalPathTokens } from './vsc/terminal-links.ts'
 
 /**
  * Send one frame; `false` means it was NOT handed to the socket.
@@ -84,6 +85,20 @@ export function XTerm(props: {
   initialInput?: string
   /** Translator for the right-click menu (copy / paste / select all). */
   t: (key: string) => string
+  /**
+   * Remote home directory of this tab's host, when known.
+   *
+   * Used to resolve a `~/x` token printed by the shell. The SSH user's home is
+   * the only honest source — the terminal protocol carries no home directory.
+   */
+  home?: string
+  /**
+   * Ctrl/Cmd + click on a path printed in the terminal.
+   *
+   * Receives the path AS PRINTED plus the hints that make sense of a relative
+   * one: the shell's cwd when it reports it (OSC 7) and the remote home.
+   */
+  onPathClick?: (token: string, context: { cwd?: string; home?: string }) => void
 }): ReactNode {
   const hostRef = useRef<HTMLDivElement>(null)
   const propsRef = useRef(props)
@@ -125,6 +140,76 @@ export function XTerm(props: {
     term.loadAddon(fit)
     term.open(host)
     fit.fit()
+
+    /**
+     * The shell's working directory, when it reports it.
+     *
+     * OSC 7 (`ESC ] 7 ; file://host/path BEL`) is the standard, prompt-hook-driven
+     * way shells announce `pwd`; bash/zsh print it when their profile enables it.
+     * It is the only trustworthy anchor for a RELATIVE path printed by a command:
+     * without it the click falls back to the workspace roots (see
+     * `jumpToTerminalPath`). Silent when absent — nothing to report.
+     */
+    let cwd: string | undefined
+    const osc7 = term.parser.registerOscHandler(7, (data) => {
+      const match = /^file:\/\/[^/]*(\/.*)$/.exec(data)
+      if (match?.[1] !== undefined && match[1] !== '') {
+        try {
+          cwd = decodeURIComponent(match[1])
+        } catch {
+          // A malformed escape is not worth failing over; keep the raw bytes.
+          cwd = match[1]
+        }
+      }
+      return true
+    })
+
+    /**
+     * Ctrl/Cmd + click on a path printed in the terminal jumps to that folder in
+     * the directory tree (`jumpToTerminalPath` validates against the host first).
+     *
+     * Only paths the tokenizer accepts become links, and the modifier is checked
+     * in `activate`: plain clicks keep their normal text-selection behaviour.
+     */
+    const linkProvider: ILinkProvider = {
+      provideLinks: (lineNumber, callback) => {
+        if (propsRef.current.onPathClick === undefined) {
+          callback(undefined)
+          return
+        }
+        const line = term.buffer.active.getLine(lineNumber - 1)
+        if (line === undefined) {
+          callback(undefined)
+          return
+        }
+        // `trimRight` keeps the columns aligned with the buffer (a wrapped line's
+        // trailing blanks must not shift the token indexes).
+        const text = line.translateToString(true)
+        const tokens = findTerminalPathTokens(text)
+        if (tokens.length === 0) {
+          callback(undefined)
+          return
+        }
+        const links: ILink[] = tokens.map(token => ({
+          range: {
+            start: { x: token.start + 1, y: lineNumber },
+            end: { x: token.end + 1, y: lineNumber },
+          },
+          text: token.path,
+          activate: (event: MouseEvent, linkText: string) => {
+            // Ctrl (or Cmd on a Mac): a plain click stays a plain click, so
+            // selecting text near a path is not hijacked.
+            if (!event.ctrlKey && !event.metaKey) return
+            propsRef.current.onPathClick?.(linkText, {
+              ...(cwd === undefined ? {} : { cwd }),
+              ...(propsRef.current.home === undefined ? {} : { home: propsRef.current.home }),
+            })
+          },
+        }))
+        callback(links)
+      },
+    }
+    const linkRegistration = term.registerLinkProvider(linkProvider)
 
     const ws = new WebSocket(propsRef.current.wsUrl)
     let opened = false
@@ -420,6 +505,8 @@ export function XTerm(props: {
     return () => {
       liveRef.current = undefined
       unflip()
+      linkRegistration.dispose()
+      osc7.dispose()
       window.clearTimeout(timer)
       window.removeEventListener('resize', onWindowResize)
       host.removeEventListener('paste', onPasteEvent, true)

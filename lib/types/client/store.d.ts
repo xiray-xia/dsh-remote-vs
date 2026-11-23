@@ -370,6 +370,28 @@ export declare function requestSearch(request: {
  * @param dir - absolute remote DIRECTORY (a file's parent for a file hit).
  */
 export declare function revealInExplorer(dir: string): void;
+/** Outcome of one terminal path click (see `jumpToTerminalPath`). */
+export type TerminalPathJump = 'revealed' | 'missing' | 'outside' | 'blocked';
+/**
+ * Jump from a path printed in the TERMINAL to that folder in the directory tree
+ * (Ctrl+Click in the terminal; the wiring lives in `XTerm`/`TerminalView`).
+ *
+ * The token is only text, so the absolute path is decided by a short candidate
+ * chain (`vsc/terminal-links.ts`) and then CONFIRMED against the host: the first
+ * candidate that exists wins, and its directory (the path itself for a folder,
+ * its parent for a file) is revealed in the tree. A hit outside every binding on
+ * that host is reported instead of silently jumping somewhere unrelated — the
+ * tree can only show what a binding covers.
+ *
+ * @param alias - host the terminal TAB is connected to (not the panel's host
+ *   picker: a tab can outlive a picker change).
+ * @param token - the path as printed in the terminal.
+ * @param hints - shell cwd (OSC 7) and remote home, for relative/`~` tokens.
+ */
+export declare function jumpToTerminalPath(alias: string, token: string, hints?: {
+    home?: string;
+    cwd?: string;
+}): Promise<TerminalPathJump>;
 /**
  * Open a fresh terminal tab whose shell lands in `dir` — on the CURRENT
  * workspace's host.
