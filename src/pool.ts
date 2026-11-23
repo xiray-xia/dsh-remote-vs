@@ -245,6 +245,24 @@ interface Slots {
 
 export class RemotePool {
   private readonly conns = new Map<string, Pooled>()
+  /**
+   * Dedicated connections for PTY shells (one per alias).
+   *
+   * Why a SECOND connection instead of a channel on the shared one: ssh2
+   * multiplexes channels over ONE TCP connection, and SSH has no per-channel
+   * priority or flow control. A large SFTP transfer / git output on that
+   * connection therefore delays everything else on it — including the echo of a
+   * keystroke — which is exactly the "typing stutters when something else is
+   * moving data" report. A terminal gets its own connection, so its bytes never
+   * queue behind browse/exec traffic, and shells stop consuming the shared
+   * connection's channel budget as well.
+   *
+   * Cost: one extra SSH handshake per alias the first time a terminal opens,
+   * plus one held TCP connection per host with a terminal. `shell()` falls back
+   * to the shared connection if this one cannot be established at all, so a host
+   * that refuses extra connections still gets a working terminal.
+   */
+  private readonly shellConns = new Map<string, Pooled>()
   /** TOFU fingerprints observed this process (alias -> sha256). */
   private readonly hostKeys = new Map<string, string>()
   /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
@@ -263,23 +281,19 @@ export class RemotePool {
     // Order matters: the open browse channel must give its slot and hold back
     // while the pooled entry still exists, or the release would be a no-op.
     this.evictBrowse(alias)
-    const pooled = this.conns.get(alias)
     // The host entry can change under an alias, so the capability answer goes
     // with the connection; the next exec probes again.
     this.setsidProbes.delete(alias)
-    if (pooled === undefined) return
-    this.conns.delete(alias)
-    if (pooled.timer !== undefined) clearTimeout(pooled.timer)
-    try {
-      pooled.conn.end()
-    } catch {
-      // Already gone.
-    }
+    // Both connections belong to the host: an edit/removal must end both.
+    // (A transient error on ONE of them uses `evictFrom` for that map only, so
+    // a shared-connection blip does not take live terminals down with it.)
+    this.evictFrom(this.conns, alias)
+    this.evictFrom(this.shellConns, alias)
   }
 
   /** Close every pooled connection. */
   dispose(): void {
-    for (const alias of [...this.conns.keys()]) this.drop(alias)
+    for (const alias of new Set([...this.conns.keys(), ...this.shellConns.keys()])) this.drop(alias)
   }
 
   /**
@@ -316,7 +330,8 @@ export class RemotePool {
         state: entry?.state ?? 'idle',
         // connecting means a DIAL is in flight (the pooled entry exists before
         // the Client does), so that is not an open connection yet.
-        open: pooled !== undefined && pooled.connecting === undefined,
+        open: (pooled !== undefined && pooled.connecting === undefined)
+          || (this.shellConns.get(alias)?.connecting === undefined && this.shellConns.has(alias)),
         ...(entry?.okAt === undefined ? {} : { okAt: entry.okAt }),
         ...(entry?.errorAt === undefined ? {} : { errorAt: entry.errorAt }),
         ...(entry?.error === undefined ? {} : { error: entry.error }),
@@ -646,8 +661,29 @@ export class RemotePool {
 
   /** Open an interactive PTY shell. The caller owns the channel lifecycle. */
   async shell(alias: string, opts: ShellOptions = {}): Promise<ClientChannel> {
-    const conn = await this.acquire(alias)
-    this.hold(alias)
+    /**
+     * Prefer the DEDICATED PTY connection so terminal bytes never queue behind
+     * SFTP/git/exec traffic on the shared one (SSH has no channel priority).
+     * A host that refuses the extra connection still gets a terminal: the fallback
+     * is the shared connection, exactly the old behaviour.
+     */
+    let conn: Client
+    let dedicated = true
+    try {
+      conn = await this.acquireShell(alias)
+      this.holdIn(this.shellConns, alias)
+    } catch (error) {
+      dedicated = false
+      // The shared path reports its own failures; a dedicated-dial failure that
+      // the shared one survives is not the link's problem (e.g. a MaxStartups
+      // refusal of just this connection).
+      conn = await this.acquire(alias)
+      this.hold(alias)
+      if (!(error instanceof Error) || !isConnectionFailure(error)) {
+        // eslint-disable-next-line no-console
+        console.warn('[dsh-remote-vs] dedicated PTY connection failed; using the shared one:', error)
+      }
+    }
     try {
       const channel = await new Promise<ClientChannel>((resolve, reject) => {
         conn.shell({ cols: opts.cols ?? 80, rows: opts.rows ?? 24, term: 'xterm-256color' }, (error, stream) => {
@@ -655,11 +691,15 @@ export class RemotePool {
           else resolve(stream)
         })
       })
-      channel.once('close', () => this.release(alias))
+      channel.once('close', () => {
+        if (dedicated) this.releaseIn(this.shellConns, alias)
+        else this.release(alias)
+      })
       this.markOk(alias)
       return channel
     } catch (error) {
-      this.release(alias)
+      if (dedicated) this.releaseIn(this.shellConns, alias)
+      else this.release(alias)
       if (isConnectionFailure(error)) this.markError(alias, error)
       throw error
     }
@@ -1299,7 +1339,11 @@ export class RemotePool {
 
   /** Hold the connection against idle eviction (balanced by release). */
   private hold(alias: string): void {
-    const pooled = this.conns.get(alias)
+    this.holdIn(this.conns, alias)
+  }
+
+  private holdIn(map: Map<string, Pooled>, alias: string): void {
+    const pooled = map.get(alias)
     if (pooled === undefined) return
     pooled.held += 1
     pooled.lastUse = Date.now()
@@ -1310,25 +1354,40 @@ export class RemotePool {
   }
 
   private release(alias: string): void {
-    const pooled = this.conns.get(alias)
+    this.releaseIn(this.conns, alias)
+  }
+
+  private releaseIn(map: Map<string, Pooled>, alias: string): void {
+    const pooled = map.get(alias)
     if (pooled === undefined) return
     if (pooled.held > 0) pooled.held -= 1
     pooled.lastUse = Date.now()
     if (pooled.held > 0) return
     if (pooled.timer !== undefined) clearTimeout(pooled.timer)
-    pooled.timer = setTimeout(() => this.drop(alias), IDLE_MS)
+    // Evict ONLY this map: the idle timer of the shell connection must not close
+    // the shared connection (and vice versa) — they serve different consumers.
+    pooled.timer = setTimeout(() => this.evictFrom(map, alias), IDLE_MS)
     if (typeof pooled.timer === 'object' && 'unref' in pooled.timer) pooled.timer.unref()
   }
 
   private async acquire(alias: string): Promise<Client> {
-    const pooled = this.conns.get(alias)
+    return this.acquireIn(this.conns, alias)
+  }
+
+  /** `acquire` for the dedicated PTY connection map. */
+  private async acquireShell(alias: string): Promise<Client> {
+    return this.acquireIn(this.shellConns, alias)
+  }
+
+  private async acquireIn(map: Map<string, Pooled>, alias: string): Promise<Client> {
+    const pooled = map.get(alias)
     if (pooled !== undefined && pooled.connecting !== undefined) return pooled.connecting
     if (pooled !== undefined) {
       pooled.lastUse = Date.now()
       return pooled.conn
     }
     const entry: Pooled = { conn: undefined as unknown as Client, timer: undefined, lastUse: Date.now(), connecting: undefined, held: 0 }
-    this.conns.set(alias, entry)
+    map.set(alias, entry)
     /**
      * The entry object IS the ownership token: `drop()` deletes it and a later
      * `acquire()` creates a NEW one, so comparing identity answers "does this
@@ -1342,7 +1401,7 @@ export class RemotePool {
      */
     entry.connecting = this.dial(alias).then(
       (conn) => {
-        if (this.conns.get(alias) !== entry) {
+        if (map.get(alias) !== entry) {
           try {
             conn.end()
           } catch {
@@ -1357,25 +1416,38 @@ export class RemotePool {
           // The server went away: record it for the status chip, then evict so
           // the next op redials. Our OWN drop() deleted the entry first, so a
           // normal close (idle eviction, host removal) never lands here.
-          if (this.conns.get(alias) !== entry) return
+          if (map.get(alias) !== entry) return
           this.markError(alias, new Error('connection closed'))
-          this.drop(alias)
+          this.evictFrom(map, alias)
         })
         conn.on('error', (error: Error) => {
-          if (this.conns.get(alias) !== entry) return
+          if (map.get(alias) !== entry) return
           this.markError(alias, error)
-          this.drop(alias)
+          this.evictFrom(map, alias)
         })
-        this.release(alias)
+        this.releaseIn(map, alias)
         return conn
       },
       (error) => {
-        if (this.conns.get(alias) === entry) this.conns.delete(alias)
+        if (map.get(alias) === entry) map.delete(alias)
         this.markError(alias, error)
         throw error
       },
     )
     return entry.connecting
+  }
+
+  /** Evict ONE alias from ONE map (host removal drops both maps explicitly). */
+  private evictFrom(map: Map<string, Pooled>, alias: string): void {
+    const pooled = map.get(alias)
+    if (pooled === undefined) return
+    map.delete(alias)
+    if (pooled.timer !== undefined) clearTimeout(pooled.timer)
+    try {
+      pooled.conn.end()
+    } catch {
+      // Already gone.
+    }
   }
 
   /**
