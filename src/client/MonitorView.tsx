@@ -30,6 +30,7 @@ import {
 import { useExplorer } from './store.tsx'
 import { optionStyle } from './ui.tsx'
 import { IconButton, IconRefresh, MiniSpinner, Segmented } from './vsc/kit.tsx'
+import { ProcessesSection } from './ProcessesSection.tsx'
 
 /** Visible-panel poll cadence. The Host's own reuse window is shorter (3 s). */
 export const MONITOR_POLL_MS = 5_000
@@ -631,6 +632,13 @@ export function MonitorView(props: {
         {single !== undefined && renderDetail(single)}
         {single === undefined && aliases.length > 1 && renderAll(aliases)}
       </div>
+      <ProcessesSection
+        t={t}
+        hosts={props.hosts}
+        aliases={aliases}
+        visible={props.visible}
+        paused={paused}
+      />
     </div>
   )
 }

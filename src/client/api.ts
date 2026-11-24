@@ -21,6 +21,8 @@ import {
   type RemoteHostSummary,
   type RemoteListenPortsResult,
   type RemoteMetricsResult,
+  type RemoteProcessKillResult,
+  type RemoteProcessesResult,
   type RemotePluginMeta,
   type RemoteProbe,
   type RemoteRead,
@@ -712,6 +714,12 @@ export const api = {
    */
   listenPorts: (alias: string) =>
     call<RemoteListenPortsResult>(`${REMOTE_API.listenPorts}?alias=${encodeURIComponent(alias)}`),
+  /** One bounded remote process table (per-host cache on the Host side). */
+  processes: (alias: string, refresh = false) =>
+    call<RemoteProcessesResult>(`${REMOTE_API.processes}?alias=${encodeURIComponent(alias)}${refresh ? '&refresh=1' : ''}`),
+  /** Signal one PID from the latest snapshot; the route rejects unknown PIDs. */
+  killProcess: (alias: string, pid: number, signal: 'TERM' | 'KILL') =>
+    post<RemoteProcessKillResult>(REMOTE_API.processes, { alias, pid, signal }),
   /**
    * One host's live metrics sample.
    *

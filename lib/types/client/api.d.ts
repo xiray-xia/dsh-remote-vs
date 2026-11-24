@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteViewSettings, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemoteProcessKillResult, type RemoteProcessesResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteViewSettings, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     /**
@@ -295,6 +295,10 @@ export declare const api: {
      * found" (see `RemoteListenPortsResult`).
      */
     listenPorts: (alias: string) => Promise<RemoteListenPortsResult>;
+    /** One bounded remote process table (per-host cache on the Host side). */
+    processes: (alias: string, refresh?: boolean) => Promise<RemoteProcessesResult>;
+    /** Signal one PID from the latest snapshot; the route rejects unknown PIDs. */
+    killProcess: (alias: string, pid: number, signal: "TERM" | "KILL") => Promise<RemoteProcessKillResult>;
     /**
      * One host's live metrics sample.
      *

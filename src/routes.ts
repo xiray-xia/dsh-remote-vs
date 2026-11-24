@@ -18,6 +18,7 @@ import {
   selectionDownloadName,
   type ExecStreamEvent,
   type ImportReport,
+  type RemoteProcessesResult,
   type RemoteHostMetrics,
   type RemoteTimeouts,
 } from './protocol.ts'
@@ -33,6 +34,7 @@ import { TERMINAL_MAX_FRAME_BYTES, TerminalSessionRegistry } from './terminal.ts
 import { ForwardManager, validateForwardRequest } from './forward.ts'
 import { LISTEN_PORTS_TIMEOUT_MS, listenPortsCommand, parseListenPorts } from './listen-ports.ts'
 import { HostMonitor } from './monitor.ts'
+import { PROCESSES_TIMEOUT_MS, assertProcessPid, isKillSignal, killCommand, parseProcesses, processesCommand } from './processes.ts'
 import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 import { RemoteViewSettingsStore } from './view-settings.ts'
@@ -299,6 +301,33 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
   // costs one extra sample, so it is safe to construct here instead of owning a
   // fiber-scoped effect like the forward manager.
   const monitor = new HostMonitor(pool)
+  /**
+   * Last process snapshot per alias. The kill route validates against this
+   * table, so a browser cannot construct a `kill` for an arbitrary PID; a stale
+   * entry is refreshed before validation rather than trusted indefinitely.
+   */
+  const processSnapshots = new Map<string, { at: number; result: RemoteProcessesResult }>()
+  const readProcesses = async (alias: string, maxAgeMs: number): Promise<RemoteProcessesResult> => {
+    const cached = processSnapshots.get(alias)
+    if (cached !== undefined && Date.now() - cached.at <= maxAgeMs) return cached.result
+    const result = await pool.exec(alias, processesCommand(), { timeoutMs: PROCESSES_TIMEOUT_MS })
+    let parsed: RemoteProcessesResult
+    if (result.error !== undefined) {
+      parsed = { tool: 'unknown', processes: [], truncated: false, error: result.error }
+    } else if (result.timedOut) {
+      parsed = { tool: 'unknown', processes: [], truncated: false, error: `the process probe did not finish within ${PROCESSES_TIMEOUT_MS / 1000}s` }
+    } else if (result.exitCode === null) {
+      parsed = { tool: 'unknown', processes: [], truncated: false, error: 'the process probe ended without an exit status' }
+    } else {
+      parsed = parseProcesses(result.stdout, result.exitCode)
+    }
+    if (parsed.tool === 'gnu' || parsed.tool === 'bsd') {
+      processSnapshots.set(alias, { at: Date.now(), result: parsed })
+    } else {
+      processSnapshots.delete(alias)
+    }
+    return parsed
+  }
   const forwards = deps.forwards
   const viewSettings = deps.viewSettings ?? new RemoteViewSettingsStore()
 
@@ -1627,6 +1656,71 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
         } catch (error) {
           // A corrupt store during `alias` lookup is a 503 with the path, not a
           // 502 "remote host failed".
+          if (isStoreError(error)) writeStoreError(res, error)
+          else writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    // -------------------------------------------------- remote processes
+    {
+      kind: 'exact',
+      path: REMOTE_API.processes,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        const method = req.method ?? 'GET'
+        if (method !== 'GET' && method !== 'POST') {
+          writeJson(res, 405, { error: `method not allowed: ${method}` })
+          return
+        }
+        try {
+          if (method === 'GET') {
+            const url = new URL(req.url ?? '/', 'http://localhost')
+            const alias = queryParam(url, 'alias')
+            if (alias === undefined || alias === '') {
+              writeJson(res, 400, { error: 'alias query parameter is required' })
+              return
+            }
+            writeJson(res, 200, await readProcesses(alias, queryParam(url, 'refresh') === '1' ? 0 : 3_000))
+            return
+          }
+          const read = await readBodyOrError<{ alias?: unknown; pid?: unknown; signal?: unknown }>(req, res, { objectOnly: true })
+          if (!read.ok) return
+          const body = read.body ?? {}
+          const alias = typeof body.alias === 'string' ? body.alias : ''
+          if (alias === '') {
+            writeJson(res, 400, { error: 'alias is required' })
+            return
+          }
+          let pid: number
+          try {
+            pid = assertProcessPid(body.pid)
+          } catch (error) {
+            writeJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+            return
+          }
+          if (!isKillSignal(body.signal)) {
+            writeJson(res, 400, { error: 'signal must be TERM or KILL' })
+            return
+          }
+          // The snapshot is the authorization list: a PID that is not in the
+          // current remote table cannot be signalled, even if it is numeric.
+          const snapshot = await readProcesses(alias, 0)
+          const target = snapshot.processes.find(process => process.pid === pid)
+          if (target === undefined) {
+            writeJson(res, 400, { error: `process ${pid} is not in the current remote snapshot` })
+            return
+          }
+          const result = await pool.exec(alias, killCommand(pid, body.signal), { timeoutMs: 10_000 })
+          if (result.error !== undefined || result.exitCode !== 0) {
+            const message = result.error ?? result.stderr.trim() ?? ''
+            writeJson(res, 502, { error: message === '' ? `kill failed [exit code: ${result.exitCode ?? '?'}]` : message })
+            return
+          }
+          writeJson(res, 200, { ok: true, pid, signal: body.signal })
+        } catch (error) {
           if (isStoreError(error)) writeStoreError(res, error)
           else writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
         }

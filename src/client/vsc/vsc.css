@@ -5905,6 +5905,141 @@ body[data-ds-dark-theme] .rvs-doctor {
   font-weight: 600;
 }
 
+/* === remote process section (monitor page) ================================ */
+
+.rvs-proc {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--rvs-editor-chrome-border, var(--rvs-border));
+  background: var(--rvs-bg-soft, transparent);
+}
+
+.rvs-proc-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  min-height: 26px;
+}
+
+.rvs-proc-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rvs-fg2);
+  cursor: pointer;
+}
+
+.rvs-proc-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.rvs-proc-host,
+.rvs-proc-sort {
+  max-width: 110px;
+  height: 20px;
+  font-size: 10px;
+}
+
+.rvs-proc-host-label {
+  color: var(--rvs-fg3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.rvs-proc-filter {
+  flex: 1 1 auto;
+  min-width: 40px;
+  height: 20px;
+  font-size: 10px;
+}
+
+.rvs-proc-banner {
+  margin: 0 8px 4px;
+}
+
+.rvs-proc-collapsed {
+  padding: 0 8px 5px;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+}
+
+.rvs-proc-table {
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--rvs-mono), monospace;
+  font-size: 10px;
+}
+
+.rvs-proc-row {
+  display: grid;
+  grid-template-columns: 52px 56px 42px 42px 52px minmax(80px, 1fr) 44px;
+  gap: 4px;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 8px;
+  border-bottom: 1px solid var(--rvs-border-subtle, transparent);
+}
+
+.rvs-proc-row:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-proc-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--rvs-fg3);
+  background: var(--rvs-bg-soft, var(--rvs-bg));
+}
+
+.rvs-proc-pid,
+.rvs-proc-user,
+.rvs-proc-elapsed,
+.rvs-proc-num {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-proc-num {
+  text-align: right;
+}
+
+.rvs-proc-command {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-proc-kill {
+  height: 17px;
+  padding: 0 4px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+}
+
+.rvs-proc-kill:hover:not(:disabled) {
+  border-color: var(--rvs-danger-text);
+  color: var(--rvs-danger-text);
+}
+
+.rvs-proc-kill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ------------------------------------------------------ Ctrl+P quick open */
 
 .rvs-qo-mask {

@@ -42,6 +42,8 @@ export const REMOTE_API = {
   listenPorts: '/api/dsh-remote/listen-ports',
   /** Live system metrics for the monitor panel (one bounded probe per host). */
   metrics: '/api/dsh-remote/metrics',
+  /** One bounded process table for the monitor page, plus TERM/KILL actions. */
+  processes: '/api/dsh-remote/processes',
 } as const
 
 /**
@@ -713,6 +715,41 @@ export interface RemoteListenPortsResult {
   tool: 'ss' | 'netstat' | 'none' | 'unknown'
   ports: RemoteListenPort[]
   /** Why the probe could not be used, when it could not. */
+  error?: string
+}
+
+/** One row of the remote process table. */
+export interface RemoteProcess {
+  pid: number
+  /** Parent PID; 0 on a BSD `ps aux` table that does not print it. */
+  ppid: number
+  user: string
+  cpuPercent: number
+  memPercent: number
+  /** Elapsed seconds when the probe can provide them; null on BSD `ps aux`. */
+  elapsedSeconds: number | null
+  command: string
+}
+
+/**
+ * The remote process probe's answer.
+ *
+ * `tool: 'none' | 'unknown'` means "cannot enumerate", never "no processes";
+ * the monitor page must explain that instead of rendering an empty table.
+ */
+export interface RemoteProcessesResult {
+  tool: 'gnu' | 'bsd' | 'none' | 'unknown'
+  processes: RemoteProcess[]
+  truncated: boolean
+  error?: string
+}
+
+/** Result of one TERM/KILL request (the route validates the PID first). */
+export interface RemoteProcessKillResult {
+  ok: boolean
+  pid: number
+  signal: 'TERM' | 'KILL'
+  /** Remote error text when the signal was refused. */
   error?: string
 }
 
