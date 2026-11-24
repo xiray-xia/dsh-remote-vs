@@ -32,6 +32,20 @@ interface Session {
   outBuffer: string
   outTimer: ReturnType<typeof setTimeout> | undefined
   /**
+   * Recent output already flushed to sockets, replayed to a REATTACHING socket.
+   *
+   * A PTY lives for ten minutes after its last socket, but the screen state
+   * (the prompt, the last command's output) lives only in xterm on the client.
+   * When a session switch remounts the sidebar, the new XTerm attaches to the
+   * still-running shell and used to start BLANK — the shell was at its prompt,
+   * but the prompt had been printed before the socket existed. Keeping the tail
+   * of the stream lets `attach` hand the newcomer the screen it missed.
+   *
+   * Bounded: `REPLAY_MAX_CHARS` is enough for a prompt plus a screenful or two;
+   * a `cat` of a huge file must not double the host's memory per session.
+   */
+  replay: string
+  /**
    * When the last `out` frame went out.
    *
    * Used to tell an interactive ECHO from a burst: output that starts after a
@@ -124,6 +138,15 @@ const OUT_COALESCE_CHARS = 64 * 1024
  */
 const OUT_ECHO_IDLE_MS = 24
 
+/**
+ * How much recent output a reattaching socket receives (see `Session.replay`).
+ *
+ * 128 Ki UTF-16 units is a few screens of logs plus the prompt line; the buffer
+ * may grow to twice this between trims, so one terminal costs at most ~512 KiB
+ * of the host's memory in replay state.
+ */
+const REPLAY_MAX_CHARS = 128 * 1024
+
 /** Construction options (the terminal gate drives the registry directly). */
 export interface TerminalRegistryOptions {
   /**
@@ -194,6 +217,7 @@ export class TerminalSessionRegistry {
       paused: false,
       outBuffer: '',
       outTimer: undefined,
+      replay: '',
       lastFlushAt: 0,
       outstanding: new Map(),
       reap: undefined,
@@ -252,6 +276,13 @@ export class TerminalSessionRegistry {
     const session = this.sessions.get(id)
     if (session === undefined || !session.alive) return false
     this.hookSocket(session, ws)
+    // Hand the newcomer the output this session produced before it attached
+    // (the shell's prompt, the previous command's screen). It goes through the
+    // same per-socket accounting as live output, so a huge replay cannot slip
+    // past the backpressure ceiling.
+    if (session.replay !== '') {
+      this.sendOutTo(session, ws, JSON.stringify({ t: 'out', d: session.replay }))
+    }
     // Deliver anything the coalescing window still holds to the newcomer too,
     // before its `ready`: it is output the shell already produced.
     this.flushOut(session)
@@ -422,6 +453,11 @@ export class TerminalSessionRegistry {
     if (session.outBuffer === '') return
     const text = session.outBuffer
     session.outBuffer = ''
+    // Remember what was already delivered: a later reattach replays this.
+    session.replay += text
+    if (session.replay.length > REPLAY_MAX_CHARS * 2) {
+      session.replay = session.replay.slice(-REPLAY_MAX_CHARS)
+    }
     session.lastFlushAt = Date.now()
     this.broadcast(session, { t: 'out', d: text })
   }
@@ -447,35 +483,46 @@ export class TerminalSessionRegistry {
 
   private broadcast(session: Session, frame: TerminalServerFrame): void {
     const text = JSON.stringify(frame)
+    for (const socket of session.sockets) {
+      this.sendOutTo(session, socket, text)
+    }
+    if (session.pending > OUT_HIGH_WATER) this.setPaused(session, true)
+  }
+
+  /**
+   * Send one already-stringified `out` frame to ONE socket with accounting.
+   *
+   * Shared by `broadcast` and by the replay on `attach`; the byte count must be
+   * counted once per socket so the session's brake reflects every socket's
+   * backlog (see `Session.pending`).
+   */
+  private sendOutTo(session: Session, socket: WebSocket, text: string): void {
     // Bytes, not UTF-16 code units: CJK and emoji output would otherwise be
     // undercounted by up to 3x and the brake would come on too late.
     const size = Buffer.byteLength(text, 'utf8')
-    for (const socket of session.sockets) {
-      let settled = false
-      // The send callback fires once the frame is on the wire. It is the only
-      // public signal for "this socket has caught up", and it avoids relying on
-      // ws internals (bufferedAmount does not report the socket write queue).
-      const done = (): void => {
-        if (settled) return
-        settled = true
-        // A socket that detached already had its outstanding bytes released
-        // (its late callback must not decrement them a second time).
-        const left = session.outstanding.get(socket)
-        if (left === undefined) return
-        const remaining = Math.max(0, left - size)
-        if (remaining === 0) session.outstanding.delete(socket)
-        else session.outstanding.set(socket, remaining)
-        session.pending = Math.max(0, session.pending - size)
-        if (session.pending <= OUT_LOW_WATER) this.setPaused(session, false)
-      }
-      session.pending += size
-      session.outstanding.set(socket, (session.outstanding.get(socket) ?? 0) + size)
-      try {
-        socket.send(text, done)
-      } catch {
-        done()
-      }
+    let settled = false
+    // The send callback fires once the frame is on the wire. It is the only
+    // public signal for "this socket has caught up", and it avoids relying on
+    // ws internals (bufferedAmount does not report the socket write queue).
+    const done = (): void => {
+      if (settled) return
+      settled = true
+      // A socket that detached already had its outstanding bytes released
+      // (its late callback must not decrement them a second time).
+      const left = session.outstanding.get(socket)
+      if (left === undefined) return
+      const remaining = Math.max(0, left - size)
+      if (remaining === 0) session.outstanding.delete(socket)
+      else session.outstanding.set(socket, remaining)
+      session.pending = Math.max(0, session.pending - size)
+      if (session.pending <= OUT_LOW_WATER) this.setPaused(session, false)
     }
-    if (session.pending > OUT_HIGH_WATER) this.setPaused(session, true)
+    session.pending += size
+    session.outstanding.set(socket, (session.outstanding.get(socket) ?? 0) + size)
+    try {
+      socket.send(text, done)
+    } catch {
+      done()
+    }
   }
 }

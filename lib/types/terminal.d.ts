@@ -72,4 +72,12 @@ export declare class TerminalSessionRegistry {
     private setPaused;
     private send;
     private broadcast;
+    /**
+     * Send one already-stringified `out` frame to ONE socket with accounting.
+     *
+     * Shared by `broadcast` and by the replay on `attach`; the byte count must be
+     * counted once per socket so the session's brake reflects every socket's
+     * backlog (see `Session.pending`).
+     */
+    private sendOutTo;
 }
