@@ -995,6 +995,12 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   useEffect(() => {
     setOutline(undefined)
   }, [activeTab?.id, activeTab?.reloadNonce])
+  // Hiding this surface (panel switch, rail tab, float window) must take the
+  // portal down with it: the mask is `position: fixed` and would otherwise stay
+  // painted over whatever surface replaced this one.
+  useEffect(() => {
+    if (!props.visible) setOutline(undefined)
+  }, [props.visible])
 
   const openOutline = useCallback(() => {
     const tab = saveShortcutTabRef.current
@@ -1043,7 +1049,12 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   useEffect(() => {
     if (!props.visible) return
     const onKey = (event: KeyboardEvent): void => {
-      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey) return
+      // Another owner (host shortcut, an outer handler) already claimed this
+      // key: bubble phase must yield, same contract as save-shortcut.ts.
+      if (event.defaultPrevented) return
+      const ctrlShiftO = (event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey
+      const altO = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+      if (!ctrlShiftO && !altO) return
       if (event.key.toLowerCase() !== 'o') return
       // 按住不放不该让浮层闪；输入法组字期间这也不是一个命令。
       if (event.repeat || event.isComposing === true) return

@@ -45,6 +45,7 @@ export function ProcessesSection(props: {
   aliases: string[]
   visible: boolean
   paused: boolean
+  intervalMs: number
 }): ReactNode {
   const t = props.t
   const [alias, setAlias] = useState(props.aliases[0] ?? '')
@@ -55,7 +56,9 @@ export function ProcessesSection(props: {
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('cpu')
   const [killing, setKilling] = useState<number | undefined>(undefined)
-  const inFlight = useRef(false)
+  const inFlight = useRef<Set<string>>(new Set())
+  const aliasRef = useRef(alias)
+  aliasRef.current = alias
   const alive = useRef(true)
 
   useEffect(() => {
@@ -72,12 +75,15 @@ export function ProcessesSection(props: {
   }, [props.aliases, alias])
 
   const load = useCallback(async (force = false): Promise<void> => {
-    if (alias === '' || inFlight.current) return
-    inFlight.current = true
+    const requested = alias
+    if (requested === '' || inFlight.current.has(requested)) return
+    inFlight.current.add(requested)
     setLoading(true)
     try {
-      const next = await api.processes(alias, force)
-      if (!alive.current) return
+      const next = await api.processes(requested, force)
+      // The user may have switched hosts while this request was in flight: an
+      // old host's table must never paint under (or be killed from) the new one.
+      if (!alive.current || requested !== aliasRef.current) return
       setResult(next)
       setError(next.error)
     } catch (caught) {
@@ -88,17 +94,30 @@ export function ProcessesSection(props: {
           : caught instanceof RemoteApiError ? caught.message : String(caught),
       )
     } finally {
-      inFlight.current = false
-      if (alive.current) setLoading(false)
+      inFlight.current.delete(requested)
+      if (alive.current && requested === aliasRef.current) setLoading(false)
     }
   }, [alias])
 
   useEffect(() => {
     if (!expanded || !props.visible || props.paused || alias === '') return
-    void load()
-    const timer = window.setInterval(() => { void load() }, PROCESS_POLL_MS)
+    const tick = (): void => {
+      if (document.hidden) return
+      void load()
+    }
+    tick()
+    const timer = window.setInterval(tick, Math.max(2_000, props.intervalMs || PROCESS_POLL_MS))
     return () => window.clearInterval(timer)
-  }, [expanded, props.visible, props.paused, alias, load])
+  }, [expanded, props.visible, props.paused, alias, load, props.intervalMs])
+
+  useEffect(() => {
+    if (!expanded || !props.visible || props.paused) return
+    const onVisible = (): void => {
+      if (!document.hidden) void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [expanded, props.visible, props.paused, load])
 
   const rows = useMemo(() => {
     const needle = filter.trim().toLowerCase()
@@ -115,6 +134,7 @@ export function ProcessesSection(props: {
     const ok = await confirmDialog({
       title: t('proc.killTitle'),
       text: t('proc.killText')
+        .replace('{host}', alias)
         .replace('{pid}', String(row.pid))
         .replace('{command}', row.command.slice(0, 120)),
       danger: true,
@@ -126,7 +146,7 @@ export function ProcessesSection(props: {
     try {
       await api.killProcess(alias, row.pid, 'TERM')
       toast(t('proc.killSent').replace('{pid}', String(row.pid)))
-      await load()
+      await load(true)
     } catch (caught) {
       toast(caught instanceof RemoteApiError ? caught.message : String(caught), true)
     } finally {
@@ -195,7 +215,8 @@ export function ProcessesSection(props: {
         <div className="rvs-banner info rvs-proc-banner">{t('proc.truncated').replace('{count}', String(result.processes.length))}</div>
       )}
       {expanded && alias === '' && <div className="rvs-empty">{t('proc.noHost')}</div>}
-      {expanded && alias !== '' && rows.length === 0 && !loading && error === undefined && result !== undefined && (
+      {expanded && alias !== '' && rows.length === 0 && !loading && error === undefined
+        && result !== undefined && result.tool !== 'none' && result.tool !== 'unknown' && (
         <div className="rvs-empty">{t('proc.empty')}</div>
       )}
       {expanded && rows.length > 0 && (

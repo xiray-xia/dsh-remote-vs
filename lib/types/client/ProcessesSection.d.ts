@@ -15,4 +15,5 @@ export declare function ProcessesSection(props: {
     aliases: string[];
     visible: boolean;
     paused: boolean;
+    intervalMs: number;
 }): ReactNode;

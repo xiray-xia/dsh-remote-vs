@@ -638,6 +638,7 @@ export function MonitorView(props: {
         aliases={aliases}
         visible={props.visible}
         paused={paused}
+        intervalMs={intervalMs}
       />
     </div>
   )

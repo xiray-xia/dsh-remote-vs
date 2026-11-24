@@ -307,26 +307,38 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
    * entry is refreshed before validation rather than trusted indefinitely.
    */
   const processSnapshots = new Map<string, { at: number; result: RemoteProcessesResult }>()
+  /** One probe per alias at a time; a second reader joins the in-flight one. */
+  const processInflight = new Map<string, Promise<RemoteProcessesResult>>()
   const readProcesses = async (alias: string, maxAgeMs: number): Promise<RemoteProcessesResult> => {
     const cached = processSnapshots.get(alias)
     if (cached !== undefined && Date.now() - cached.at <= maxAgeMs) return cached.result
-    const result = await pool.exec(alias, processesCommand(), { timeoutMs: PROCESSES_TIMEOUT_MS })
-    let parsed: RemoteProcessesResult
-    if (result.error !== undefined) {
-      parsed = { tool: 'unknown', processes: [], truncated: false, error: result.error }
-    } else if (result.timedOut) {
-      parsed = { tool: 'unknown', processes: [], truncated: false, error: `the process probe did not finish within ${PROCESSES_TIMEOUT_MS / 1000}s` }
-    } else if (result.exitCode === null) {
-      parsed = { tool: 'unknown', processes: [], truncated: false, error: 'the process probe ended without an exit status' }
-    } else {
-      parsed = parseProcesses(result.stdout, result.exitCode)
-    }
-    if (parsed.tool === 'gnu' || parsed.tool === 'bsd') {
-      processSnapshots.set(alias, { at: Date.now(), result: parsed })
-    } else {
-      processSnapshots.delete(alias)
-    }
-    return parsed
+    const joined = processInflight.get(alias)
+    if (joined !== undefined) return joined
+    const task = (async (): Promise<RemoteProcessesResult> => {
+      const result = await pool.exec(alias, processesCommand(), { timeoutMs: PROCESSES_TIMEOUT_MS })
+      let parsed: RemoteProcessesResult
+      if (result.error !== undefined) {
+        parsed = { tool: 'unknown', processes: [], truncated: false, error: result.error }
+      } else if (result.timedOut) {
+        parsed = { tool: 'unknown', processes: [], truncated: false, error: `the process probe did not finish within ${PROCESSES_TIMEOUT_MS / 1000}s` }
+      } else if (result.exitCode === null) {
+        parsed = { tool: 'unknown', processes: [], truncated: false, error: 'the process probe ended without an exit status' }
+      } else {
+        parsed = parseProcesses(result.stdout, result.exitCode)
+      }
+      if (parsed.tool === 'gnu' || parsed.tool === 'bsd') {
+        processSnapshots.set(alias, { at: Date.now(), result: parsed })
+      } else {
+        processSnapshots.delete(alias)
+      }
+      return parsed
+    })()
+    processInflight.set(alias, task)
+    void task.then(
+      () => { if (processInflight.get(alias) === task) processInflight.delete(alias) },
+      () => { if (processInflight.get(alias) === task) processInflight.delete(alias) },
+    )
+    return task
   }
   const forwards = deps.forwards
   const viewSettings = deps.viewSettings ?? new RemoteViewSettingsStore()
@@ -1683,6 +1695,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
               writeJson(res, 400, { error: 'alias query parameter is required' })
               return
             }
+            if (store.get(alias) === undefined) {
+              writeJson(res, 404, { error: `unknown host alias: ${alias}` })
+              return
+            }
             writeJson(res, 200, await readProcesses(alias, queryParam(url, 'refresh') === '1' ? 0 : 3_000))
             return
           }
@@ -1719,6 +1735,8 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
             writeJson(res, 502, { error: message === '' ? `kill failed [exit code: ${result.exitCode ?? '?'}]` : message })
             return
           }
+          // The next GET must not serve the pre-kill snapshot.
+          processSnapshots.delete(alias)
           writeJson(res, 200, { ok: true, pid, signal: body.signal })
         } catch (error) {
           if (isStoreError(error)) writeStoreError(res, error)

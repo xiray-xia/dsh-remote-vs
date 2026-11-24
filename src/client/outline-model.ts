@@ -196,6 +196,16 @@ function depthAfter(line: string, startDepth: number): number {
   return depthAtIn(line, startDepth, line.length)
 }
 
+/** Net `(` minus `)` on one masked line, for multi-line signature detection. */
+function parenDelta(line: string): number {
+  let delta = 0
+  for (const character of line) {
+    if (character === '(') delta += 1
+    else if (character === ')') delta -= 1
+  }
+  return delta
+}
+
 /** 行的缩进列数（tab 按 4 列算，与常见编辑器默认一致）。 */
 function indentOf(line: string): number {
   let width = 0
@@ -274,6 +284,9 @@ function scanBraceLanguages(
   const found: RawSymbol[] = []
   const containers: OpenContainer[] = []
   let depth = 0
+  let continuationParens = 0
+  /** A type declaration whose `{` is on the next line (Allman style). */
+  let pendingContainer: (OpenContainer & { at: number }) | undefined
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] as string
     const trimmed = line.trim()
@@ -286,25 +299,58 @@ function scanBraceLanguages(
     // 预处理行也不参与大括号计数：`#define BEGIN {` 的 `{` 不是作用域，记进去会
     // 让后面每一行都深一层（C 代码里很常见）。
     if (directiveLine) continue
-    const match = matchDeclaration(language, trimmed, owner)
-    if (match !== undefined) {
-      const lead = line.length - line.trimStart().length
-      const at = depthAtIn(line, startDepth, lead)
-      const direct = owner === undefined ? at === 0 : at === owner.bodyDepth
-      if (direct) {
-        found.push({
-          name: match.name,
-          kind: match.kind,
-          line: index + 1,
-          depth: containers.length,
-          ...(owner === undefined ? {} : { container: owner.name }),
-        })
+    // Allman style: `class Foo` followed by `{` on its own line. Hold the
+    // declaration until that brace arrives instead of silently losing every
+    // member of the type.
+    if (pendingContainer !== undefined) {
+      if (trimmed.startsWith('{')) {
         const bodyDepth = depthAfter(line, startDepth)
-        if (bodyDepth > at && BLOCK_KINDS.has(match.kind)) {
-          containers.push({ name: match.name, kind: match.kind, bodyDepth })
+        containers.push({
+          name: pendingContainer.name,
+          kind: pendingContainer.kind,
+          bodyDepth: Math.max(startDepth + 1, bodyDepth),
+        })
+        depth = Math.max(0, bodyDepth)
+        pendingContainer = undefined
+        continue
+      }
+      pendingContainer = undefined
+    }
+    // `extern "C" {` is a transparent wrapper: its braces must not shift every
+    // wrapped declaration one level down (the old behaviour made the whole
+    // file outline empty). The matching close brace clamps at 0.
+    if (/^extern\s*\{/.test(trimmed)) {
+      depth = startDepth
+      continue
+    }
+    // A multi-line parameter list: continuation lines such as `int a,` are
+    // parameters, not fields. Suppress declaration matching until the
+    // parenthesis balance returns to zero (braces still update normally).
+    const continuation = continuationParens > 0
+    if (!continuation) {
+      const match = matchDeclaration(language, trimmed, owner)
+      if (match !== undefined) {
+        const lead = line.length - line.trimStart().length
+        const at = depthAtIn(line, startDepth, lead)
+        const direct = owner === undefined ? at === 0 : at === owner.bodyDepth
+        if (direct) {
+          found.push({
+            name: match.name,
+            kind: match.kind,
+            line: index + 1,
+            depth: containers.length,
+            ...(owner === undefined ? {} : { container: owner.name }),
+          })
+          const bodyDepth = depthAfter(line, startDepth)
+          if (bodyDepth > at && BLOCK_KINDS.has(match.kind)) {
+            containers.push({ name: match.name, kind: match.kind, bodyDepth })
+          } else if (BLOCK_KINDS.has(match.kind)) {
+            pendingContainer = { name: match.name, kind: match.kind, bodyDepth: at, at }
+          }
         }
       }
     }
+    continuationParens = Math.max(0, continuationParens + parenDelta(line))
     // 夹到 0：不配平的文件（半截代码、被注释掉的括号）不能让深度变成负数。
     depth = Math.max(0, depthAfter(line, startDepth))
     while (containers.length > 0 && (containers[containers.length - 1] as OpenContainer).bodyDepth > depth) {
@@ -675,7 +721,13 @@ export function buildOutline(text: string, path: string): OutlineResult {
   const language = outlineLanguageOf(path)
   if (language === 'python') return finish(language, scanPython(text), false)
   if (language === 'unknown') return finish(language, scanGuessed(text), true)
-  return finish(language, scanBraceLanguages(text, language), false)
+  const raw = scanBraceLanguages(text, language)
+  // A known brace language that produced nothing while the file clearly has
+  // structure (an unbalanced/lone brace from `extern "C" {`, a disabled block,
+  // or a string form the masker does not understand) must not claim "no
+  // symbols". Fall back to the indentation heuristic and say it is guessed.
+  if (raw.length === 0 && /[{}]/.test(text)) return finish(language, scanGuessed(text), true)
+  return finish(language, raw, false)
 }
 
 /**

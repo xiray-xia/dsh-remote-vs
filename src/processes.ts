@@ -30,16 +30,19 @@ export const PROCESSES_MAX = 500
  */
 export function processesCommand(max: number = PROCESSES_MAX): string {
   const cap = Math.max(1, Math.min(PROCESSES_MAX, Math.floor(max)))
+  // Cap + 1: the parser needs one extra row to tell "exactly at the cap" from
+  // "there were more rows, we cut them". The GNU branch is sorted by ps; the
+  // aux fallback is sorted here (ps aux on BSD has no --sort) on the %CPU column.
   const gnu = `ps -eo pid=,ppid=,user=,pcpu=,pmem=,etimes=,args= --sort=-pcpu 2>/dev/null`
   return [
     // EXPORTED: a plain LC_ALL assignment does not reach `ps` itself.
     'export LC_ALL=C',
     `if ${gnu} >/dev/null 2>&1; then`,
     `  echo "${PROCESSES_MARK} gnu"`,
-    `  ${gnu} | head -n ${cap}`,
+    `  ${gnu} | head -n ${cap + 1}`,
     'elif ps aux >/dev/null 2>&1; then',
     `  echo "${PROCESSES_MARK} bsd"`,
-    `  ps aux | head -n ${cap}`,
+    `  ps aux | tail -n +2 | sort -k3 -rn | head -n ${cap + 1}`,
     'else',
     `  echo "${PROCESSES_MARK} none"`,
     'fi',
@@ -134,14 +137,19 @@ export function parseProcesses(stdout: string, exitCode: number | null): RemoteP
   }
   if (marker.endsWith('none')) return { tool: 'none', processes: [], truncated: false }
   const gnu = marker.endsWith('gnu')
-  const processes: RemoteProcess[] = []
+  const parsedProcesses: RemoteProcess[] = []
   for (const line of lines.slice(markerAt + 1, endAt)) {
     if (line.trim() === '') continue
     const row = gnu ? parseGnuRow(line) : parseBsdRow(line)
-    if (row !== undefined) processes.push(row)
+    if (row !== undefined) parsedProcesses.push(row)
   }
-  if (processes.length === 0) {
+  if (parsedProcesses.length === 0) {
     return { tool: 'unknown', processes: [], truncated: false, error: 'the remote ps output could not be parsed' }
   }
-  return { tool: gnu ? 'gnu' : 'bsd', processes, truncated: processes.length >= PROCESSES_MAX }
+  const truncated = parsedProcesses.length > PROCESSES_MAX
+  return {
+    tool: gnu ? 'gnu' : 'bsd',
+    processes: parsedProcesses.slice(0, PROCESSES_MAX),
+    truncated,
+  }
 }

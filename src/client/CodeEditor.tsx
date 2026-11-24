@@ -664,7 +664,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     revealRange: (from, to) => {
       const current = viewRef.current
       if (current === undefined) return
-      revealRange(current, from, to)
+      revealRange(current, from, to, setLitPosition)
     },
     getChangeStale: () => viewRef.current?.state.field(changeStaleField, false) === true,
   }), [])
