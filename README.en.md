@@ -317,13 +317,6 @@ when the seat changes.
   frames and JSON parses for a busy command, always flushed before the exit frame); a session is kept for **10 minutes** after its last socket goes away before the remote shell is
   closed (it used to be kept forever, so closing the browser left the shell holding an sshd session slot).
 - **Known limits (stated honestly)**:
-  - **Occasional terminal hitches have three known sources**: (1) the PTY shares ONE SSH connection with SFTP / git / helper traffic — **now fixed for the PTY: it dials its own connection per host** (falling back to the shared one if the server refuses another), so bulk transfer no longer queues ahead of the terminal;
-    (2) while output is streaming, the echo of what you type is ordered after the output already produced
-    (that is every terminal; `Ctrl+C` still works because the input path is not blocked by output
-    backpressure); (3) heavy agent work blocking the host's event loop slows both directions. This round
-    fixed what is ours to fix: the client no longer waits on xterm's render callback, the host does not hold
-    a post-idle echo in the coalescing window, the backpressure marks are 2 MiB / 512 KiB, and a closing
-    socket releases its unsettled bytes. **The host-side part needs a `dsh web` restart.**
   - There is **no public API to select the "remote editor" view**; the plugin can only click the shell's
     own tab by its label and toasts a hint when that fails (`revealEditor()`).
   - Untracked directories arrive as a **single `dir/` row**; clicking it **expands** the files inside
