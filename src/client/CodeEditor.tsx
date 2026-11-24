@@ -129,6 +129,9 @@ const wrapCompartment = new Compartment()
  */
 const changeMarksCompartment = new Compartment()
 
+/** Compartment holding the inline blame gutter; empty until the pane has data. */
+const blameCompartment = new Compartment()
+
 /** True while CodeMirror's own highlighter has produced token spans. */
 function primaryColored(host: Element): boolean {
   return host.querySelector('[class*="rvs-ck-"]') !== null
@@ -148,6 +151,8 @@ import {
   type ChangeMark,
   type ChangeSet,
 } from './vsc/change-marks.ts'
+import { blameExtension, blameViewportReporter } from './vsc/blame.ts'
+import type { BlameLine } from './blame-model.ts'
 import { DEFAULT_UNDO_LABEL, undoAffordance } from './changes/undo-affordance.ts'
 
 /**
@@ -200,6 +205,19 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    * 加入本功能之前完全一致。
    */
   changeSet?: ChangeSet | null
+  /**
+   * Line→commit map for the inline blame gutter. `undefined`/empty removes the
+   * gutter entirely, so diff panes and files without blame data keep their old
+   * layout.
+   */
+  blame?: ReadonlyMap<number, BlameLine> | null
+  /** Clicking a blame cell asks the pane to reveal that commit. */
+  onOpenBlame?: (entry: BlameLine) => void
+  /**
+   * Reports the visible 1-based line range. The pane uses it to fetch blame one
+   * window at a time; CodeMirror is the only code that knows the viewport.
+   */
+  onViewport?: (first: number, last: number) => void
   /**
    * 用户在某一处改动上按下「撤销这处改动」时回调。
    *
@@ -432,6 +450,27 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // Disposed.
     }
   }, [props.changeSet, undoArmed, view, t])
+
+  /**
+   * Blame gutter: install/replace it when the pane hands over a new window.
+   *
+   * The map identity changes as viewport windows land, so comparing it is the
+   * only cheap "same data" test; the extension itself is small and rebuilding
+   * it costs one compartment transaction, not a document change.
+   */
+  useEffect(() => {
+    const current = viewRef.current
+    if (current === undefined) return
+    const entries = props.blame
+    const extension = entries !== undefined && entries !== null && entries.size > 0
+      ? blameExtension(entries, entry => { propsRef.current.onOpenBlame?.(entry) })
+      : []
+    try {
+      current.dispatch({ effects: blameCompartment.reconfigure(extension) })
+    } catch {
+      // Disposed.
+    }
+  }, [props.blame])
 
   /**
    * 跳到某个改动点。
@@ -824,6 +863,9 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // Session-change marks, off until a `changeSet` prop arrives (see
       // `changeMarksCompartment`).
       changeMarksCompartment.of([]),
+      // Inline blame, off until the pane has fetched a window.
+      blameCompartment.of([]),
+      blameViewportReporter((first, last) => { propsRef.current.onViewport?.(first, last) }),
       wrapCompartment.of(propsRef.current.wrap === false ? [] : EditorView.lineWrapping),
       readOnlyCompartment.of(EditorState.readOnly.of(propsRef.current.readOnly === true)),
       ...langFor(propsRef.current.path),

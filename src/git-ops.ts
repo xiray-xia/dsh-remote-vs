@@ -327,6 +327,40 @@ export function fileAtRevCommand(workdir: string, rev: string, path: string): st
   return capped(`${git(workdir)} show ${shQuote(spec)}`)
 }
 
+/**
+ * One inclusive line window of `git blame` for a repo-relative file.
+ *
+ * The window is part of the command (not a post-filter): blame is one of the
+ * reads that can be very expensive on a large file, and the editor only ever
+ * needs the lines around the viewport. `--line-porcelain` repeats the commit
+ * header for every line, so the parser is stateless (see `blame-model.ts`).
+ */
+export function blameCommand(workdir: string, path: string, from: number, to: number): string {
+  const start = Number.isFinite(from) ? Math.max(1, Math.floor(from)) : 1
+  const end = Number.isFinite(to) ? Math.max(start, Math.floor(to)) : start
+  return capped(`${git(workdir)} blame --line-porcelain -L ${start},${end} -- ${shQuote(assertRepoPath(path))}`)
+}
+
+/**
+ * Commits that touched one file, newest first, with rename following.
+ *
+ * `--follow` works only for a single path; the format matches `parseLog`, so
+ * the existing history row type is reused without a second parser.
+ */
+export function fileHistoryCommand(workdir: string, path: string, max = 100): string {
+  const count = Math.min(Math.max(Number.isFinite(max) ? Math.floor(max) : 100, 1), 200)
+  return capped(
+    `${git(workdir)} log --follow --name-status -M --pretty=format:'%x00%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s' -n ${count} -- ${shQuote(assertRepoPath(path))}`,
+  )
+}
+
+/** One commit's header fields, even when it is older than the log window. */
+export function commitMetaCommand(workdir: string, ref: string): string {
+  return capped(
+    `${git(workdir)} log -1 --pretty=format:'%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s%x1e' ${assertRef(ref)} --`,
+  )
+}
+
 /** Local + remote-tracking branches with their upstream and tip. */
 export function allBranchesCommand(workdir: string): string {
   return capped(`${git(workdir)} for-each-ref --format='%(refname:short)%x1f%(objectname:short)%x1f%(upstream:short)%x1f%(HEAD)%x1f%(refname)' refs/heads refs/remotes`)

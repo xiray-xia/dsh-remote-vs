@@ -52,6 +52,7 @@ export interface CodeEditorHandle {
     getChangeStale: () => boolean;
 }
 import { type ChangeMark, type ChangeSet } from './vsc/change-marks.ts';
+import type { BlameLine } from './blame-model.ts';
 /**
  * The editor surface is OPAQUE and scrolls in the editor's own palette
  * (`vsc/editor-theme.ts`): a code editor is not a translucent DSH panel, and
@@ -102,6 +103,19 @@ export declare const CodeEditor: import("react").ForwardRefExoticComponent<{
      * 加入本功能之前完全一致。
      */
     changeSet?: ChangeSet | null;
+    /**
+     * Line→commit map for the inline blame gutter. `undefined`/empty removes the
+     * gutter entirely, so diff panes and files without blame data keep their old
+     * layout.
+     */
+    blame?: ReadonlyMap<number, BlameLine> | null;
+    /** Clicking a blame cell asks the pane to reveal that commit. */
+    onOpenBlame?: (entry: BlameLine) => void;
+    /**
+     * Reports the visible 1-based line range. The pane uses it to fetch blame one
+     * window at a time; CodeMirror is the only code that knows the viewport.
+     */
+    onViewport?: (first: number, last: number) => void;
     /**
      * 用户在某一处改动上按下「撤销这处改动」时回调。
      *

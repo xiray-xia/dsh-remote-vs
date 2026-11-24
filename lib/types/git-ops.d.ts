@@ -137,6 +137,24 @@ export declare function commitPatchCommand(workdir: string, ref: string): string
 export declare function commitFileDiffCommand(workdir: string, ref: string, paths: readonly string[]): string;
 /** One file's content at a revision (`rev` may also be `:0` for the index). */
 export declare function fileAtRevCommand(workdir: string, rev: string, path: string): string;
+/**
+ * One inclusive line window of `git blame` for a repo-relative file.
+ *
+ * The window is part of the command (not a post-filter): blame is one of the
+ * reads that can be very expensive on a large file, and the editor only ever
+ * needs the lines around the viewport. `--line-porcelain` repeats the commit
+ * header for every line, so the parser is stateless (see `blame-model.ts`).
+ */
+export declare function blameCommand(workdir: string, path: string, from: number, to: number): string;
+/**
+ * Commits that touched one file, newest first, with rename following.
+ *
+ * `--follow` works only for a single path; the format matches `parseLog`, so
+ * the existing history row type is reused without a second parser.
+ */
+export declare function fileHistoryCommand(workdir: string, path: string, max?: number): string;
+/** One commit's header fields, even when it is older than the log window. */
+export declare function commitMetaCommand(workdir: string, ref: string): string;
 /** Local + remote-tracking branches with their upstream and tip. */
 export declare function allBranchesCommand(workdir: string): string;
 /** Every configured remote with its URLs. */

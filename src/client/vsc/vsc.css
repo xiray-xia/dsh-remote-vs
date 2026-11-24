@@ -5543,6 +5543,178 @@ body[data-ds-dark-theme] .rvs-doctor {
   }
 }
 
+/* === inline blame + file history ========================================= */
+
+.rvs-hbtn-on {
+  background: var(--rvs-bg-raised);
+  color: var(--rvs-accent);
+}
+
+.rvs-glyph-text {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rvs-blame-gutter {
+  border-left: 1px solid var(--rvs-border);
+  color: var(--rvs-fg3);
+}
+
+.rvs-blame-gutter .cm-gutterElement {
+  padding: 0;
+}
+
+.rvs-blame-chip,
+.rvs-blame-cont,
+.rvs-blame-spacer {
+  display: block;
+  max-width: 124px;
+  padding: 0 6px;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-blame-chip {
+  cursor: pointer;
+}
+
+.rvs-blame-chip:hover {
+  color: var(--rvs-accent);
+  text-decoration: underline;
+}
+
+.rvs-blame-uncommitted {
+  color: var(--rvs-fg3);
+  opacity: 0.65;
+  cursor: default;
+}
+
+.rvs-blame-uncommitted:hover {
+  color: var(--rvs-fg3);
+  text-decoration: none;
+}
+
+.rvs-blame-spacer {
+  visibility: hidden;
+}
+
+.rvs-file-history {
+  position: absolute;
+  z-index: 60;
+  top: 82px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100% - 20px));
+  max-height: 55%;
+  overflow: hidden;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+  background: var(--rvs-bg-raised);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  color: var(--rvs-fg);
+}
+
+.rvs-file-history-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-file-history-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.rvs-file-history-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-file-history-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--rvs-fg3);
+  cursor: pointer;
+}
+
+.rvs-file-history-close:hover {
+  background: var(--rvs-hover, var(--rvs-bg));
+  color: var(--rvs-fg);
+}
+
+.rvs-file-history-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.rvs-file-history-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--rvs-border-subtle, transparent);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.rvs-file-history-row:hover {
+  background: var(--rvs-hover, var(--rvs-bg));
+}
+
+.rvs-file-history-hash {
+  color: var(--rvs-fg3);
+  font-family: var(--rvs-mono), monospace;
+  font-size: 10px;
+}
+
+.rvs-file-history-subject {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rvs-file-history-meta {
+  grid-column: 2;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+}
+
+.rvs-file-history-note {
+  padding: 10px;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+.rvs-file-history-note.error {
+  color: var(--rvs-danger-text);
+}
 /* ------------------------------------------------------ Ctrl+P quick open */
 
 .rvs-qo-mask {

@@ -8,16 +8,18 @@
  * messages a user can act on (missing identity, no upstream, conflicts, ...).
  */
 import { REMOTE_API } from '../../protocol.ts'
-import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts'
-import { assertRef, messageCommand, parseMessage, shQuote } from '../../git-format.ts'
+import type { GitBranch, GitCommit, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts'
+import { assertRef, messageCommand, parseLog, parseMessage, shQuote } from '../../git-format.ts'
 import {
   addRemoteCommand,
   allBranchesCommand,
   applyPatchCommand,
+  blameCommand,
   branchHeaderCommand,
   checkoutCommand,
   cleanUntrackedCommand,
   commitCommand,
+  commitMetaCommand,
   commitFileDiffCommand,
   commitFilesCommand,
   commitPatchCommand,
@@ -25,6 +27,7 @@ import {
   deleteBranchCommand,
   diffCommand,
   fetchCommand,
+  fileHistoryCommand,
   fileAtRevCommand,
   gitErrorHint,
   GIT_CAP,
@@ -62,6 +65,7 @@ import {
   statusPathsCommand,
   unstageCommand,
 } from '../../git-ops.ts'
+import { parseBlamePorcelain, parseFileHistory, type BlameLine, type FileHistoryCommit } from '../blame-model.ts'
 import { api, gitTimeoutMs, type RequestOptions } from '../api.ts'
 import { isRequestAbort } from '../request-gate.ts'
 import { appendExecOutput, networkBudgetMs, networkCommands, type PushTarget } from '../exec-output.ts'
@@ -423,6 +427,55 @@ export async function loadCommitPatch(alias: string, root: string, hash: string)
   const out = await run(alias, commitPatchCommand(root, hash), 90_000)
   const bytes = typeof TextEncoder === 'undefined' ? out.stdout.length : new TextEncoder().encode(out.stdout).length
   return { text: out.stdout, truncated: bytes >= GIT_CAP }
+}
+
+/** One viewport window of `git blame` for a repo-relative path. */
+export async function loadBlame(
+  alias: string,
+  root: string,
+  path: string,
+  from: number,
+  to: number,
+  options: RunOptions = {},
+): Promise<BlameLine[]> {
+  const result = await run(alias, blameCommand(root, path, from, to), 60_000, options)
+  const rows = parseBlamePorcelain(result.stdout)
+  // `capped()` pipes through `head`, so git's non-zero exit is hidden; a
+  // `no such path` / `has only 0 lines` diagnosis still arrives on stderr and
+  // must not be rendered as "this window has no blame data".
+  if (rows.length === 0 && result.stderr.trim() !== '') {
+    throw new GitOpError(gitErrorHint(result.stderr) ?? result.stderr.trim())
+  }
+  return rows
+}
+
+/**
+ * Commits that touched one path. `--follow` makes renames visible as history
+ * of the CURRENT name, which is exactly what the editor's file-history menu
+ * promises; the rows use the same shape as the repository log.
+ */
+export async function loadFileHistory(
+  alias: string,
+  root: string,
+  path: string,
+  max = 100,
+): Promise<FileHistoryCommit[]> {
+  const result = await run(alias, fileHistoryCommand(root, path, max), 60_000)
+  const rows = parseFileHistory(result.stdout, path)
+  if (rows.length === 0 && result.stderr.trim() !== '') {
+    throw new GitOpError(gitErrorHint(result.stderr) ?? result.stderr.trim())
+  }
+  return rows
+}
+
+/** One commit header when the hash is older than the loaded log window. */
+export async function loadCommit(alias: string, root: string, hash: string): Promise<GitCommit | undefined> {
+  const result = await run(alias, commitMetaCommand(root, hash), 60_000)
+  const commit = parseLog(result.stdout)[0]
+  if (commit === undefined && result.stderr.trim() !== '') {
+    throw new GitOpError(gitErrorHint(result.stderr) ?? result.stderr.trim())
+  }
+  return commit
 }
 
 /** Local + remote-tracking branches. */

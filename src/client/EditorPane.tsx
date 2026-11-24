@@ -28,8 +28,10 @@ import { isConnectionFailure, useConnectionStatus } from './connection.ts'
 import { sameLocalDir } from './composer.ts'
 import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
-import { useExplorer, gotoChange, markChangeStale, undoChange, type EditorTab } from './store.tsx'
+import { useExplorer, gotoChange, markChangeStale, repoRelative, undoChange, type EditorTab } from './store.tsx'
 import { DiffView } from './scm/DiffView.tsx'
+import { loadBlame, loadFileHistory } from './scm/actions.ts'
+import { isCommittedBlame, planBlameWindow, type BlameLine, type FileHistoryCommit } from './blame-model.ts'
 import { Btn } from './ui.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
@@ -65,6 +67,36 @@ import {
 
 /** How many hunks of a conflict diff are rendered before the rest is summarised. */
 const CONFLICT_DIFF_HUNKS = 20
+
+const BLAME_PREF_KEY = 'dsh-remote-vs.editor.blame'
+const EMPTY_BLAME: ReadonlyMap<number, BlameLine> = new Map()
+
+/** Inline blame is on by default, but the choice survives a reload. */
+function readBlamePreference(): boolean {
+  try {
+    return localStorage.getItem(BLAME_PREF_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function writeBlamePreference(value: boolean): void {
+  try {
+    localStorage.setItem(BLAME_PREF_KEY, value ? '1' : '0')
+  } catch {
+    // Private mode: the preference simply does not persist.
+  }
+}
+
+/** Number of lines a loaded buffer has (the last empty line still counts). */
+function lineCountOf(text: string): number {
+  if (text === '') return 1
+  let count = 1
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) count += 1
+  }
+  return count
+}
 
 /**
  * Reject a remote call that never answers.
@@ -318,6 +350,10 @@ function StatusBar(props: {
 export function EditorPane(props: { visible: boolean }): ReactNode {
   const store = useExplorer()
   const { t, tabs, activeTab, alias } = store
+  // Commands run in `repoRoot`, not in the workspace root: a repository that
+  // lives in a subdirectory (`repoSubdir`) would otherwise get a workspace-
+  // relative path and fail with `no such path`.
+  const repoRel = activeTab === undefined ? '' : repoRelative(store.repoRoot, activeTab.fullPath)
   const settings = useEditorSettings()
   /**
    * Which chrome this mount renders. Derived from the store's EFFECTIVE surface
@@ -384,6 +420,159 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   useEffect(() => {
     setCaret(undefined)
   }, [activeTab?.id])
+
+  // --- inline blame + per-file history -------------------------------------
+  const [blameOn, setBlameOn] = useState<boolean>(readBlamePreference)
+  const [blameRows, setBlameRows] = useState<ReadonlyMap<number, BlameLine>>(EMPTY_BLAME)
+  const [blameViewport, setBlameViewport] = useState<{ from: number; to: number } | undefined>(undefined)
+  const [blameError, setBlameError] = useState<string | undefined>(undefined)
+  const blameTicket = useRef(0)
+  const blameRequested = useRef(new Set<string>())
+  const blameFailed = useRef('')
+  const blameViewportTimer = useRef<number | undefined>(undefined)
+  const [fileHistoryOpen, setFileHistoryOpen] = useState(false)
+  const [fileHistoryRows, setFileHistoryRows] = useState<FileHistoryCommit[]>([])
+  const [fileHistoryLoading, setFileHistoryLoading] = useState(false)
+  const [fileHistoryError, setFileHistoryError] = useState<string | undefined>(undefined)
+
+  // A new buffer (or an edited one) invalidates both windows and their line
+  // numbers; the next viewport report starts a fresh read.
+  useEffect(() => {
+    blameTicket.current += 1
+    blameRequested.current.clear()
+    blameFailed.current = ''
+    setBlameViewport(undefined)
+    setBlameRows(EMPTY_BLAME)
+    setBlameError(undefined)
+    setFileHistoryOpen(false)
+    setFileHistoryRows([])
+    setFileHistoryError(undefined)
+  }, [activeTab?.id, activeTab?.dirty, activeTab?.reloadNonce])
+
+  const toggleBlame = useCallback(() => {
+    setBlameOn(current => {
+      const next = !current
+      writeBlamePreference(next)
+      return next
+    })
+  }, [])
+
+  /**
+   * One `-L` read per uncovered viewport window.
+   *
+   * `blameRequested` is the cheap "this exact window was already asked for"
+   * guard; it is cleared on a buffer/dirty change, and a failed read deletes its
+   * key so a later scroll can retry it. Only one request may be in flight —
+   * CodeMirror scroll events are frequent and the exec channel is shared.
+   */
+  useEffect(() => {
+    const tab = activeTab
+    if (
+      !blameOn || tab === undefined || tab.kind !== 'file' || tab.loading || tab.dirty || tab.binary || tab.truncated
+      || alias === '' || store.repoRoot === undefined || repoRel === '' || blameViewport === undefined
+    ) {
+      setBlameRows(EMPTY_BLAME)
+      return
+    }
+    const total = lineCountOf(tab.text)
+    const failureKey = `${tab.id}:${tab.reloadNonce ?? 0}:${repoRel}:${blameOn ? '1' : '0'}`
+    if (blameFailed.current === failureKey) return
+    const window = planBlameWindow(
+      blameViewport.from,
+      blameViewport.to,
+      total,
+      new Set(blameRows.keys()),
+    )
+    if (window === undefined) return
+    const { from, to } = window
+    const key = `${tab.id}:${tab.reloadNonce ?? 0}:${from}:${to}`
+    if (blameRequested.current.has(key)) return
+    blameRequested.current.add(key)
+    const ticket = ++blameTicket.current
+    const controller = new AbortController()
+    void loadBlame(alias, store.repoRoot, repoRel, from, to, { signal: controller.signal })
+      .then((rows) => {
+        if (ticket !== blameTicket.current) return
+        setBlameRows((previous) => {
+          const next = new Map(previous)
+          for (const row of rows) next.set(row.line, row)
+          return next
+        })
+        setBlameError(undefined)
+      })
+      .catch((error: unknown) => {
+        blameRequested.current.delete(key)
+        if (controller.signal.aborted) return
+        if (ticket !== blameTicket.current) return
+        blameFailed.current = failureKey
+        setBlameError(error instanceof Error ? error.message : String(error))
+      })
+    return () => { controller.abort() }
+  }, [
+    activeTab?.id,
+    activeTab?.dirty,
+    activeTab?.reloadNonce,
+    blameOn,
+    blameRows,
+    blameViewport?.from,
+    blameViewport?.to,
+    alias,
+    repoRel,
+    store.repoRoot,
+  ])
+
+  const onEditorViewport = useCallback((first: number, last: number) => {
+    if (blameViewportTimer.current !== undefined) window.clearTimeout(blameViewportTimer.current)
+    blameViewportTimer.current = window.setTimeout(() => {
+      blameViewportTimer.current = undefined
+      setBlameViewport(previous => (
+        previous !== undefined && previous.from === first && previous.to === last
+          ? previous
+          : { from: first, to: last }
+      ))
+    }, 140)
+  }, [])
+  useEffect(() => () => {
+    if (blameViewportTimer.current !== undefined) window.clearTimeout(blameViewportTimer.current)
+  }, [])
+
+  useEffect(() => {
+    const tab = activeTab
+    if (!fileHistoryOpen || tab === undefined || tab.kind !== 'file' || alias === '' || store.repoRoot === undefined || repoRel === '') {
+      setFileHistoryRows([])
+      setFileHistoryError(undefined)
+      setFileHistoryLoading(false)
+      return
+    }
+    let cancelled = false
+    setFileHistoryLoading(true)
+    setFileHistoryError(undefined)
+    void loadFileHistory(alias, store.repoRoot, repoRel, 100)
+      .then((rows) => {
+        if (cancelled) return
+        setFileHistoryRows(rows)
+        setFileHistoryLoading(false)
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setFileHistoryError(error instanceof Error ? error.message : String(error))
+        setFileHistoryLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [fileHistoryOpen, activeTab?.id, activeTab?.dirty, alias, repoRel, store.repoRoot])
+
+  useEffect(() => {
+    if (!fileHistoryOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setFileHistoryOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [fileHistoryOpen])
+
   /**
    * The "see the difference" payload of a refused save.
    *
@@ -824,9 +1013,10 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const imageFailure = activeTab !== undefined && activeTab.image && activeImageKey !== undefined
     ? imageError[activeImageKey]
     : undefined
+  const caretBlame = caret === undefined ? undefined : blameRows.get(caret.line)
 
   return (
-    <div className="rvs-pane grow rvs-edge" style={fontStyle}>
+    <div className="rvs-pane grow rvs-edge" style={{ ...(fontStyle ?? {}), position: 'relative' }}>
       {/* Tab strip: switch / close / dirty dot / diff glyph. Middle-click closes
           too — the muscle memory shared with VS Code and browsers. */}
       <div className="rvs-etabs" role="tablist" aria-label={t('editor.tabsLabel')}>
@@ -995,6 +1185,32 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   <IconWrap size={13} />
                 </IconButton>
               )}
+              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && repoRel !== '' && (
+                <>
+                  <IconButton
+                    title={blameError === undefined ? t('editor.blameToggle') : `${t('editor.blameToggle')}: ${blameError}`}
+                    className={blameOn ? 'rvs-hbtn-on' : undefined}
+                    onClick={toggleBlame}
+                  >
+                    <span className="rvs-glyph-text">B</span>
+                  </IconButton>
+                  <IconButton
+                    title={t('editor.fileHistory')}
+                    className={fileHistoryOpen ? 'rvs-hbtn-on' : undefined}
+                    onClick={() => { setFileHistoryOpen(open => !open) }}
+                  >
+                    <IconDiff size={13} />
+                  </IconButton>
+                  {blameOn && caretBlame !== undefined && isCommittedBlame(caretBlame.hash) && (
+                    <IconButton
+                      title={t('editor.blameOpenCaret')}
+                      onClick={() => { store.focusCommit(caretBlame.hash) }}
+                    >
+                      <span className="rvs-glyph-text">↗</span>
+                    </IconButton>
+                  )}
+                </>
+              )}
               <span className="rvs-einfo-actions-divider" aria-hidden="true" />
               {/* The floating window owns its OWN Ctrl+wheel zoom (a property of
                   that window, persisted per window): the shared preference is not
@@ -1038,6 +1254,52 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   : null}
             </span>
           </div>
+
+          {fileHistoryOpen && activeTab.kind === 'file' && (
+            <div className="rvs-file-history" role="dialog" aria-label={t('editor.fileHistory')}>
+              <div className="rvs-file-history-head">
+                <span className="rvs-file-history-title">{t('editor.fileHistory')}</span>
+                <span className="rvs-file-history-path" title={repoRel}>{repoRel}</span>
+                <button
+                  type="button"
+                  className="rvs-file-history-close"
+                  title={t('common.close')}
+                  aria-label={t('common.close')}
+                  onClick={() => { setFileHistoryOpen(false) }}
+                >
+                  <IconClose size={11} />
+                </button>
+              </div>
+              {fileHistoryLoading && <div className="rvs-file-history-note">{t('common.loading')}</div>}
+              {!fileHistoryLoading && fileHistoryError !== undefined && (
+                <div className="rvs-file-history-note error">{fileHistoryError}</div>
+              )}
+              {!fileHistoryLoading && fileHistoryError === undefined && fileHistoryRows.length === 0 && (
+                <div className="rvs-file-history-note">{t('editor.fileHistoryEmpty')}</div>
+              )}
+              {!fileHistoryLoading && fileHistoryError === undefined && fileHistoryRows.length > 0 && (
+                <div className="rvs-file-history-list">
+                  {fileHistoryRows.map(commit => (
+                    <button
+                      type="button"
+                      key={commit.hash}
+                      className="rvs-file-history-row"
+                      onClick={() => {
+                        setFileHistoryOpen(false)
+                        store.openCommitFile(commit.hash, commit.path, commit.origPath)
+                      }}
+                    >
+                      <span className="rvs-file-history-hash">{commit.hash.slice(0, 7)}</span>
+                      <span className="rvs-file-history-subject" title={commit.subject}>{commit.subject}</span>
+                      <span className="rvs-file-history-meta">
+                        {commit.author} · {new Date(commit.date * 1000).toLocaleDateString()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="rvs-body" ref={bodyRef}>
             {/*
@@ -1198,6 +1460,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       {...(activeTab.line === undefined ? {} : { revealLine: activeTab.line })}
                       {...(activeTab.lineNonce === undefined ? {} : { revealNonce: activeTab.lineNonce })}
                       {...(activeTab.changeSet === undefined ? {} : { changeSet: activeTab.changeSet })}
+                      blame={blameOn ? blameRows : undefined}
+                      onOpenBlame={(entry) => { store.focusCommit(entry.hash) }}
+                      onViewport={onEditorViewport}
                       {...(activeTab.revealHunkLine === undefined ? {} : { revealHunkLine: activeTab.revealHunkLine })}
                       {...(activeTab.revealHunkNonce === undefined ? {} : { revealHunkNonce: activeTab.revealHunkNonce })}
                       {...(editorViewStateOf(activeTab.id) === undefined

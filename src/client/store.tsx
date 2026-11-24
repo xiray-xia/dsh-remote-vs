@@ -219,6 +219,8 @@ interface State {
   revealRequest: RevealRequest | undefined
   /** A pending "open a terminal in this folder" request (search-result menu). */
   terminalRequest: TerminalRequest | undefined
+  /** A pending "select this commit in the history rail" request. */
+  commitFocus: CommitFocusRequest | undefined
   /**
    * Expanded untracked DIRECTORY rows (`-u normal` collapses a directory into
    * one row, so the panel asks for its contents on demand — see
@@ -266,6 +268,13 @@ export interface TerminalRequest {
   alias: string
   /** Absolute remote directory the fresh shell should `cd` into. */
   dir: string
+}
+
+/** One "show this commit in the history rail" request. */
+export interface CommitFocusRequest {
+  /** Monotonic id so selecting the same commit twice still re-triggers. */
+  id: number
+  hash: string
 }
 
 const WS_KEY = 'dsh-remote-vs.files.ws'
@@ -526,6 +535,7 @@ const state: State = {
   searchRequest: undefined,
   revealRequest: undefined,
   terminalRequest: undefined,
+  commitFocus: undefined,
   untrackedDirs: new Map(),
 }
 
@@ -577,6 +587,8 @@ export interface ExplorerValue {
   revealRequest: RevealRequest | undefined
   /** Pending "open a terminal here" request (consumed by the terminal panel). */
   terminalRequest: TerminalRequest | undefined
+  /** Pending "select this commit in the history rail" request. */
+  commitFocus: CommitFocusRequest | undefined
   setView: (view: RailView) => void
   /** Switch to the search panel (optionally scoped to a folder) — the tree's
       "find in folder" entry point. */
@@ -592,6 +604,8 @@ export interface ExplorerValue {
    * search results' "open in terminal" entry.
    */
   openTerminalAt: (dir: string) => void
+  /** Open the history rail with this commit selected (blame / file history). */
+  focusCommit: (hash: string) => void
   /**
    * The USER's pick — the workspace dropdowns and the wizard's "open files".
    *
@@ -770,10 +784,12 @@ function build(): ExplorerValue {
     searchRequest: state.searchRequest,
     revealRequest: state.revealRequest,
     terminalRequest: state.terminalRequest,
+    commitFocus: state.commitFocus,
     setView,
     requestSearch,
     revealInExplorer,
     openTerminalAt,
+    focusCommit,
     selectWorkspace,
     setRepoSubdir,
     discoverRepos,
@@ -1428,6 +1444,23 @@ export function openTerminalAt(dir: string): void {
   terminalSeq += 1
   patch({ terminalRequest: { id: terminalSeq, alias: currentWorkspace()?.alias ?? '', dir } })
   setView('terminal')
+}
+
+/** Monotonic ticket for "show this commit" requests from the editor. */
+let commitFocusSeq = 0
+
+/**
+ * Open the history rail and select one commit.
+ *
+ * Blame cells and the file-history menu only know a hash; the history panel owns
+ * the list and the detail pane, so the selection travels as a request (the same
+ * pattern as `revealInExplorer` / `openTerminalAt`).
+ */
+export function focusCommit(hash: string): void {
+  if (hash === '' || /^0+$/.test(hash)) return
+  commitFocusSeq += 1
+  patch({ commitFocus: { id: commitFocusSeq, hash } })
+  setView('history')
 }
 
 /**

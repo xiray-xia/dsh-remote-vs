@@ -8,7 +8,8 @@
  * messages a user can act on (missing identity, no upstream, conflicts, ...).
  */
 import { REMOTE_API } from '../../protocol.ts';
-import type { GitBranch, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts';
+import type { GitBranch, GitCommit, GitCommitFile, GitRemote, GitStash, GitStatusDetail, RemoteExecResult, RemoteRead } from '../../protocol.ts';
+import { type BlameLine, type FileHistoryCommit } from '../blame-model.ts';
 import { type PushTarget } from '../exec-output.ts';
 /** Error carrying a message already fit for the UI. */
 export declare class GitOpError extends Error {
@@ -156,6 +157,16 @@ export declare function loadCommitPatch(alias: string, root: string, hash: strin
     text: string;
     truncated: boolean;
 }>;
+/** One viewport window of `git blame` for a repo-relative path. */
+export declare function loadBlame(alias: string, root: string, path: string, from: number, to: number, options?: RunOptions): Promise<BlameLine[]>;
+/**
+ * Commits that touched one path. `--follow` makes renames visible as history
+ * of the CURRENT name, which is exactly what the editor's file-history menu
+ * promises; the rows use the same shape as the repository log.
+ */
+export declare function loadFileHistory(alias: string, root: string, path: string, max?: number): Promise<FileHistoryCommit[]>;
+/** One commit header when the hash is older than the loaded log window. */
+export declare function loadCommit(alias: string, root: string, hash: string): Promise<GitCommit | undefined>;
 /** Local + remote-tracking branches. */
 export declare function loadBranches(alias: string, root: string, current: string): Promise<GitBranch[]>;
 /** Configured remotes. */

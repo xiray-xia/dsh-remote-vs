@@ -26,7 +26,7 @@ import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
 import { gitReadSettleMs, shallowEqual, useExplorerSelector, type ExplorerValue } from '../store.tsx'
-import { checkoutCommit, joinRemote, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
+import { checkoutCommit, joinRemote, loadCommit, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
 import { CommitPane } from './CommitPane.tsx'
 import { isHistoryTab, needsPatchLoad, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
 import { ReadQueue } from './read-queue.ts'
@@ -44,6 +44,16 @@ import {
 } from '../vsc/kit.tsx'
 
 const ROW_H = 22
+
+/**
+ * Last `commitFocus` request consumed by ANY mounted panel instance.
+ *
+ * The request lives in the store until overwritten, and the panel re-renders
+ * whenever the log refreshes; without this module-level watermark a click on
+ * blame would be replayed over the user's later manual selection (and across
+ * repository switches). Same rule as `revealRequest`/`terminalRequest`.
+ */
+let consumedCommitFocusId = 0
 const LANE_W = 13
 const PAD_X = 9
 const LANE_COLORS = ['#e2b714', '#4ec9b0', '#58a6ff', '#d2a8ff', '#ff7b72', '#79c0ff', '#7ee787', '#ffa657']
@@ -226,6 +236,7 @@ const selectHistoryStore = (snapshot: ExplorerValue) => ({
   openCommitFile: snapshot.openCommitFile,
   revealInExplorer: snapshot.revealInExplorer,
   openTerminalAt: snapshot.openTerminalAt,
+  commitFocus: snapshot.commitFocus,
 })
 
 export function HistoryPanel(): ReactNode {
@@ -348,6 +359,32 @@ export function HistoryPanel(): ReactNode {
     setSelectedHash(undefined)
     setFocusPath(undefined)
   }, [repoKey])
+
+  // Blame / file-history entries only know a hash: the editor asks the store to
+  // show it here, and the log above owns the row object the detail pane needs.
+  // Declared AFTER the repository-switch reset so a first mount cannot clear the
+  // selection that this request just set.
+  useEffect(() => {
+    const request = store.commitFocus
+    if (request === undefined) return
+    if (request.id === consumedCommitFocusId) return
+    consumedCommitFocusId = request.id
+    setSelectedHash(request.hash)
+    setFocusPath(undefined)
+    // Blame can point at a commit older than the loaded graph window; fetch its
+    // header so the detail pane still opens instead of selecting nothing.
+    const live = rows.some(commit => commit.hash === request.hash)
+    if (live || selectedSnapshot?.hash === request.hash || alias === '' || repoRoot === undefined) return
+    let cancelled = false
+    void loadCommit(alias, repoRoot, request.hash)
+      .then((commit) => {
+        if (!cancelled && commit !== undefined) setSelectedSnapshot(commit)
+      })
+      .catch(() => {
+        // A stale/invalid hash is not worth a toast: the rail is still usable.
+      })
+    return () => { cancelled = true }
+  }, [store.commitFocus?.id, rows, selectedSnapshot?.hash, alias, repoRoot])
 
   // Message + file list: what 提交详情 and 内容 need. The patch is NOT read here
   // (see the lazy effect below), so clicking through commits stays cheap.
