@@ -2595,6 +2595,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         label: t('files.findInFolder'),
         onSelect: () => store.requestSearch({ mode: 'content', scope: dir }),
       })
+      // 「在终端中打开」on a DIRECTORY. `dir` is already the folder a terminal
+      // should land in (the row itself for a directory); `store.openTerminalAt`
+      // switches to the terminal page and the panel types a quoted `cd` once the
+      // PTY is ready — the alias travels inside the request, so the new tab
+      // opens on the host this path belongs to. Directories only: "here" is the
+      // folder, and the parent of a file is what "Find in Folder…" already covers.
+      if (entry.isDir) {
+        entries.push({ label: t('files.openInTerminal'), onSelect: () => { store.openTerminalAt(dir) } })
+      }
       if (!entry.isDir) {
         entries.push({ label: t('files.searchNameHere'), onSelect: () => store.requestSearch({ mode: 'name', scope: dir }) })
       }

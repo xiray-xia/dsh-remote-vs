@@ -42,6 +42,39 @@ export interface EditorKeyHandlers {
   stepHunk(delta: 1 | -1): boolean
   /** Escape → close the find widget; false when it was not open. */
   closeFind(): boolean
+  /**
+   * Ctrl/Cmd+G → ask for a line number and jump there.
+   *
+   * The prompt is the caller's (`promptDialog`), so this module stays free of
+   * DOM/React; the binding always claims the key (browsers use Ctrl+G for
+   * "find next", which has nothing to do inside a code editor).
+   */
+  gotoLine(view: EditorView): void
+  /**
+   * Ctrl/Cmd+D → select the next occurrence of the current selection.
+   *
+   * Returns the command's own answer: `false` (nothing to expand, or a mixed
+   * selection) must fall through to the browser instead of being swallowed —
+   * the same rule the hunk bindings follow.
+   */
+  selectNextOccurrence(view: EditorView): boolean
+}
+
+/**
+ * Resolve the "go to line" answer to a 1-based line number inside `total`.
+ *
+ * Accepts what VS Code's box accepts for the LINE half: `42`, ` 42 `, `42:7`
+ * (the column half is ignored — this editor jumps to a line, the status bar
+ * reports the column). Anything else (empty, `0`, text) is `undefined`, and a
+ * number past the end CLAMPS to the last line instead of failing: the answer
+ * usually comes from a file the user is reading, not from its exact length.
+ */
+export function parseGotoLine(text: string, total: number): number | undefined {
+  const match = /^\s*(\d+)(?::\d+)?\s*$/.exec(text)
+  if (match === null) return undefined
+  const value = Number(match[1])
+  if (!Number.isSafeInteger(value) || value < 1) return undefined
+  return Math.min(value, Math.max(1, Math.floor(total)))
 }
 
 /**
@@ -101,5 +134,22 @@ export function editorKeymap(handlers: EditorKeyHandlers): KeyBinding[] {
       key: 'Escape',
       run: () => handlers.closeFind(),
     },
+    /**
+     * Ctrl/Cmd+G → go to line, Ctrl/Cmd+D → select next occurrence.
+     *
+     * `@codemirror/search` exports both, but this plugin deliberately does NOT
+     * mount `searchKeymap`: that keymap also opens the stock search panel, which
+     * the editor replaced with its own find widget. So the two commands are
+     * wired through injected handlers instead (the goto-line one renders no
+     * CodeMirror panel at all — the caller prompts).
+     *
+     * Mod-g claims the key even when the prompt is dismissed: Ctrl+G means
+     * "find next" in the browser and must never leave the editor. Mod-d does NOT
+     * set `preventDefault` — CodeMirror prevents the default for a key whenever
+     * one of its bindings sets that flag, even when every command returns false,
+     * and a failed expansion has to be able to fall through.
+     */
+    { key: 'Mod-g', run: (view) => { handlers.gotoLine(view); return true }, preventDefault: true },
+    { key: 'Mod-d', run: (view) => handlers.selectNextOccurrence(view) },
   ]
 }

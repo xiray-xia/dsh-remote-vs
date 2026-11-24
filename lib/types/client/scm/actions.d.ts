@@ -162,6 +162,15 @@ export declare function loadBranches(alias: string, root: string, current: strin
 export declare function loadRemotes(alias: string, root: string): Promise<GitRemote[]>;
 /** The stash stack. */
 export declare function loadStashes(alias: string, root: string): Promise<GitStash[]>;
+/**
+ * Initialize a repository in place (`git init`).
+ *
+ * The panel's "not a repository" state used to be a dead end (the only offer
+ * was "browse somewhere else") while the command builder had no caller at all.
+ * The caller refreshes the status afterwards — that read re-probes the
+ * directory, so the panel moves to the normal view without another discovery.
+ */
+export declare function initRepo(alias: string, root: string): Promise<string>;
 /** Stage paths (additions, edits, deletions, renames). */
 export declare function stagePaths(alias: string, root: string, paths: readonly string[]): Promise<void>;
 /** Unstage paths without touching the worktree. */

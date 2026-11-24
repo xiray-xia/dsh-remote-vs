@@ -246,7 +246,11 @@ export function statusDirCommand(workdir: string, dir: string): string {
 
 /** Branch header only (`## branch...upstream [ahead N, behind M]`), NUL safe. */
 export function branchHeaderCommand(workdir: string): string {
-  return capped(`${GIT_READ_ENV} ${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
+  // `LC_ALL=C` is REQUIRED here (unlike the porcelain body): the `## <branch>`
+  // header is translated by git, and a non-English remote would otherwise make
+  // an empty repository read as a branch literally named "No" (probe: a zh_CN
+  // remote answered `## 尚无提交，位于 master`).
+  return capped(`LC_ALL=C LANG=C ${GIT_READ_ENV} ${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
 }
 
 /** Full message of the current HEAD commit. */

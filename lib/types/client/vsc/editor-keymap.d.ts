@@ -40,7 +40,33 @@ export interface EditorKeyHandlers {
     stepHunk(delta: 1 | -1): boolean;
     /** Escape → close the find widget; false when it was not open. */
     closeFind(): boolean;
+    /**
+     * Ctrl/Cmd+G → ask for a line number and jump there.
+     *
+     * The prompt is the caller's (`promptDialog`), so this module stays free of
+     * DOM/React; the binding always claims the key (browsers use Ctrl+G for
+     * "find next", which has nothing to do inside a code editor).
+     */
+    gotoLine(view: EditorView): void;
+    /**
+     * Ctrl/Cmd+D → select the next occurrence of the current selection.
+     *
+     * Returns the command's own answer: `false` (nothing to expand, or a mixed
+     * selection) must fall through to the browser instead of being swallowed —
+     * the same rule the hunk bindings follow.
+     */
+    selectNextOccurrence(view: EditorView): boolean;
 }
+/**
+ * Resolve the "go to line" answer to a 1-based line number inside `total`.
+ *
+ * Accepts what VS Code's box accepts for the LINE half: `42`, ` 42 `, `42:7`
+ * (the column half is ignored — this editor jumps to a line, the status bar
+ * reports the column). Anything else (empty, `0`, text) is `undefined`, and a
+ * number past the end CLAMPS to the last line instead of failing: the answer
+ * usually comes from a file the user is reading, not from its exact length.
+ */
+export declare function parseGotoLine(text: string, total: number): number | undefined;
 /**
  * Build the editor keymap.
  *

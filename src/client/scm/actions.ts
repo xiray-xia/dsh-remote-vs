@@ -29,6 +29,7 @@ import {
   gitErrorHint,
   GIT_CAP,
   headMessageCommand,
+  initCommand,
   mergeCommand,
   parseAllBranches,
   parseCommitFiles,
@@ -281,6 +282,10 @@ export async function loadHead(
     ...(signal === undefined ? {} : { signal }),
   })
   const first = (out.split('\0')[0] ?? out.split('\n')[0] ?? '').replace(/^## /, '').trim()
+  // An empty repository reports `## No commits yet on <branch>`: the branch name
+  // lives AFTER the words, and the generic pattern below would read "No".
+  const unborn = /^No commits yet on (\S+)$/.exec(first)
+  if (unborn !== null) return { branch: unborn[1] as string, detached: false, ahead: 0, behind: 0 }
   if (first === '' || first.startsWith('HEAD (no branch')) return { branch: 'HEAD', detached: true, ahead: 0, behind: 0 }
   const match = /^([^\s.]+(?:\.\.\.[^\s[]+)?)(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(first)
   if (match === null) return { branch: first, detached: false, ahead: 0, behind: 0 }
@@ -439,6 +444,18 @@ export async function loadStashes(alias: string, root: string): Promise<GitStash
 }
 
 // ------------------------------------------------------------ write paths
+
+/**
+ * Initialize a repository in place (`git init`).
+ *
+ * The panel's "not a repository" state used to be a dead end (the only offer
+ * was "browse somewhere else") while the command builder had no caller at all.
+ * The caller refreshes the status afterwards — that read re-probes the
+ * directory, so the panel moves to the normal view without another discovery.
+ */
+export async function initRepo(alias: string, root: string): Promise<string> {
+  return (await run(alias, initCommand(root), 60_000)).stdout
+}
 
 /** Stage paths (additions, edits, deletions, renames). */
 export async function stagePaths(alias: string, root: string, paths: readonly string[]): Promise<void> {

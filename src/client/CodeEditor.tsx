@@ -10,15 +10,16 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, 
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
 import { EditorSelection, EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
-import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
+import { Decoration, EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers, type DecorationSet } from '@codemirror/view'
 import { history } from '@codemirror/commands'
 import { bracketMatching, ensureSyntaxTree, indentOnInput } from '@codemirror/language'
 import { closeBrackets } from '@codemirror/autocomplete'
-import { search } from '@codemirror/search'
+import { search, selectNextOccurrence } from '@codemirror/search'
 import { syntaxHighlighting } from '@codemirror/language'
 import { vscodeHighlightStyle } from './vsc/editor-palette.ts'
 import { FindWidget, clearFindMarks, findMatchHighlight, stepFind } from './vsc/FindWidget.tsx'
-import { editorKeymap } from './vsc/editor-keymap.ts'
+import { editorKeymap, parseGotoLine } from './vsc/editor-keymap.ts'
+import { promptDialog, toast } from './vsc/kit.tsx'
 import { isModalLayerOpen } from './vsc/save-shortcut.ts'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
@@ -705,7 +706,23 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     if (host === null) return
     const extensions: Extension[] = [
       history(),
-      keymap.of(editorKeymap({
+      /**
+       * Multi-range selections (Ctrl/Cmd+D's repeated "select next occurrence",
+       * and the stock Mod-Alt-Arrow cursor commands).
+       *
+       * Required, not cosmetic: without this facet `Transaction.state` collapses
+       * EVERY selection to its main range (`EditorSelection.asSingle`), so
+       * `selectNextOccurrence` reports success while nothing visible is added —
+       * the shortcut would look broken. The tab view-state code already carries
+       * multiple ranges across a remount, so this is the same model, enabled.
+       */
+      EditorState.allowMultipleSelections.of(true),
+      // The facet above keeps the RANGES; `drawSelection` is what paints every
+      // secondary cursor and every non-main selection. Without it Ctrl+D changes
+      // the document on ranges the user cannot see (jsdom probes: the selection
+      // layer was null and one keystroke edited three ranges at once).
+      drawSelection(),
+  keymap.of(editorKeymap({
         // The SAME modal gate the window-level listener applies (`save-shortcut.ts`):
         // CodeMirror handles Mod-s first and prevents the default, so this callback —
         // not that listener — is the one that decides while the editor has focus. A
@@ -739,6 +756,49 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           setFindOpen(false)
           return true
         },
+        /**
+         * Ctrl/Cmd+G: the prompt is ours (see `editor-keymap.ts`), because the
+         * stock `gotoLine` command renders CodeMirror's own search panel and
+         * this editor never mounts it. The jump reuses the same reveal helper a
+         * search hit uses: clamp to the document, put the caret there, light the
+         * landing line.
+         */
+        gotoLine: (view) => {
+          void (async () => {
+            // Named with the `T` suffix the i18n key scanner accepts: the lookup
+            // must stay VISIBLE to `.spike/i18n-check`, or the three keys would
+            // later read as "defined but unreferenced" once they are added.
+            const editorT = propsRef.current.t ?? fallbackT
+            const total = view.state.doc.lines
+            const current = view.state.doc.lineAt(view.state.selection.main.head).number
+            const answer = await promptDialog({
+              title: editorT('editor.gotoLine'),
+              text: editorT('editor.gotoLineText').replace('{total}', String(total)),
+              initial: String(current),
+            })
+            if (answer === undefined) return
+            const target = parseGotoLine(answer, total)
+            if (target === undefined) {
+              toast(editorT('editor.gotoLineInvalid'), true)
+              return
+            }
+            // The prompt is async: the tab may have switched (or the surface
+            // unmounted) while it was open, and a disposed view must not be
+            // dispatched into.
+            if (viewRef.current !== view) return
+            revealLine(view, target, setLitPosition)
+          })()
+        },
+        /**
+         * Ctrl/Cmd+D: `@codemirror/search`'s command, verbatim. It only moves
+         * selections (never the document), so it is safe in the read-only views
+         * the diff panes mount; its false answer is returned so the key can fall
+         * through instead of being swallowed (see `editor-keymap.ts`).
+         */
+        selectNextOccurrence: (view) => selectNextOccurrence({
+          state: view.state,
+          dispatch: transaction => view.dispatch(transaction),
+        }),
       })),
       lineNumbers(),
       highlightActiveLine(),

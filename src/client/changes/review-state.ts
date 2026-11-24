@@ -57,6 +57,40 @@ export function reviewedCount(files: readonly ReviewSubject[], reviewed: Reviewe
   return count
 }
 
+/**
+ * 从 `fromKey` 之后找第一个未审阅的行 —— 面板头部「跳到下一个未审阅」的取数。
+ *
+ * 顺序就是列表本身的顺序：从游标位置往**后**线性找，走到末尾回绕到开头，最多看
+ * 一圈，因此不会重复、也不会越界。跳过已审阅的行是它的职责；它本身不改任何状态，
+ * 也不负责打开文件（那是面板的事）。
+ *
+ * `fromKey` 缺失、或已经不在列表里（行被删了、文件又改了一次导致计数进键变化）时
+ * 从第一行开始：起点未知只会让这一跳从头枚举，绝不会漏掉任何一行。
+ *
+ * 返回值与入参同一行类型（`T extends ReviewSubject`），所以面板拿回的是它自己的
+ * `RemoteChangedFile`，不需要在调用处断言一次。
+ *
+ * @param files - 面板当前的行，数组顺序即导航顺序。
+ * @param reviewed - 已审阅集合（键见 {@link reviewKeyOf}）。
+ * @param fromKey - 当前游标（`reviewKeyOf` 给出的键）；空/未知表示从头开始。
+ * @returns 第一个未审阅的行；空列表或全部已审阅时 `undefined`。
+ */
+export function nextUnreviewed<T extends ReviewSubject>(
+  files: readonly T[],
+  reviewed: ReviewedMap,
+  fromKey?: string,
+): T | undefined {
+  if (files.length === 0) return undefined
+  const current = fromKey === undefined || fromKey === '' ? -1 : files.findIndex(file => reviewKeyOf(file) === fromKey)
+  // One past the row the cursor is on; an unknown start means "from the top".
+  const start = current + 1
+  for (let offset = 0; offset < files.length; offset += 1) {
+    const file = files[(start + offset) % files.length]
+    if (!isReviewed(file, reviewed)) return file
+  }
+  return undefined
+}
+
 /** 切换一行的标记，返回新表（输入不被修改）。 */
 export function toggleReviewed(files: readonly ReviewSubject[], reviewed: ReviewedMap, file: ReviewSubject): Record<string, 1> {
   const key = reviewKeyOf(file)

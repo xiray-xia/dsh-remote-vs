@@ -17,6 +17,7 @@ import {
   commitAll,
   discardPaths,
   GitOpError,
+  initRepo,
   loadBranches,
   loadRemotes,
   loadStashes,
@@ -544,6 +545,28 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   }
 
   /**
+   * `git init` in the directory git was pointed at.
+   *
+   * The "not a repository" state was a dead end: the command existed in the
+   * action layer but no surface offered it. `status` (not `all`) is enough here:
+   * the refresh re-probes the directory and the extras effect reloads the three
+   * side lists as soon as `repoRoot` appears (they are still empty right now).
+   */
+  const initRepository = async (): Promise<void> => {
+    if (alias === '' || store.repoWorkdir === '') return
+    const ok = await confirmDialog({
+      title: t('scm.initRepo'),
+      text: t('scm.initRepoText').replace('{path}', store.repoWorkdir),
+      okText: t('scm.initRepo'),
+    })
+    if (!ok) return
+    await guard('init', async () => {
+      await initRepo(alias, store.repoWorkdir)
+      toast(t('scm.initRepoDone'))
+    }, 'status')
+  }
+
+  /**
    * Stage / unstage, the fast way: the row moves between sections at once and
    * ONE path-limited `git status` confirms it — no repository-wide status, no
    * extras (see `store.stageOptimistic`).
@@ -873,6 +896,66 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     })
   }
 
+  /**
+   * Rename one LOCAL branch (`git branch -m`).
+   *
+   * Remote-tracking rows (`refs/remotes/...`) are excluded: their name is the
+   * remote side's, and `git branch -m` does not rename them. The prompt is
+   * prefilled with the current name, and the write refreshes the extras because
+   * the branch list (and HEAD's own name when it is the current branch) changed.
+   */
+  const renameBranch = async (branch: GitBranch): Promise<void> => {
+    if (repoRoot === undefined) return
+    const answer = await promptDialog({
+      title: t('scm.renameBranch'),
+      text: t('scm.renameBranchText').replace('{branch}', branch.name),
+      initial: branch.name,
+      okText: t('scm.renameBranch'),
+    })
+    if (answer === undefined) return
+    const next = answer.trim()
+    // Empty and unchanged are the two answers that cannot be a rename; say so
+    // instead of running a command git would refuse (or that would be a no-op).
+    if (next === '' || next === branch.name) {
+      toast(t('scm.renameBranchInvalid'), true)
+      return
+    }
+    await guard('branch', async () => {
+      await branchOp(alias, repoRoot, { kind: 'rename', from: branch.name, to: next })
+      toast(t('scm.renameBranchDone'))
+    })
+  }
+
+  /**
+   * Point an existing remote at another URL.
+   *
+   * Only the `fetch` row gets the entry: `git remote set-url` without `--push`
+   * rewrites the fetch URL, and a `push` row's URL is a separate (usually equal)
+   * one — editing it would silently need a flag this action does not expose.
+   * The prompt is prefilled with the current URL so a typo can be fixed in place.
+   */
+  const setRemoteUrl = async (remote: GitRemote): Promise<void> => {
+    if (repoRoot === undefined) return
+    const answer = await promptDialog({
+      title: t('scm.setRemoteUrl'),
+      text: t('scm.setRemoteUrlText').replace('{name}', remote.name),
+      initial: remote.url,
+      okText: t('scm.setRemoteUrl'),
+    })
+    if (answer === undefined) return
+    const url = answer.trim()
+    if (url === '') {
+      toast(t('scm.remoteUrlEmpty'), true)
+      return
+    }
+    // The same URL is not a change: skip the remote git write (and its refresh).
+    if (url === remote.url) return
+    await guard('remote', async () => {
+      await remoteOp(alias, repoRoot, { kind: 'setUrl', name: remote.name, url })
+      toast(t('scm.setRemoteUrlDone'))
+    })
+  }
+
   const changes = buckets.changes
   const staged = buckets.staged
   const conflicts = buckets.conflicts
@@ -1068,8 +1151,18 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                 ? t('git.hint')
                 : `${t('common.loading')} ${store.gitBusy ? `— ${t('scm.loadingSlow')} (≤${Math.round(store.gitDeadlineMs / 1000)}s)` : ''}`}
             {store.repoMissing && (
-              <div className="rvs-repo-bar-fix">
+              <div className="rvs-repo-bar-fix" style={{ gap: 6 }}>
                 <button type="button" className="rvs-chip" onClick={() => setPicker(true)}>{t('scm.browse')}</button>
+                {/* The not-a-repository state offers the one verb that turns it
+                    into a repository: `git init` right here. */}
+                <button
+                  type="button"
+                  className="rvs-chip primary"
+                  disabled={busy !== undefined || store.gitBusy}
+                  onClick={() => { void initRepository() }}
+                >
+                  {t('scm.initRepo')}
+                </button>
               </div>
             )}
           </div>
@@ -1303,6 +1396,18 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                             {branch.remote === true && <span className="rvs-scm-dir"> · remote</span>}
                           </span>
                           <span className="rvs-scm-actions" style={{ display: 'flex' }}>
+                            {/* Local branches only: a remote-tracking ref
+                                (`refs/remotes/...`) carries the remote side's
+                                name and `git branch -m` does not rename it. */}
+                            {branch.remote !== true && (
+                              <IconButton
+                                title={t('scm.renameBranch')}
+                                disabled={busy !== undefined}
+                                onClick={() => { void renameBranch(branch) }}
+                              >
+                                ✎
+                              </IconButton>
+                            )}
                             {!branch.head && (
                               <IconButton
                                 title={t('scm.checkout')}
@@ -1385,6 +1490,13 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
                         <span className="rvs-scm-path" title={remote.url}>{remote.name} <span className="rvs-scm-dir">{remote.kind}</span></span>
                         {remote.kind === 'fetch' && (
                           <span className="rvs-scm-actions" style={{ display: 'flex' }}>
+                            <IconButton
+                              title={t('scm.setRemoteUrl')}
+                              disabled={busy !== undefined}
+                              onClick={() => { void setRemoteUrl(remote) }}
+                            >
+                              ✎
+                            </IconButton>
                             <IconButton
                               title={t('scm.removeRemote')}
                               danger

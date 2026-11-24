@@ -45,8 +45,10 @@ import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
 import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
 import {
   isReviewed,
+  nextUnreviewed,
   parseReviewed,
   pruneReviewed,
+  reviewKeyOf,
   reviewedCount,
   serializeReviewed,
   setAllReviewed,
@@ -179,6 +181,18 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const [busy, setBusy] = useState<string | undefined>(undefined)
   /** This session's local review marks (see `review-state.ts`). */
   const [reviewed, setReviewed] = useState<Record<string, 1>>(() => loadReviewed(sessionId))
+  /**
+   * 「只看未审阅」的过滤开关（纯组件状态）。
+   *
+   * It is a reading posture for THIS pass ("I only care about what is left"),
+   * not a fact about the remote tree, so it is neither persisted nor sent: a
+   * freshly mounted panel starts by showing the whole list.
+   */
+  const [onlyUnreviewed, setOnlyUnreviewed] = useState(false)
+  /** 审阅游标：最近一次打开/跳到的行（`reviewKeyOf` 的键）。 */
+  const [cursorKey, setCursorKey] = useState<string | undefined>(undefined)
+  /** 行元素（键同游标），供「跳到下一个未审阅」把目标滚进视野。 */
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const alive = useRef(true)
   // Mirrors "the panel renders something" for the poll tick: adding that as an
   // effect dependency would rebuild the interval (and pay a re-read) every time
@@ -254,10 +268,12 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     }
   }, [load, collapsed])
 
-  // A different conversation has different marks: reload them instead of carrying
-  // one session's ✓ onto another's files.
+  // A different conversation has different marks (and its own place in the
+  // list): reload instead of carrying one session's ✓ / cursor onto another's
+  // files.
   useEffect(() => {
     setReviewed(loadReviewed(sessionId))
+    setCursorKey(undefined)
   }, [sessionId])
 
   /**
@@ -365,6 +381,10 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   /** Open one listed file in the remote editor with its change marks. */
   const openChanged = useCallback(async (file: RemoteChangedFile): Promise<void> => {
     if (sessionId === undefined || summary === null) return
+    // Opening a row also moves the review cursor, so 「跳到下一个未审阅」continues
+    // from whatever the user just looked at (a click, a menu entry or a jump)
+    // instead of from wherever the last jump happened to stop.
+    setCursorKey(reviewKeyOf(file))
     setBusy(file.path)
     try {
       const diff = await api.changes.diff(sessionId, file.path, repoSubdirOf())
@@ -454,14 +474,51 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   // Drop marks for rows that are gone (or whose counts changed). Without this a
   // path that leaves and comes back would show a ✓ nobody gave it.
   useEffect(() => {
+    // `files` is EMPTY until the first summary lands — that is "not loaded yet",
+    // not "the session changed nothing". Pruning on that frame wiped the marks
+    // just restored from localStorage (and wrote the empty map back).
+    if (summary === null) return
     setReviewed(previous => {
       const next = pruneReviewed(files, previous)
       // A prune only ever removes entries, so equal length means "identical".
       return Object.keys(next).length === Object.keys(previous).length ? previous : next
     })
-  }, [files])
+  }, [files, summary])
+
+  /**
+   * Bring the cursor's row into view.
+   *
+   * The jump can be pressed while the list is FOLDED, where the row does not
+   * exist yet in that commit: the effect runs after the unfold has landed, so
+   * the ref map has the row by then. `block: 'nearest'` means an already visible
+   * row does not move at all, which is what makes a plain row click (which also
+   * moves the cursor) a no-op here. Optional call: a DOM without `scrollIntoView`
+   * (tests) must cost only the scroll.
+   */
+  useEffect(() => {
+    if (cursorKey === undefined || collapsed) return
+    rowRefs.current.get(cursorKey)?.scrollIntoView?.({ block: 'nearest' })
+  }, [cursorKey, collapsed])
 
   const done = reviewedCount(files, reviewed)
+  /**
+   * Rows the body renders: the whole list, or only the rows that are still
+   * unreviewed. The header's counters keep describing the whole list — the
+   * filter is a view, not a recount.
+   */
+  const listed = useMemo(
+    () => (onlyUnreviewed ? files.filter(file => !isReviewed(file, reviewed)) : files),
+    [files, onlyUnreviewed, reviewed],
+  )
+  /**
+   * What 「跳到下一个未审阅」would open; `undefined` both when the list is empty
+   * and when every row is reviewed, which is exactly the button's disabled
+   * condition. `fromKey` is the cursor, so a second press continues the walk.
+   */
+  const nextFile = useMemo(
+    () => nextUnreviewed(files, reviewed, cursorKey),
+    [files, reviewed, cursorKey],
+  )
 
   const openRowMenu = useCallback((event: React.MouseEvent, file: RemoteChangedFile): void => {
     event.preventDefault()
@@ -490,6 +547,20 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       { label: t('changes.reviewNone'), onSelect: () => { setReviewed(setAllReviewed(files, false)) } },
     ])
   }, [files, reviewMenu, t])
+
+  /**
+   * 「跳到下一个未审阅」：把下一行滚进视野并打开它。
+   *
+   * 这一跳不标记任何东西：打开就是它的全部动作，看过没有由用户按 ✓ 决定。折叠着
+   * 的列表先展开，否则只是换了个看不见的游标。打开走 `openChanged`（改动内容、
+   * 绑定解析与撤销来源都在那一条路上），它同时把游标移到目标行，所以连按两次是
+   * 继续往下走，而不是原地打转。
+   */
+  const jumpToNextUnreviewed = useCallback((): void => {
+    if (nextFile === undefined) return
+    setCollapsed(false)
+    void openChanged(nextFile)
+  }, [nextFile, openChanged])
 
   const activeTab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
   const visible = useMemo(() => {
@@ -537,6 +608,38 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
             {t('changes.reviewCount').replace('{done}', String(done)).replace('{total}', String(files.length))}
           </button>
         )}
+        {files.length > 0 && (
+          <>
+            {/*
+              「只看未审阅」: the header's small-chip style (`rvs-changes-reviewed`)
+              is the one text button this panel's palette already carries. Its
+              "on" state is painted from the same two variables it reads, since
+              that chip rule only describes the idle look.
+            */}
+            <button
+              type="button"
+              className="rvs-changes-reviewed"
+              aria-pressed={onlyUnreviewed}
+              title={t('changes.onlyUnreviewed')}
+              onClick={() => { setOnlyUnreviewed(value => !value) }}
+              style={onlyUnreviewed ? { backgroundColor: 'var(--rvs-chg-hover)', color: 'var(--rvs-chg-fg)' } : undefined}
+            >
+              {t('changes.onlyUnreviewed')}
+            </button>
+            {/* 跳到下一个未审阅: one glyph (the words live in the tooltip), disabled
+                when nothing is left. */}
+            <span className="rvs-changes-nav">
+              <button
+                type="button"
+                title={nextFile === undefined ? t('changes.allReviewed') : t('changes.nextUnreviewed')}
+                aria-label={t('changes.nextUnreviewed')}
+                disabled={nextFile === undefined}
+                onClick={jumpToNextUnreviewed}
+                style={nextFile === undefined ? { cursor: 'default', opacity: 0.4 } : undefined}
+              >↓</button>
+            </span>
+          </>
+        )}
         {summary?.pending === true && <span className="rvs-changes-pending">{t('changes.pending')}</span>}
         <span className="rvs-changes-spacer" />
         {stale && <span className="rvs-changes-stale" title={t('changes.staleHint')}>{t('changes.stale')}</span>}
@@ -556,12 +659,24 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
           {files.length === 0 && summary?.unavailable === undefined && summary?.pending !== true && (
             <div className="rvs-changes-note">{t('changes.empty')}</div>
           )}
-          {files.map(file => {
+          {/*
+            The filter can hide every row; an empty body must then say WHY instead
+            of looking like a broken list.
+          */}
+          {files.length > 0 && listed.length === 0 && (
+            <div className="rvs-changes-note">{t('changes.allReviewed')}</div>
+          )}
+          {listed.map(file => {
             const { dir, name } = splitDisplay(file.display)
             const marked = isReviewed(file, reviewed)
+            const key = reviewKeyOf(file)
             return (
               <div
                 key={file.path}
+                ref={(node) => {
+                  if (node === null) rowRefs.current.delete(key)
+                  else rowRefs.current.set(key, node)
+                }}
                 className={`rvs-chg-row${busy === file.path ? ' rvs-chg-loading' : ''}`}
                 data-reviewed={marked ? '1' : '0'}
               >
