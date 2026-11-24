@@ -250,6 +250,12 @@ export function stepFind(view: EditorView, forward: boolean, state?: FindState):
 export function FindWidget(props: {
   view: EditorView | undefined
   open: boolean
+  /**
+   * The page's dictionary translator. Required, not defaulted: the widget has
+   * no language of its own, and a silent Chinese fallback is exactly the
+   * hardcoded copy this prop replaced.
+   */
+  t: (key: string) => string
   /** A selection carried in by Ctrl+F (`id` bumps to re-trigger). */
   seed: { text: string; id: number }
   /**
@@ -419,11 +425,21 @@ export function FindWidget(props: {
       <input
         ref={inputRef}
         className="rvs-find-input"
-        placeholder="查找"
+        placeholder={props.t('find.placeholder')}
         value={state.query}
         spellCheck={false}
         onChange={(e) => patch({ query: e.target.value })}
         onKeyDown={(e) => {
+          // An IME candidate window uses Enter to pick a character and Escape
+          // to drop it. Acting on them would seek to a half-composed query or
+          // close the widget mid-composition, and preventDefault here can
+          // swallow the candidate commit. Stopping propagation first keeps the
+          // host's editor/tree shortcuts out of the composing keystroke.
+          // `isComposing` is the platform-agnostic signal; `keyCode === 229` is
+          // the fallback for engines that dispatch compositionend before this
+          // keydown (Chrome), so one Enter cannot seek twice.
+          e.stopPropagation()
+          if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
           if (e.key === 'Enter') {
             e.preventDefault()
             seek(!e.shiftKey)
@@ -435,30 +451,29 @@ export function FindWidget(props: {
             e.preventDefault()
             e.currentTarget.select()
           }
-          e.stopPropagation()
         }}
       />
       <span className="rvs-toggles">
-        {toggle('caseSensitive', '区分大小写（Aa）')}
-        {toggle('wholeWord', '全字匹配（ab_）')}
-        {toggle('regexp', '正则表达式（.*）')}
+        {toggle('caseSensitive', props.t('find.caseSensitive'))}
+        {toggle('wholeWord', props.t('find.wholeWord'))}
+        {toggle('regexp', props.t('find.regexp'))}
       </span>
       <span className={count.total === 0 ? 'rvs-find-count none' : 'rvs-find-count'}>
-        {state.query === '' ? '' : count.total === 0 ? '无结果' : `${count.index || 1}/${count.total}`}
+        {state.query === '' ? '' : count.total === 0 ? props.t('find.noResults') : `${count.index || 1}/${count.total}`}
       </span>
       <IconButton
-        title="上一个（Shift+Enter）"
+        title={props.t('find.prev')}
         onClick={() => seek(false)}
       >
         <span style={{ fontSize: 13 }}>↑</span>
       </IconButton>
       <IconButton
-        title="下一个（Enter）"
+        title={props.t('find.next')}
         onClick={() => seek(true)}
       >
         <span style={{ fontSize: 13 }}>↓</span>
       </IconButton>
-      <IconButton title="关闭（Esc）" onClick={props.onClose}>
+      <IconButton title={props.t('find.close')} onClick={props.onClose}>
         <IconClose size={11} />
       </IconButton>
     </div>

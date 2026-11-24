@@ -99,6 +99,16 @@ export class RemoteStore {
   }
 
   /**
+   * Absolute path of the JSON document.
+   *
+   * Diagnostics only: a corrupt file must name itself in the error a surface
+   * shows, otherwise the user only sees "the request failed".
+   */
+  get filePath(): string {
+    return this.file
+  }
+
+  /**
    * Reload from disk (picks up external edits).
    *
    * Re-reading on every access is deliberate: the root fs router asks this store

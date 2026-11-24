@@ -33,7 +33,7 @@ import type { Lang } from '../i18n.ts'
 import { buildCommitReviewPrompt, diffByteLength, pickReviewMode } from '../ai-review.ts'
 import { appendToDraft, canInsertDraft, sameLocalDir } from '../composer.ts'
 import { GIT_CAP } from '../../git-ops.ts'
-import { useExplorer } from '../store.tsx'
+import { shallowEqual, useExplorerSelector, type ExplorerValue } from '../store.tsx'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
 import {
   ContextMenu,
@@ -456,6 +456,24 @@ function contentBody(
   )
 }
 
+/**
+ * The store fields the 差异 tab reads — and only those.
+ *
+ * Only the AI-review wiring needs the store here (the commit/body/files/patch
+ * arrive as props), so subscribing to the whole snapshot meant the patch view —
+ * up to a capped commit patch, thousands of rows — repainted on every save, git
+ * refresh and rail switch. The slice is the workspace identity a review prompt
+ * names plus the draft channel (`ctx`).
+ */
+const selectCommitStore = (snapshot: ExplorerValue) => ({
+  ctx: snapshot.ctx,
+  workspace: snapshot.workspace,
+  aliasPaths: snapshot.aliasPaths,
+  alias: snapshot.alias,
+  repoRoot: snapshot.repoRoot,
+  root: snapshot.root,
+})
+
 function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onToggleWrap: () => void }): ReactNode {
   const { t } = props
   const model = useMemo(() => buildCommitPatch(props.patch ?? ''), [props.patch])
@@ -490,7 +508,7 @@ function DiffTab(props: CommitPaneProps & { hidden: boolean; wrap: boolean; onTo
    * extra remote round trip; `patchTruncated` comes from the loader that
    * computed the byte cap — the one place that knows the read was cut.
    */
-  const store = useExplorer()
+  const store = useExplorerSelector(selectCommitStore, shallowEqual)
   const chat = useRemoteChatTarget(store.ctx)
   const viewedAliasPath = store.workspace === undefined ? undefined : store.aliasPaths[store.workspace.id]
   const chatEnabled = chat.sessionId !== undefined

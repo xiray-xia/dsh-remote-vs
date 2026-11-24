@@ -64,6 +64,14 @@ export declare const CodeEditor: import("react").ForwardRefExoticComponent<{
     /** Parent sub-tab visibility (views stay mounted; remeasure on show). */
     visible?: boolean;
     /**
+     * Translator for the editor's own chrome (find widget + change marks).
+     *
+     * Optional so callers that do not own the dictionary (diff panes) keep
+     * working: the fallback makes the same `detectLang()` choice the store does,
+     * so the copy matches the language of the rest of the pane.
+     */
+    t?: (key: string) => string;
+    /**
      * Soft wrap long lines.
      *
      * `undefined` = the historical behaviour (wrap on) for callers that do not

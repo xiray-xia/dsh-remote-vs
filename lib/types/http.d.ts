@@ -44,6 +44,8 @@ export declare function readJsonBody(req: IncomingMessage, opts?: {
     maxBytes?: number;
     objectOnly?: boolean;
 }): Promise<unknown | null>;
+/** Declare which host the response being written concerns (`null` = no host). */
+export declare function scopeHostNotices(res: ServerResponse, alias: string | null): void;
 /** Write one JSON response. */
 export declare function writeJson(res: ServerResponse, status: number, body: unknown, headers?: OutgoingHttpHeaders): void;
 /**

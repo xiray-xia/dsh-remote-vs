@@ -206,6 +206,35 @@ export function markConnectionProbeOk(alias: string): void {
   probes.set(alias, Date.now())
 }
 
+/**
+ * Forget the cached record of every alias the hosts table no longer holds.
+ *
+ * `views`/`probes` are module-level maps keyed by alias and nothing ever removed
+ * an entry: deleting or renaming a host in Settings left its view (and its
+ * explicit-retry probe) in page memory for the life of the tab. Callers pass the
+ * aliases the hosts table currently holds; everything else is stale.
+ *
+ * Only cache entries are removed — no connection state is transitioned. When the
+ * ACTIVE alias is pruned its snapshot becomes `undefined` ("no evidence yet",
+ * which every reader already treats as "not proven down") and subscribers are
+ * woken. `activeAlias` itself is deliberately KEPT: `setActiveConnectionAlias`
+ * early-returns on an unchanged alias, so clearing it here would leave a
+ * re-added host's chip blank until the user switched workspaces.
+ */
+export function pruneConnections(aliases: Iterable<string>): void {
+  const keep = new Set(aliases)
+  let dropped = false
+  for (const alias of [...views.keys()]) {
+    if (keep.has(alias)) continue
+    views.delete(alias)
+    dropped = true
+  }
+  for (const alias of [...probes.keys()]) {
+    if (!keep.has(alias)) probes.delete(alias)
+  }
+  if (dropped) refreshSnapshot()
+}
+
 /** Where the last observed state came from (see `isConnectionRecovery`). */
 export interface ConnectionTrace {
   alias: string

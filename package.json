@@ -83,6 +83,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "THIRD-PARTY-NOTICES.md",
     "LICENSE",
     "icon.svg",
     "locale/*.json"

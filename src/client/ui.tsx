@@ -107,6 +107,10 @@ export function Spinner(props: { size?: number }): ReactNode {
 export function Notice(props: { kind: 'info' | 'error'; children: ReactNode }): ReactNode {
   return (
     <div
+      // A banner is how a remote failure reaches the user (a refused write, a
+      // dead link): announce it. An error asserts; informational copy is polite
+      // so it does not interrupt what the user is typing.
+      role={props.kind === 'error' ? 'alert' : 'status'}
       style={{
         margin: '8px 0',
         padding: '6px 10px',

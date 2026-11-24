@@ -61,6 +61,41 @@ import './changes.css'
 const POLL_MS = 3000
 
 /**
+ * While the list is FOLDED, read the ledger only every Nth poll (15 s).
+ *
+ * The folded panel still shows its header (file count, +/− totals, the
+ * "pending" badge), so the poll cannot simply stop: the header would then keep
+ * describing an older turn. A fifth of the cadence keeps it honest without
+ * paying a loopback POST (and, through the host's ledger `touch`, a tracked
+ * git scan every 30 s) four times a second-old counter does not need.
+ *
+ * A HIDDEN page is different and skips the tick entirely: nothing on screen can
+ * change, and `visibilitychange` catches up at once when it is shown again.
+ * Manual ⟳ (`load(true)`) and the first read are never gated.
+ */
+const FOLDED_POLL_SKIP = 5
+
+/**
+ * While the panel renders NOTHING (`!visible` below and no error — no summary
+ * yet, or none of files/pending/unavailable), patrol the ledger only every Nth
+ * poll (60 s).
+ *
+ * It cannot simply stop: the panel's own visibility is DERIVED from the answer it
+ * polls for, so a stopped poll would never discover the first change of the next
+ * turn and the dock would never come back. The cadence is cut because a parked
+ * dock (another view in the sidebar, a session with no changes) must not pay a
+ * loopback POST plus the host's ledger touch every 15 s, while 60 s is still fast
+ * enough to surface new work without a manual refresh. The first read, the manual
+ * ⟳ and the fold/unfold re-read are not gated at all.
+ */
+/**
+ * The dock is not rendered at all when there is nothing to show, but it must
+ * still notice the next change: one read every 30 s is the compromise between
+ * "a new change surfaces promptly" and "a hidden panel costs nothing".
+ */
+const INVISIBLE_POLL_SKIP = 10
+
+/**
  * Where the review marks are remembered, per session.
  *
  * `localStorage`, like the port-forward rules: this is a note about the user's own
@@ -145,6 +180,10 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   /** This session's local review marks (see `review-state.ts`). */
   const [reviewed, setReviewed] = useState<Record<string, 1>>(() => loadReviewed(sessionId))
   const alive = useRef(true)
+  // Mirrors "the panel renders something" for the poll tick: adding that as an
+  // effect dependency would rebuild the interval (and pay a re-read) every time
+  // the panel appears or disappears, which is not what the cadence is about.
+  const visibleRef = useRef(false)
   const currentSession = useRef(sessionId)
   currentSession.current = sessionId
   const rowMenu = useContextMenu()
@@ -184,13 +223,36 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
 
   useEffect(() => {
     alive.current = true
+    // The first read (and the manual ⟳, which calls `load(true)` directly) is
+    // deliberately NOT gated: it is what paints the panel after a session
+    // switch or a cold page.
     void load()
-    const timer = window.setInterval(() => { void load() }, POLL_MS)
+    let ticks = 0
+    const timer = window.setInterval(() => {
+      // A background tab costs a loopback POST every 3 s without any possible
+      // visible change; skip the tick outright. The listener below is what makes
+      // the panel catch up the moment it is shown again.
+      if (document.hidden) return
+      ticks += 1
+      // An unrendered panel is slower than a folded one: it still has to look for
+      // the next turn's changes (see INVISIBLE_POLL_SKIP), just not at the folded
+      // cadence. The first read, the fold re-read and the manual ⟳ stay outside
+      // this tick.
+      const skip = visibleRef.current ? (collapsed ? FOLDED_POLL_SKIP : 1) : INVISIBLE_POLL_SKIP
+      if (skip > 1 && ticks % skip !== 0) return
+      void load()
+    }, POLL_MS)
+    // Shown again, or unfolded: read at once instead of waiting for the next
+    // tick (a folded panel may be up to 15 s stale by design). `collapsed` is a
+    // dependency, so folding/unfolding also re-runs this effect and reloads.
+    const wake = (): void => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', wake)
     return () => {
       alive.current = false
       window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', wake)
     }
-  }, [load])
+  }, [load, collapsed])
 
   // A different conversation has different marks: reload them instead of carrying
   // one session's ✓ onto another's files.
@@ -434,6 +496,11 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     if (summary === null) return false
     return files.length > 0 || summary.pending === true || summary.unavailable !== undefined
   }, [files.length, summary])
+  // Published for the tick (see `visibleRef`): read at tick time, not captured at
+  // effect time, so the cadence follows the panel without restarting the timer.
+  // "Rendered" mirrors the early return below: an error is shown even without a
+  // summary, so a failed panel keeps the near cadence (its ⟳ is on screen).
+  visibleRef.current = visible || error !== undefined
 
   if (sessionId === undefined || sessionId === '') return null
   if (!visible && error === undefined) return null

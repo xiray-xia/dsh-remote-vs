@@ -9,12 +9,12 @@
  * the OPTIONAL full-width seat the editor's own button switches to.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from './api.ts'
 import { ConnectionStatusChip } from './ConnectionStatus.tsx'
 import { applyConnectionStatuses, isConnectionRecovery, setActiveConnectionAlias, useConnectionStatus, type ConnectionTrace } from './connection.ts'
-import { EditorPane } from './EditorPane.tsx'
-import { FloatingEditorPlaceholder } from './FloatingPlaceholder.tsx'
+import { EditorPane as EditorPaneView } from './EditorPane.tsx'
+import { FloatingEditorPlaceholder as FloatingEditorPlaceholderView } from './FloatingPlaceholder.tsx'
 import { DownloadDock } from './DownloadDock.tsx'
 import { PortsView, IconPlug } from './PortsView.tsx'
 import { MonitorView, IconMonitor } from './MonitorView.tsx'
@@ -25,9 +25,20 @@ import { HistoryPanel } from './scm/HistoryPanel.tsx'
 import { ScmPanel } from './scm/ScmPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import { WorkspacesView } from './WorkspacesView.tsx'
-import { useBootstrap, useExplorer, followSessionWorkspace, refreshAfterReconnect, setFollowSession } from './store.tsx'
+import {
+  followSessionWorkspace,
+  refreshAfterReconnect,
+  selectWorkspace,
+  setFollowSession,
+  setView,
+  shallowEqual,
+  useBootstrap,
+  useExplorerSelector,
+  type ExplorerValue,
+} from './store.tsx'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { DialogHost } from './vsc/kit.tsx'
+import { FOREIGN_TARGET, isModalLayerOpen } from './vsc/save-shortcut.ts'
 import {
   IconBranch,
   IconCode,
@@ -78,6 +89,81 @@ export function planRecoveryReload(
   }
 }
 
+/**
+ * What the SHELL itself renders — and nothing else.
+ *
+ * The shell used to subscribe to the whole snapshot (`useExplorer()`), so every
+ * publish repainted it: a save (3-4 publishes), a git status refresh, a tab
+ * dirty flag. Each of those renders re-created the element for every KEPT-ALIVE
+ * panel (the wrapper is always mounted, see `panelFor`) and — because a function
+ * component re-renders whenever its parent does — rebuilt all ten panels,
+ * including the 4000-row SCM change list.
+ *
+ * This slice is exactly what the root chrome paints (rail badges and title,
+ * workspace picker, branch pill, busy spinner, banner) plus what its effects
+ * need (tabs for the recovery timer, workspaces/aliasPaths for the session
+ * follow, terminalRequest for the terminal page). `useExplorerSelector` +
+ * `shallowEqual` repaint the shell only when one of these changes; the panels
+ * are memoized below, so even when the shell DOES render they are skipped
+ * unless their own props changed.
+ *
+ * Module-level so its identity is stable: between publishes the hook's cache
+ * answers without running the selector.
+ */
+const selectShellStore = (snapshot: ExplorerValue) => ({
+  t: snapshot.t,
+  ready: snapshot.ready,
+  view: snapshot.view,
+  hosts: snapshot.hosts,
+  workspaces: snapshot.workspaces,
+  routing: snapshot.routing,
+  workspace: snapshot.workspace,
+  aliasPaths: snapshot.aliasPaths,
+  error: snapshot.error,
+  repoRoot: snapshot.repoRoot,
+  head: snapshot.head,
+  gitBusy: snapshot.gitBusy,
+  editorSurface: snapshot.editorSurface,
+  floatOpen: snapshot.floatOpen,
+  terminalRequest: snapshot.terminalRequest,
+  tabs: snapshot.tabs,
+  activeTab: snapshot.activeTab,
+  buckets: snapshot.buckets,
+  selectWorkspace: snapshot.selectWorkspace,
+  refreshAll: snapshot.refreshAll,
+  reloadTab: snapshot.reloadTab,
+  info: snapshot.info,
+})
+
+/**
+ * The kept-alive panels, memoized.
+ *
+ * `React.memo` compares PROPS shallowly: none of these panels is re-rendered
+ * just because their parent was — only when their own props changed. That is
+ * what makes the selector migration pay off, and it also covers local shell
+ * state (the Ctrl+P modal, `showHidden`, the IntersectionObserver's `live` bit)
+ * that used to drag every panel into a render.
+ *
+ * The props must therefore be STABLE while nothing changes for the panel:
+ * - `go`/`openHistory`/`openWorkspaceFiles`/`toggleHidden` below are
+ *   `useCallback`s over module-level store actions, so they keep one identity;
+ * - the other props are strings, booleans or store references, compared with
+ *   `Object.is` (and the store hands out the same reference until that value
+ *   changes — see `selectShellStore`).
+ *
+ * `EditorPane` and `FloatingEditorPlaceholder` keep their original JSX names
+ * (a gate pins those call sites), so they are wrapped under their own name.
+ */
+const MemoSearchView = memo(SearchView)
+const MemoScmPanel = memo(ScmPanel)
+const MemoHistoryPanel = memo(HistoryPanel)
+const MemoTerminalView = memo(TerminalView)
+const MemoPortsView = memo(PortsView)
+const MemoMonitorView = memo(MonitorView)
+const MemoWorkspacesView = memo(WorkspacesView)
+const EditorPane = memo(EditorPaneView)
+const FloatingEditorPlaceholder = memo(FloatingEditorPlaceholderView)
+
 export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNode {
   useBootstrap(props.ctx)
   return (
@@ -89,7 +175,7 @@ export function RemoteRoot(props: { ctx: Context; visible?: boolean }): ReactNod
 }
 
 function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
-  const store = useExplorer()
+  const store = useExplorerSelector(selectShellStore, shallowEqual)
   const t = store.t
   // The active panel lives in the shared store so other surfaces (the tree's
   // "Find in Folder…", the SCM panel's history shortcut) can switch it.
@@ -171,16 +257,35 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
       if (!(event.ctrlKey || event.metaKey)) return
       if (event.altKey || event.shiftKey) return
       if (event.key !== 'p' && event.key !== 'P') return
+      // Claimed even when the handler steps aside below: the browser's print
+      // dialog must never appear behind a layer that owns the keyboard.
       event.preventDefault()
       // Auto-repeat would flash the modal on a held key.
       if (event.repeat) return
-      const focused = document.activeElement
-      if (focused instanceof HTMLElement && focused.closest('.xterm') !== null) return
+      // While OUR modal is up, Ctrl+P is its documented "press again to leave",
+      // so the guards below (which belong to OPENING it) must not run.
+      if (!quickOpen) {
+        // A dialog or menu on screen owns the keyboard: opening QuickOpen over a
+        // host approval / the Settings dialog would steal the focus from the
+        // layer the user is answering (audit I-2).
+        if (isModalLayerOpen()) return
+        const focused = document.activeElement
+        if (focused instanceof HTMLElement && focused.closest('.xterm') !== null) return
+        // Every other text field keeps Ctrl+P too — the host's chat composer, a
+        // dialog input — i.e. the same FOREIGN_TARGET the save shortcut yields
+        // to, so both global shortcuts draw one line (audit I-11). Our own
+        // CodeMirror surface is the exception: editing is the state quick open is
+        // FOR, and CodeMirror marks its content `contenteditable`, which the
+        // shared list would otherwise turn into "Ctrl+P does nothing here".
+        if (focused instanceof HTMLElement
+          && focused.closest(FOREIGN_TARGET) !== null
+          && focused.closest('.cm-content') === null) return
+      }
       setQuickOpen(open => !open)
     }
     window.addEventListener('keydown', onQuickOpenKey)
     return () => window.removeEventListener('keydown', onQuickOpenKey)
-  }, [live, storeReady])
+  }, [live, storeReady, quickOpen])
 
   /**
    * Leaving the panel closes the modal.
@@ -193,9 +298,28 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
     if (!live) setQuickOpen(false)
   }, [live])
 
+  /**
+   * Stable identities for the panel props below: a `useCallback` over a
+   * MODULE-level store action (`setView`/`selectWorkspace`), not over the slice
+   * object — the slice changes whenever any chrome field does, which would make
+   * every prop refresh and defeat `React.memo` on the panels.
+   */
   const go = useCallback((next: RailView): void => {
-    store.setView(next)
-  }, [store])
+    setView(next)
+  }, [])
+  /** The SCM panel's "history →" shortcut (stable, see above). */
+  const openHistory = useCallback((): void => {
+    setView('history')
+  }, [])
+  /** The workspace wizard's "open files" (stable, see above). */
+  const openWorkspaceFiles = useCallback((value: string): void => {
+    selectWorkspace(value)
+    setView('explorer')
+  }, [])
+  /** Arrow for `RemoteExplorer`'s "show hidden" toggle (stable, see above). */
+  const toggleHidden = useCallback((): void => {
+    setShowHidden(v => !v)
+  }, [])
 
   /**
    * Connection status: point the client view at the workspace's host and poll
@@ -241,8 +365,9 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    * user's edits away) and the user is told so. Read-only DIFF tabs have no
    * unsaved edits, so they are reloaded like clean file tabs.
    *
-   * Deps are intentionally just the state: `store` identity changes on every
-   * publish, and re-running this on any publish would re-fire the refresh loop.
+   * Deps are intentionally just the connection state: the store slice changes
+   * whenever any chrome field does, and re-running this on those changes would
+   * re-fire the refresh loop.
    */
   const lastConnection = useRef<ConnectionTrace | undefined>(undefined)
   // Live mirrors for the settle timer below (it fires long after the effect ran).
@@ -352,32 +477,32 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
    */
   const panelFor = (id: RailView): ReactNode => {
     switch (id) {
-      case 'search': return <SearchView />
-      case 'scm': return <ScmPanel onOpenHistory={() => go('history')} visible={panelLive('scm')} />
-      case 'history': return <HistoryPanel />
+      case 'search': return <MemoSearchView />
+      case 'scm': return <MemoScmPanel onOpenHistory={openHistory} visible={panelLive('scm')} />
+      case 'history': return <MemoHistoryPanel />
       case 'terminal':
         // The terminal draws its own header + tab strip, so it takes the whole
         // slot (no extra padding wrapper).
-        return <TerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} request={store.terminalRequest} />
+        return <MemoTerminalView t={t} hosts={store.hosts} visible={panelLive('terminal')} request={store.terminalRequest} />
       case 'ports':
         // Same shape as the terminal: its own header (host picker + refresh) and
         // its own scroller, so no viewpad wrapper either.
-        return <PortsView t={t} hosts={store.hosts} visible={panelLive('ports')} />
+        return <MemoPortsView t={t} hosts={store.hosts} visible={panelLive('ports')} />
       case 'monitor':
         // Live host metrics: own header (scope picker + refresh/pause) and its
         // own scroller. Cross-host by design, so it reads `store.hosts` rather
         // than the current binding.
-        return <MonitorView t={t} hosts={store.hosts} visible={panelLive('monitor')} />
+        return <MemoMonitorView t={t} hosts={store.hosts} visible={panelLive('monitor')} />
       case 'workspaces':
         return (
           <div className="rvs-viewpad" style={{ height: '100%' }}>
-            <WorkspacesView
+            <MemoWorkspacesView
               t={t}
               hosts={store.hosts}
               workspaces={store.workspaces}
               routing={store.routing}
               onChanged={store.refreshAll}
-              onOpenFiles={(value) => { store.selectWorkspace(value); go('explorer') }}
+              onOpenFiles={openWorkspaceFiles}
             />
           </div>
         )
@@ -397,7 +522,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
         return (
           <RemoteExplorer
             showHidden={showHidden}
-            onToggleHidden={() => setShowHidden(v => !v)}
+            onToggleHidden={toggleHidden}
             visible={panelLive('explorer')}
           />
         )
@@ -475,7 +600,7 @@ function Shell(props: { ctx: Context; visible: boolean }): ReactNode {
           )}
           {store.gitBusy && <MiniSpinner />}
         </div>
-        {store.error !== undefined && <div className="rvs-banner error">{store.error}</div>}
+        {store.error !== undefined && <div className="rvs-banner error" role="status">{store.error}</div>}
         <div className="rvs-pane" style={{ flex: 1, minHeight: 0 }}>
           {panel}
         </div>

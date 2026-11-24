@@ -507,6 +507,14 @@ export function SearchView(): ReactNode {
           spellCheck={false}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
+            // An IME candidate window uses Enter to pick a character and Escape
+            // to drop it. Searching then would submit a half-composed query,
+            // and clearing the field would wipe the composing text; skipping
+            // preventDefault keeps the candidate commit alive. `isComposing` is
+            // the platform-agnostic signal; `keyCode === 229` is the fallback
+            // for engines that dispatch compositionend before this keydown
+            // (Chrome), so that one Enter cannot run twice.
+            if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
             if (e.key === 'Enter') {
               e.preventDefault()
               void run(query, mode, effectiveScope, options)

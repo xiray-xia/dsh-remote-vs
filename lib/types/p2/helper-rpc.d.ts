@@ -39,6 +39,21 @@ export declare class RpcConnection {
     private dead;
     private disposed;
     /**
+     * Transport generation, bumped by every teardown.
+     *
+     * ssh2 does not close synchronously: `Channel.close()` is a PROTOCOL message
+     * and `Client.end()`'s socket 'close' arrives later. Those late
+     * 'close'/'error' events used to call `invalidate()` after `reconnect()` had
+     * already cleared `dead`, marking the BRAND-NEW dial dead: `open()` then
+     * released the fresh transport and the retry rejected with the OLD
+     * transport's error (probe T6 measured exactly this — a close 5 ms late, a
+     * new dial 20 ms). Every transport callback therefore captures the generation
+     * it was created under and compares it before acting; a teardown invalidates
+     * every callback of the transport it releases, without removing listeners
+     * (ssh2 offers no per-callback unsubscribe that would survive a destroy).
+     */
+    private generation;
+    /**
      * The helper's own error output, kept so its reason survives.
      *
      * Nothing read this stream before, so a helper that died on startup took its
@@ -80,10 +95,40 @@ export declare class RpcConnection {
      * `stderrTail` is cleared too: it describes the connection being torn down, and
      * keeping it would attribute the NEXT failure to the previous transport's error
      * output.
+     *
+     * The generation bump comes FIRST: the close calls below can emit their events
+     * synchronously, and anything this transport has queued must already count as
+     * stale by then.
      */
     private teardownTransport;
     private open;
     /** The part of {@link open} that runs once the socket object exists. */
     private dialAndHello;
+    /**
+     * Mark the connection dead AND release its transport.
+     *
+     * Closing the peer alone was not enough: `SshRpcPeer.close()` destroys the
+     * exec streams, and ssh2's `Channel.destroy()` does not end the `Client` that
+     * carries them — so the session stayed open (30s keepalive and all) while its
+     * owner had already written it off as dead. One leaked socket per invalidation,
+     * until the process exits. `teardownTransport()` is the only path that ends the
+     * Client, so an invalidated connection goes through it too; that is safe to
+     * repeat because each field is cleared as it is closed and `closeQuietly`
+     * ignores a second close — a later `dispose()`, `reconnect()` or failed
+     * `open()` teardown therefore finds nothing left to release.
+     *
+     * Ordering is deliberate: the peer is closed FIRST so in-flight requests reject
+     * with THIS error (the teardown's own close would raise a generic
+     * "channel closed" instead), and `stderrTail` is captured BEFORE the teardown,
+     * which clears it — otherwise `diagnostics` in the dial path would always
+     * report "the helper wrote nothing to stderr".
+     *
+     * Only an ESTABLISHED transport is released here. While `open()` is still
+     * dialing, `conn` is alive and `channel`/`peer` are not, and ending that Client
+     * would strand the handshake: ssh2 clears its own ready timer when the socket
+     * closes and emits 'close' without an 'error', so the promise `open()` awaits
+     * would never settle. `open()` itself releases the attempt instead, once it has
+     * a definitive outcome.
+     */
     private invalidate;
 }

@@ -10,9 +10,17 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { readJsonBodyResult, writeJson, writeRouteError } from './http.ts'
+import { readJsonBodyResult, scopeHostNotices, writeJson, writeRouteError } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
-import { REMOTE_API, MAX_SELECTION_DOWNLOAD, selectionDownloadName, type ExecStreamEvent, type ImportReport, type RemoteTimeouts } from './protocol.ts'
+import {
+  REMOTE_API,
+  MAX_SELECTION_DOWNLOAD,
+  selectionDownloadName,
+  type ExecStreamEvent,
+  type ImportReport,
+  type RemoteHostMetrics,
+  type RemoteTimeouts,
+} from './protocol.ts'
 import type { HostPayload, RemoteStore } from './store.ts'
 import type { RemotePool } from './pool.ts'
 import type { RemoteWorlds } from './p2/worlds.ts'
@@ -29,15 +37,27 @@ import type { SessionChanges } from './changes/recorder.ts'
 import { DEFAULT_TIMEOUTS, clampExecTimeout } from './timeouts.ts'
 import { RemoteViewSettingsStore } from './view-settings.ts'
 
-/** One noServer WebSocket server for terminal upgrades (RFC 6455). */
-// `maxPayload` is the authoritative frame bound: without it ws buffers up to its
-// 100 MiB default before the handler ever sees the message, in the process that
-// also runs the agent. Terminal frames are small JSON control messages.
-const terminalWss = new WebSocketServer({ noServer: true, maxPayload: TERMINAL_MAX_FRAME_BYTES })
-
 function queryParam(url: URL, name: string): string | undefined {
   const value = url.searchParams.get(name)
   return value === null ? undefined : value
+}
+
+/**
+ * Host alias a request URL names (`?alias=`), or `null` when it names none.
+ *
+ * Only the routes know what a request is about; the response writer needs that
+ * in order to attach only THIS host's notices (see `scopeHostNotices`).
+ */
+function urlAliasOf(req: IncomingMessage): string | null {
+  const alias = new URL(req.url ?? '/', 'http://localhost').searchParams.get('alias')
+  return alias === null || alias === '' ? null : alias
+}
+
+/** Host alias a parsed JSON body names, or `null` when it names none. */
+function bodyAliasOf(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null
+  const alias = (value as { alias?: unknown }).alias
+  return typeof alias === 'string' && alias !== '' ? alias : null
 }
 
 /**
@@ -96,6 +116,12 @@ async function readBodyOrError<T>(
   if (result.kind === 'invalid') {
     writeJson(res, 400, { error: 'invalid JSON body' })
     return { ok: false }
+  }
+  // POST routes name their host in the BODY, which the URL cannot tell us: mark
+  // the response here so its one-shot notices bind to that host.
+  if (result.kind === 'ok') {
+    const alias = bodyAliasOf(result.value)
+    if (alias !== null) scopeHostNotices(res, alias)
   }
   return { ok: true, body: result.kind === 'ok' ? (result.value as T) : null }
 }
@@ -257,7 +283,13 @@ function ownSettingsNs(ctx: Context): string | undefined {
   return fallback
 }
 
-export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrade: WebUpgradeRoute; terminalSessions: TerminalSessionRegistry } {
+export function makeRoutes(deps: RemoteRoutesDeps): {
+  routes: WebRoute[]
+  upgrade: WebUpgradeRoute
+  terminalSessions: TerminalSessionRegistry
+  /** Close the terminal upgrade server (plugin unload); idempotent. */
+  close: () => void
+} {
   const { store, pool, worlds, ctx } = deps
   /** Timeouts for this request (a volatile config edit must apply live). */
   const timeouts = (): RemoteTimeouts => deps.timeouts?.() ?? DEFAULT_TIMEOUTS
@@ -269,6 +301,56 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
   const monitor = new HostMonitor(pool)
   const forwards = deps.forwards
   const viewSettings = deps.viewSettings ?? new RemoteViewSettingsStore()
+
+  /**
+   * One noServer WebSocket server for terminal upgrades (RFC 6455).
+   *
+   * `maxPayload` is the authoritative frame bound: without it ws buffers up to
+   * its 100 MiB default before the handler ever sees the message, in the
+   * process that also runs the agent. Terminal frames are small JSON control
+   * messages.
+   *
+   * It belongs to the route set, not to the module: as a module-level singleton
+   * a plugin unload (and every later reload with a fresh module instance) left
+   * the old server object alive forever. It must NOT close per route rebuild —
+   * live PTYs survive a settings edit, and ws answers an upgrade on a closed
+   * server with 503 — so teardown is bound to the fiber (the unload boundary);
+   * a later load builds a fresh instance.
+   */
+  const terminalWss = new WebSocketServer({ noServer: true, maxPayload: TERMINAL_MAX_FRAME_BYTES })
+  /** Idempotent teardown of the terminal upgrade server (plugin unload). */
+  const close = (): void => {
+    try {
+      terminalWss.close()
+    } catch {
+      // Already closed.
+    }
+  }
+  // Route-only probes build `makeRoutes` with a bare ctx (no fiber): they own
+  // no server lifetime and their process ends with the probe.
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => close, 'dsh-remote-vs: terminal websocket server')
+  }
+
+  /**
+   * A corrupt store is a service-side failure with a path the user can repair.
+   *
+   * `store.list()`/`listWorkspaces()` re-read the JSON file, and a bad file
+   * threw straight out of the route: the host webserver answered a bare 400
+   * with no body, so the GUI could only report "request failed" and the path
+   * that needs fixing never reached the person who could fix it.
+   */
+  const writeStoreError = (res: ServerResponse, error: unknown): void => {
+    writeJson(res, 503, {
+      code: 'store-corrupt',
+      error: error instanceof Error ? error.message : String(error),
+      path: store.filePath,
+    })
+  }
+
+  /** Did the store's own JSON parse/validate fail? (`store.filePath` names it.) */
+  const isStoreError = (error: unknown): boolean =>
+    error instanceof Error && error.message.includes(store.filePath)
 
   /**
    * Stream one remote `tar -czf -` command into a `.tar.gz` download response.
@@ -388,7 +470,11 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         const method = req.method ?? 'GET'
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (method === 'GET') {
-          writeJson(res, 200, { hosts: store.list().map(h => store.summarize(h)) })
+          try {
+            writeJson(res, 200, { hosts: store.list().map(h => store.summarize(h)) })
+          } catch (error) {
+            writeStoreError(res, error)
+          }
           return
         }
         if (method === 'POST') {
@@ -549,7 +635,53 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           return
         }
         const timeoutMs = clampExecTimeout(body.timeoutMs)
-        writeJson(res, 200, await pool.exec(body.alias, body.command, timeoutMs === undefined ? {} : { timeoutMs }))
+        /** The client closed the request: its response is never read. */
+        let clientGone = false
+        /** The client asked to stop: kill the remote even if the read is still opening. */
+        let cancelRequested = false
+        /** The cancel handle was invoked (only once). */
+        let cancelSent = false
+        let cancel: (() => void) | undefined
+        /**
+         * Stop the remote process group exactly once.
+         *
+         * Same latch as the streaming route: the disconnect may land while
+         * `pool.exec` is still acquiring the channel (slot queue, setsid probe,
+         * connect), where no handle exists yet — the request is remembered and
+         * fired the moment `onCancel` supplies one. Without this the command kept
+         * running to its timeout after a page refresh, holding a channel slot and
+         * remote CPU for nobody.
+         */
+        const abortRemote = (): void => {
+          cancelRequested = true
+          if (cancel === undefined || cancelSent) return
+          cancelSent = true
+          cancel()
+        }
+        res.on('close', () => {
+          // Also fires after a normal response; the run is settled by then and the
+          // cancel is a no-op.
+          clientGone = true
+          abortRemote()
+        })
+        try {
+          const result = await pool.exec(body.alias, body.command, {
+            ...(timeoutMs === undefined ? {} : { timeoutMs }),
+            onCancel: (handle) => {
+              cancel = handle
+              if (cancelRequested && !cancelSent) {
+                cancelSent = true
+                handle()
+              }
+            },
+          })
+          // Writing onto a closed socket is pointless (and the caller is gone).
+          if (!clientGone) writeJson(res, 200, result)
+        } catch (error) {
+          // The caller may have disconnected while the command was being set up:
+          // do not write a 502 onto a closed socket either.
+          if (!clientGone) writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+        }
       },
     },
     // ----------------------------------------------------- exec (streaming)
@@ -1001,24 +1133,28 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         const method = req.method ?? 'GET'
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (method === 'GET') {
-          const bindings = store.listWorkspaces()
-          const aliasPaths: Record<string, string> = {}
-          for (const b of bindings) aliasPaths[b.id] = worlds.aliasPathFor(b.id)
-          // Lazy registry ensure: a boot-time sync may have run before the
-          // workspace registry was ready (soft-skipped); the GUI always GETs
-          // on load, long after readiness, so re-sync here best-effort.
-          void worlds.syncWorkspaces().catch(() => undefined)
-          writeJson(res, 200, {
-            workspaces: bindings,
-            mode: worlds.mode,
-            aliasPaths,
-            tombstones: store.listTombstones(),
-            version: pluginVersion(),
-            // The client's own deadlines must match what this Host would allow,
-            // otherwise a raised `gitTimeoutMs` still died at the client's 45 s
-            // deadline (2026-10-19: large-repo `git status` looked like a hang).
-            timeouts: timeouts(),
-          })
+          try {
+            const bindings = store.listWorkspaces()
+            const aliasPaths: Record<string, string> = {}
+            for (const b of bindings) aliasPaths[b.id] = worlds.aliasPathFor(b.id)
+            // Lazy registry ensure: a boot-time sync may have run before the
+            // workspace registry was ready (soft-skipped); the GUI always GETs
+            // on load, long after readiness, so re-sync here best-effort.
+            void worlds.syncWorkspaces().catch(() => undefined)
+            writeJson(res, 200, {
+              workspaces: bindings,
+              mode: worlds.mode,
+              aliasPaths,
+              tombstones: store.listTombstones(),
+              version: pluginVersion(),
+              // The client's own deadlines must match what this Host would allow,
+              // otherwise a raised `gitTimeoutMs` still died at the client's 45 s
+              // deadline (2026-10-19: large-repo `git status` looked like a hang).
+              timeouts: timeouts(),
+            })
+          } catch (error) {
+            writeStoreError(res, error)
+          }
           return
         }
         if (method === 'POST') {
@@ -1282,7 +1418,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
               const entry = store.require(alias)
               writeJson(res, 200, { deploy: entry.deploy ?? { status: 'not-deployed' }, helpers: helperAvailability() })
             } catch (error) {
-              writeJson(res, 404, { error: error instanceof Error ? error.message : String(error) })
+              // An unreadable store is NOT "unknown alias": report it as the
+              // service failure it is, with the path the user can repair.
+              if (isStoreError(error)) writeStoreError(res, error)
+              else writeJson(res, 404, { error: error instanceof Error ? error.message : String(error) })
             }
             return
           }
@@ -1486,7 +1625,10 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
           }
           writeJson(res, 200, parseListenPorts(result.stdout, result.exitCode))
         } catch (error) {
-          writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
+          // A corrupt store during `alias` lookup is a 503 with the path, not a
+          // 502 "remote host failed".
+          if (isStoreError(error)) writeStoreError(res, error)
+          else writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
         }
       },
     },
@@ -1497,9 +1639,12 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
     // poll storm costs one channel and the first sample honestly says "unknown"
     // for the two deltas instead of inventing numbers.
     //
-    // `alias` selects one host; omitting it samples every configured host (the
-    // panel asks per host, so this is a convenience/tooling shape, not a
-    // browser fan-out). Loopback-fenced like every other route.
+    // `alias` selects one host and is the ONLY shape that samples: a GET must
+    // not have a dial side effect, and a bare `GET /metrics` used to sample
+    // every configured host (waking sleeping machines for a listing nobody
+    // asked to probe). Without `alias` it answers the cached samples only;
+    // `all=1` asks for the real batch sample explicitly. Loopback-fenced like
+    // every other route.
     {
       kind: 'exact',
       path: REMOTE_API.metrics,
@@ -1515,15 +1660,22 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
         const url = new URL(req.url ?? '/', 'http://localhost')
         const alias = queryParam(url, 'alias')
         const refresh = queryParam(url, 'refresh') === '1'
-        if (alias !== undefined && alias !== '' && store.get(alias) === undefined) {
-          writeJson(res, 404, { error: `unknown host alias: ${alias}` })
-          return
-        }
-        const aliases = alias === undefined || alias === ''
-          ? store.list().map(host => host.alias)
-          : [alias]
+        /** Explicit opt-in to sampling every configured host (tooling/debug). */
+        const all = queryParam(url, 'all') === '1'
         try {
-          const hosts = await Promise.all(aliases.map(host => monitor.sample(host, refresh)))
+          let hosts: RemoteHostMetrics[]
+          if (alias !== undefined && alias !== '') {
+            if (store.get(alias) === undefined) {
+              writeJson(res, 404, { error: `unknown host alias: ${alias}` })
+              return
+            }
+            hosts = [await monitor.sample(alias, refresh)]
+          } else if (all) {
+            const aliases = store.list().map(host => host.alias)
+            hosts = await Promise.all(aliases.map(host => monitor.sample(host, refresh)))
+          } else {
+            hosts = monitor.cached()
+          }
           writeJson(res, 200, { hosts })
         } catch (error) {
           writeJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
@@ -1578,5 +1730,22 @@ export function makeRoutes(deps: RemoteRoutesDeps): { routes: WebRoute[]; upgrad
     },
   }
 
-  return { routes, upgrade, terminalSessions }
+  /**
+   * Mark every response with the host it is about before the handler runs.
+   *
+   * `writeJson` attaches notices only for the alias recorded here (or, for a
+   * POST, the one its parsed body names): one window may then never display —
+   * and consume — another host's one-shot helper-push notice. A request that
+   * names no host (the hosts/workspaces listings) marks `null` and leaves the
+   * queue alone.
+   */
+  const scopedRoutes: WebRoute[] = routes.map(route => ({
+    ...route,
+    handler: (req, res) => {
+      scopeHostNotices(res, urlAliasOf(req))
+      return route.handler(req, res)
+    },
+  }))
+
+  return { routes: scopedRoutes, upgrade, terminalSessions, close }
 }

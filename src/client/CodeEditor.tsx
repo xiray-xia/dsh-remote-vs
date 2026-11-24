@@ -6,7 +6,7 @@
  * local viewer's twin — see selection-popup.ts); the payload is a fenced
  * `rel:lines` block inserted into the on-screen session's composer draft.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
 import { EditorSelection, EditorState, StateEffect, StateField, Compartment, type Extension, type Text } from '@codemirror/state'
@@ -19,6 +19,7 @@ import { syntaxHighlighting } from '@codemirror/language'
 import { vscodeHighlightStyle } from './vsc/editor-palette.ts'
 import { FindWidget, clearFindMarks, findMatchHighlight, stepFind } from './vsc/FindWidget.tsx'
 import { editorKeymap } from './vsc/editor-keymap.ts'
+import { isModalLayerOpen } from './vsc/save-shortcut.ts'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 import { json } from '@codemirror/lang-json'
@@ -38,6 +39,7 @@ import { diff } from '@codemirror/legacy-modes/mode/diff'
 import { buildRemoteSelectionInsert, insertReferenceOrText, type PendingReference } from './composer.ts'
 import { useSelectionPopup } from './selection-popup.ts'
 import { initialEditorTheme, watchEditorScheme } from './vsc/editor-theme.ts'
+import { detectLang, makeT } from './i18n.ts'
 
 /**
  * The bits of an editor's view state that must survive an unmount.
@@ -158,6 +160,14 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   readOnly?: boolean
   /** Parent sub-tab visibility (views stay mounted; remeasure on show). */
   visible?: boolean
+  /**
+   * Translator for the editor's own chrome (find widget + change marks).
+   *
+   * Optional so callers that do not own the dictionary (diff panes) keep
+   * working: the fallback makes the same `detectLang()` choice the store does,
+   * so the copy matches the language of the rest of the pane.
+   */
+  t?: (key: string) => string
   /**
    * Soft wrap long lines.
    *
@@ -280,6 +290,10 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   const dirtyRef = useRef<boolean>(false)
   const propsRef = useRef(props)
   propsRef.current = props
+  // Resolved once per mount: `detectLang()` is a page-level decision (the same
+  // one the store makes), so the identity is stable and safe in effect deps.
+  const fallbackT = useMemo(() => makeT(detectLang()), [])
+  const t = props.t ?? fallbackT
   // The CodeMirror selection listener lives for the mount's lifetime; the
   // chat target may change underneath it (session switches don't remount
   // the editor), so it reads through refs, never captured props.
@@ -373,10 +387,19 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    */
   const armedRef = useRef('')
   const pushedSetRef = useRef<ChangeSet | null | undefined>(undefined)
+  /**
+   * `changeMarksExtension` 的 gutter/chip 文案在安装时按 `t` 解析，所以语言换了
+   * 要和「能力翻转」一样重装一次 compartment。
+   */
+  const labelsRef = useRef(t)
   const undoArmed = props.onUndoChange !== undefined
   useEffect(() => {
     const current = viewRef.current
     if (current === undefined) return
+    if (labelsRef.current !== t) {
+      labelsRef.current = t
+      armedRef.current = ''
+    }
     const set = props.changeSet
     const marks = set !== undefined
     const armed = `${marks ? 'm' : ''}${undoArmed ? 'u' : ''}`
@@ -385,7 +408,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       // 重装扩展会重建字段，之前下发过的数据随之消失，必须再喂一次。
       pushedSetRef.current = undefined
       const extension: Extension = [
-        ...(marks ? [changeMarksExtension] : []),
+        ...(marks ? [changeMarksExtension(t)] : []),
         ...(undoArmed
           ? [undoAffordance({
             onUndo: (mark) => { propsRef.current.onUndoChange?.(mark) },
@@ -407,7 +430,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     } catch {
       // Disposed.
     }
-  }, [props.changeSet, undoArmed, view])
+  }, [props.changeSet, undoArmed, view, t])
 
   /**
    * 跳到某个改动点。
@@ -454,6 +477,14 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       const host = hostRef.current
       if (host === null) return
       const rect = host.getBoundingClientRect()
+      // The surface can disappear while the widget is open (the preview swap
+      // hides the editor host with `display:none`). Close BEFORE positioning:
+      // a zero box would otherwise compute `right = innerWidth + 18` and shove
+      // the box out of the viewport, where Esc can no longer reach it.
+      if (rect.width === 0 || rect.height === 0) {
+        setFindOpen(false)
+        return
+      }
       const next = {
         top: Math.max(4, rect.top + 6),
         right: Math.max(8, window.innerWidth - rect.right + 18),
@@ -477,6 +508,49 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
       window.clearInterval(timer)
     }
   }, [findOpen])
+
+  /**
+   * Find widget lifecycle follows the editor surface.
+   *
+   * The widget is a `document.body` portal, so it does NOT live in the editor's
+   * DOM tree: when the surface it belongs to goes away (a Markdown/HTML preview
+   * swap, a hidden pane, a surface that left the viewport entirely) the box used
+   * to survive on screen with its 350 ms anchor poll still running — and Esc
+   * only works while its input has focus, so the user had to switch back to
+   * source just to close it.
+   *
+   * Closing is the same state flip Esc and the ✕ use (`setFindOpen(false)`), so
+   * the effect above drops the match marks and clears the poll through their
+   * existing path. Nothing here reopens it: when the surface comes back the user
+   * gets Ctrl+F again, but a widget they left behind does not pop up by itself.
+   */
+  useEffect(() => {
+    if (!findOpen) return
+    // The parent's own answer for "this surface is mounted but not shown".
+    if (props.visible === false) {
+      setFindOpen(false)
+      return
+    }
+    const host = hostRef.current
+    if (host === null) return
+    // Geometry the parent cannot see: the preview swap puts `display:none` on
+    // the editor host without touching `visible`.
+    const rect = host.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) {
+      setFindOpen(false)
+      return
+    }
+    // Catch layout changes that emit no scroll/resize event (the preview swap,
+    // an ancestor collapsing). Absent in the jsdom harnesses, hence the guard.
+    if (typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some(entry => !entry.isIntersecting)) setFindOpen(false)
+    })
+    observer.observe(host)
+    return () => {
+      observer.disconnect()
+    }
+  }, [findOpen, props.visible])
 
   /**
    * Note on the SCROLL report: it is wired up INSIDE the mount effect below,
@@ -632,7 +706,15 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     const extensions: Extension[] = [
       history(),
       keymap.of(editorKeymap({
-        save: () => { propsRef.current.onSave() },
+        // The SAME modal gate the window-level listener applies (`save-shortcut.ts`):
+        // CodeMirror handles Mod-s first and prevents the default, so this callback —
+        // not that listener — is the one that decides while the editor has focus. A
+        // modal layer (host approval/settings, our confirm card, a menu) must not be
+        // written through; see editor-keymap's `EditorKeyHandlers.save` contract.
+        save: () => {
+          if (isModalLayerOpen()) return
+          propsRef.current.onSave()
+        },
         openFindForSelection: (view) => {
           const sel = view.state.selection.main
           if (!sel.empty) {
@@ -1067,6 +1149,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
         <FindWidget
           view={view}
           open={findOpen}
+          t={t}
           seed={findSeed}
           tick={findTick}
           anchor={anchor}

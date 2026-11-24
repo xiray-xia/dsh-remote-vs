@@ -300,7 +300,7 @@ export function FileTypeIcon(props: FileIconProps): ReactNode {
       height={size}
       viewBox="0 0 16 16"
       fill="none"
-      className={props.className}
+      className={props.className === undefined ? 'rvs-fi' : `rvs-fi ${props.className}`}
       aria-hidden="true"
     >
       <path
@@ -347,7 +347,14 @@ export function FolderGlyph(props: FolderGlyphProps): ReactNode {
   const size = props.size ?? 16
   return props.open === true
     ? (
-      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={props.className} aria-hidden="true">
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 16 16"
+        fill="none"
+        className={props.className === undefined ? 'rvs-fi' : `rvs-fi ${props.className}`}
+        aria-hidden="true"
+      >
         <path
           d="M1.9 12V4.3c0-.6.4-1 1-1h3.2l1.5 1.7h5.6c.6 0 1 .4 1 1v5.4"
           fill="#c69a3f"
@@ -365,7 +372,14 @@ export function FolderGlyph(props: FolderGlyphProps): ReactNode {
       </svg>
     )
     : (
-      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={props.className} aria-hidden="true">
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 16 16"
+        fill="none"
+        className={props.className === undefined ? 'rvs-fi' : `rvs-fi ${props.className}`}
+        aria-hidden="true"
+      >
         <path
           d="M1.9 12.3V4.2c0-.6.4-1 1-1h3.2l1.5 1.7h5.6c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H2.9c-.6 0-1-.4-1-1Z"
           fill="#d9ab4e"

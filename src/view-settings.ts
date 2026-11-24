@@ -18,7 +18,7 @@
  * keys are ignored — the browser is the only writer, and a stale tab must not be
  * able to corrupt the file with an extra key).
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   REMOTE_VIEW_SETTINGS_DEFAULTS,
@@ -38,6 +38,26 @@ interface ViewSettingsDoc {
 function defaults(): RemoteViewSettings {
   return { ...REMOTE_VIEW_SETTINGS_DEFAULTS }
 }
+
+/** Identity of the settings file at one point in time; `null` = the file is absent. */
+type FileStamp = { mtimeMs: number; size: number } | null
+
+/** Same file identity (both absent counts as same). */
+function sameStamp(left: FileStamp, right: FileStamp): boolean {
+  if (left === null || right === null) return left === right
+  return left.mtimeMs === right.mtimeMs && left.size === right.size
+}
+
+/**
+ * Replays one read-modify-write before giving up.
+ *
+ * Desktop and `dsh web` share `$DSH_HOME/dsh-remote-view.json` by design, and
+ * every patch rewrites the WHOLE document: a plain read-merge-write let the last
+ * window win and silently dropped the other one's preference. A stamp re-check
+ * right before the write turns that into a replay on fresh content; a third
+ * failed attempt fails loud instead of losing a setting.
+ */
+const PATCH_ATTEMPTS = 3
 
 /** A finite width share, clamped into the allowed band; anything else is a miss. */
 function readWidthRatio(value: unknown): number | undefined {
@@ -95,16 +115,36 @@ export class RemoteViewSettingsStore {
    * @returns the settings as stored.
    */
   patch(patch: Record<string, unknown>): RemoteViewSettings {
-    const current = this.get()
-    const next: RemoteViewSettings = {
-      autoOpenRemoteWorkspace: typeof patch.autoOpenRemoteWorkspace === 'boolean'
-        ? patch.autoOpenRemoteWorkspace
-        : current.autoOpenRemoteWorkspace,
-      remoteWorkspaceWidthRatio: readWidthRatio(patch.remoteWorkspaceWidthRatio)
-        ?? current.remoteWorkspaceWidthRatio,
+    for (let attempt = 0; attempt < PATCH_ATTEMPTS; attempt += 1) {
+      // Stamp BEFORE the read: a write landing in between leaves the older stamp
+      // behind, so the re-check below catches it and replays on the new content.
+      const before = this.stampOf()
+      const current = this.get()
+      const next: RemoteViewSettings = {
+        autoOpenRemoteWorkspace: typeof patch.autoOpenRemoteWorkspace === 'boolean'
+          ? patch.autoOpenRemoteWorkspace
+          : current.autoOpenRemoteWorkspace,
+        remoteWorkspaceWidthRatio: readWidthRatio(patch.remoteWorkspaceWidthRatio)
+          ?? current.remoteWorkspaceWidthRatio,
+      }
+      if (!sameStamp(before, this.stampOf())) continue
+      this.save(next)
+      return next
     }
-    this.save(next)
-    return next
+    throw new Error(`${this.file}: another process keeps editing the view settings; retry the operation`)
+  }
+
+  /**
+   * File identity right now; `null` when the file is absent (or cannot be
+   * statted — `get()` fails loud on that case anyway).
+   */
+  private stampOf(): FileStamp {
+    try {
+      const stat = statSync(this.file, { throwIfNoEntry: false })
+      return stat === undefined ? null : { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+      return null
+    }
   }
 
   /** Write one document atomically: a crash never leaves a half-written file. */

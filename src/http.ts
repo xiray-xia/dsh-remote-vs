@@ -2,7 +2,7 @@
  * Small JSON body/response helpers for the /api/dsh-remote route family.
  */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
-import { drainHostNotices } from './notices.ts'
+import { drainHostNotices, takeHostNotices, type HostNotice } from './notices.ts'
 import { DeadlineError } from './timeouts.ts'
 
 const JSON_HEADERS = {
@@ -96,6 +96,34 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * The host alias one response is about (consumed by {@link writeJson}).
+ *
+ * A response may only carry news about the host it concerns, otherwise one
+ * window shows another window's silent helper push and the queue loses it for
+ * the window that caused it. `null` is the explicit "about no single host"
+ * answer (a hosts/workspaces listing): it leaves the queue alone. An untouched
+ * response keeps the historical drain-all answer — only this plugin's route
+ * table marks its responses, and every route states what it is about.
+ */
+const noticeAliasOf = new WeakMap<ServerResponse, string | null>()
+
+/** Declare which host the response being written concerns (`null` = no host). */
+export function scopeHostNotices(res: ServerResponse, alias: string | null): void {
+  noticeAliasOf.set(res, alias === '' ? null : alias)
+}
+
+/** The notices this response may carry and consume. */
+function noticesFor(res: ServerResponse, attachable: boolean, status: number): HostNotice[] {
+  // A failed response is never read by the client's notice dispatcher, so
+  // draining into it would silently drop the notice; leave it queued for the
+  // next successful response about the same host.
+  if (!attachable || status >= 400) return []
+  if (!noticeAliasOf.has(res)) return drainHostNotices()
+  const alias = noticeAliasOf.get(res)
+  return typeof alias === 'string' && alias !== '' ? takeHostNotices(alias) : []
+}
+
 /** Write one JSON response. */
 export function writeJson(
   res: ServerResponse,
@@ -106,10 +134,13 @@ export function writeJson(
   // Piggyback Host notices (an automatic helper push happened during this
   // request) on any plain-object body: the browser's API wrapper renders them
   // after parsing, so the user learns about the push without opening Settings.
-  // Arrays and scalars cannot carry extra keys — their notices stay queued for
-  // the next object response instead of being silently dropped.
+  // Only the host-scoped ones ride along (see `scopeHostNotices`): the browser
+  // toasts them in the window that made the request, so a critical detail is
+  // that the request is about that host. Arrays and scalars cannot carry extra
+  // keys — their notices stay queued for the next object response instead of
+  // being silently dropped.
   const attachable = typeof body === 'object' && body !== null && !Array.isArray(body)
-  const notices = attachable ? drainHostNotices() : []
+  const notices = noticesFor(res, attachable, status)
   const payload = notices.length > 0
     ? { ...body as Record<string, unknown>, notices }
     : body

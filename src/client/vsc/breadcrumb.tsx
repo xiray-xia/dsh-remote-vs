@@ -10,7 +10,15 @@
  * Read-only: it only calls `fileOp.list` on the remote. The remote path is the
  * Host's own business — no second validation layer here.
  */
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import { api } from '../api.ts'
 import type { RemoteFileEntry } from '../../protocol.ts'
 
@@ -73,6 +81,14 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
   const [error, setError] = useState<string | undefined>(undefined)
   /** Load token: two quick segment clicks must only let the last answer land. */
   const loadSeq = useRef(0)
+  /** The menu box, so opening it can hand over the keyboard. */
+  const menuRef = useRef<HTMLDivElement>(null)
+  /** The crumb that opened the menu; focus goes back here on an Esc dismissal. */
+  const openerRef = useRef<HTMLElement | null>(null)
+  /** True when the last close was Esc (only then is focus handed back). */
+  const restoreFocus = useRef(false)
+  /** The first item is focused once per opening, not on every directory reload. */
+  const firstItemFocused = useRef(false)
 
   const t = props.t
   const root = props.root.replace(/\/+$/, '')
@@ -138,7 +154,10 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
     const onKeyDown = (event: KeyboardEvent): void => {
       // During IME composition Esc cancels the candidate, not the menu.
       if (event.isComposing) return
-      if (event.key === 'Escape') setMenu(undefined)
+      if (event.key === 'Escape') {
+        restoreFocus.current = true
+        setMenu(undefined)
+      }
     }
     document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('keydown', onKeyDown, true)
@@ -153,6 +172,40 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
     setMenu(undefined)
   }, [props.path])
 
+  /**
+   * Menu keyboard model (audit I-12): the menu declared `role="menu"` but had no
+   * arrow keys and no initial focus, so a screen reader announced a menu whose
+   * items could only be reached with Tab. Opening hands the keyboard to the menu
+   * box, and the first item takes it as soon as the (async) listing lands.
+   */
+  useEffect(() => {
+    if (menu === undefined) return
+    firstItemFocused.current = false
+    menuRef.current?.focus()
+  }, [menu])
+
+  useEffect(() => {
+    if (menu === undefined || loading || error !== undefined || entries.length === 0) return
+    if (firstItemFocused.current) return
+    const box = menuRef.current
+    if (box === null) return
+    const active = document.activeElement
+    // Never pull focus away from a control the user already reached.
+    if (active !== box && box.contains(active)) return
+    firstItemFocused.current = true
+    box.querySelector<HTMLElement>('.rvs-crumb-menu-item')?.focus()
+  }, [menu, loading, error, entries])
+
+  // Esc is a dismissal, so it gives the keyboard back to the crumb that opened
+  // the menu instead of dropping focus on <body>. An outside click keeps focus
+  // where the user clicked, and picking an entry moves it on by itself.
+  useEffect(() => {
+    if (menu !== undefined || !restoreFocus.current) return
+    restoreFocus.current = false
+    const opener = openerRef.current
+    if (opener !== null && document.body.contains(opener)) opener.focus()
+  }, [menu])
+
   if (!underRoot) {
     return (
       <nav className="rvs-breadcrumb" aria-label={tr(t, 'editor.crumbLabel', '文件路径')}>
@@ -163,6 +216,7 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
 
   /** Click a segment: a directory lists itself; the file lists its parent. */
   const clickCrumb = (crumb: Crumb, index: number, event: ReactMouseEvent<HTMLButtonElement>): void => {
+    openerRef.current = event.currentTarget
     const isFile = index === crumbs.length - 1
     const dir = isFile ? crumb.path.slice(0, Math.max(0, crumb.path.lastIndexOf('/'))) : crumb.path
     openMenu(dir === '' ? '/' : dir, Math.max(0, event.currentTarget.offsetLeft))
@@ -173,6 +227,30 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
     const parts = pathSegments(dir)
     parts.pop()
     return parts.length === 0 ? undefined : `/${parts.join('/')}`
+  }
+
+  /** The enabled entries of the open menu, in DOM order. */
+  const menuItems = (): HTMLElement[] => {
+    const box = menuRef.current
+    if (box === null) return []
+    return Array.from(box.querySelectorAll<HTMLElement>('.rvs-crumb-menu-item'))
+  }
+
+  /** ↑/↓/Home/End between entries (Enter/Space is the button's own activation). */
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return
+    const items = menuItems()
+    if (items.length === 0) return
+    event.preventDefault()
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? items.length - 1
+        : event.key === 'ArrowDown'
+          ? (at + 1) % items.length
+          : (at <= 0 ? items.length - 1 : at - 1)
+    items[next]?.focus()
   }
 
   return (
@@ -199,7 +277,17 @@ export function Breadcrumb(props: BreadcrumbProps): ReactNode {
       })}
 
       {menu !== undefined && (
-        <div className="rvs-crumb-menu" role="menu" style={{ left: menu.left }}>
+        <div
+          ref={menuRef}
+          className="rvs-crumb-menu"
+          role="menu"
+          // A non-modal picker: Ctrl+S stays live while it is open (the editor is
+          // still the surface in use). `isModalLayerOpen()` reads this marker.
+          data-rvs-nonmodal=""
+          tabIndex={-1}
+          onKeyDown={onMenuKeyDown}
+          style={{ left: menu.left }}
+        >
           <div className="rvs-crumb-menu-head">
             <button
               type="button"

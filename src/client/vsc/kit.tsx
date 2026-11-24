@@ -654,13 +654,22 @@ export function DialogHost(): ReactNode {
   return createPortal(
     <>
       {request !== undefined && <ModalCard key={request.id} request={request} />}
-      {items.length > 0 && (
-        <div className="rvs-toasts">
-          {items.map(item => (
-            <div key={item.id} className={item.error ? 'rvs-toast error' : 'rvs-toast'}>{item.text}</div>
-          ))}
-        </div>
-      )}
+      {/* Toast is the plugin's only report channel for "已上传 / 删除失败 / 已推送":
+          without a live region a screen reader never heard any of it (WCAG 4.1.3).
+          The stack is mounted even while empty so the region EXISTS before the
+          message arrives — a `role=status` region inserted together with its text
+          is announced by some screen readers and missed by others. It stays
+          polite; an error item asserts on its own, so a failure interrupts and a
+          success does not. (An empty stack is a zero-sized fixed box: no paint.) */}
+      <div className="rvs-toasts" role="status" aria-live="polite">
+        {items.map(item => (
+          <div
+            key={item.id}
+            className={item.error ? 'rvs-toast error' : 'rvs-toast'}
+            role={item.error ? 'alert' : undefined}
+          >{item.text}</div>
+        ))}
+      </div>
     </>,
     document.body,
   )
@@ -670,9 +679,13 @@ export function DialogHost(): ReactNode {
  * Focusable elements inside one dialog, in DOM order.
  *
  * The modal is portaled to the END of `<body>`, so without a Tab trap a
- * keyboard user tabs through the whole page to reach its buttons.
+ * keyboard user tabs through the whole page to reach its buttons. Exported for
+ * the other portaled layers that need the same walk (the terminal snippet
+ * popover); `DoctorPanel` keeps its own copy because it deliberately does not
+ * import this module (its copy path must not use the silently-failing
+ * `copyText`, which `check-doctor.mjs` pins).
  */
-function focusables(root: HTMLElement | null): HTMLElement[] {
+export function focusables(root: HTMLElement | null): HTMLElement[] {
   if (root === null) return []
   return Array.from(root.querySelectorAll<HTMLElement>(
     'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
@@ -708,6 +721,10 @@ function ModalCard(props: { request: ModalRequest }): ReactNode {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // An IME candidate window owns Enter/Escape while composing: acting here
+      // would resolve the prompt with a half-composed value (or cancel it while
+      // the candidate list is open).
+      if (e.isComposing === true || e.keyCode === 229) return
       if (e.key === 'Escape') {
         e.preventDefault()
         request.resolve(request.kind === 'prompt' ? undefined : false)

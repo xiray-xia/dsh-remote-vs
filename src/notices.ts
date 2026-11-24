@@ -28,7 +28,29 @@ export function pushHostNotice(notice: HostNotice): void {
   pending = [...pending, notice]
 }
 
-/** Take everything queued; the caller attaches it and the queue starts over. */
+/**
+ * Take the notices queued for ONE host alias.
+ *
+ * A response only reports news about the host it is about. Draining the whole
+ * queue from whichever response was written first delivered host A's helper
+ * push into a window looking at host B — and consumed it, so A never saw it.
+ * Notices for other aliases stay queued for a response about their host.
+ */
+export function takeHostNotices(alias: string): HostNotice[] {
+  if (pending.length === 0) return []
+  const taken = pending.filter(notice => notice.alias === alias)
+  if (taken.length === 0) return []
+  pending = pending.filter(notice => notice.alias !== alias)
+  return taken
+}
+
+/**
+ * Take everything queued (no host filtering).
+ *
+ * Kept for callers that own the whole queue — the offline probes reset it, and
+ * a response written OUTSIDE the route table has no host to filter by
+ * (`src/http.ts` keeps that historical drain-all answer).
+ */
 export function drainHostNotices(): HostNotice[] {
   if (pending.length === 0) return []
   const drained = pending

@@ -88,13 +88,55 @@ const listeners = new Set<() => void>()
 const controllers = new Map<string, AbortController>()
 let sequence = 0
 
-const notify = (): void => {
+/**
+ * Minimum gap between two PROGRESS notifications, in ms.
+ *
+ * The transfer callbacks fire once per fetched chunk (commonly 64 KiB), so a
+ * fast download notified the dock — and re-rendered every row it draws —
+ * hundreds of times per second, while the bar moves by less than a pixel.
+ * Coalescing on a ~10 Hz cadence keeps the bar visibly live and the task table
+ * synchronous: `tasks` is still patched on every chunk, only the "something
+ * changed" signal is rate-limited. A terminal status NEVER waits for this timer
+ * (see `notify`) — a finished task must appear finished at once.
+ */
+const PROGRESS_NOTIFY_MS = 100
+
+/** The pending coalesced notification, if one is scheduled. */
+let progressTimer: ReturnType<typeof setTimeout> | undefined
+
+const emit = (): void => {
   for (const listener of [...listeners]) listener()
 }
 
-const patch = (id: string, next: Partial<DownloadTask>): void => {
+/** Immediate notification: drops any queued progress tick, so final states win. */
+const notify = (): void => {
+  if (progressTimer !== undefined) {
+    clearTimeout(progressTimer)
+    progressTimer = undefined
+  }
+  emit()
+}
+
+/** At most one queued notification per `PROGRESS_NOTIFY_MS` window. */
+const notifyProgress = (): void => {
+  if (progressTimer !== undefined) return
+  progressTimer = setTimeout(() => {
+    progressTimer = undefined
+    emit()
+  }, PROGRESS_NOTIFY_MS)
+}
+
+/**
+ * Patch one task and notify.
+ *
+ * `coalesce` is for the per-chunk progress path only: it updates the snapshot
+ * at once (readers/`waitTask` see it) but announces the change on the throttled
+ * cadence. Every status transition stays on the immediate path.
+ */
+const patch = (id: string, next: Partial<DownloadTask>, coalesce = false): void => {
   tasks = tasks.map(task => (task.id === id ? { ...task, ...next } : task))
-  notify()
+  if (coalesce) notifyProgress()
+  else notify()
 }
 
 /** Store surface: `useSyncExternalStore(subscribe, getSnapshot, getSnapshot)`. */
@@ -129,10 +171,13 @@ const launch = (id: string, controller: AbortController, run: (options: RunnerOp
         signal: controller.signal,
         onProgress: (progress) => {
           if (controller.signal.aborted) return
+          // The task table is patched on every chunk; only the dock's repaint is
+          // coalesced (see PROGRESS_NOTIFY_MS) — a dropped chunk would make the
+          // byte counter lag its own progress bar.
           patch(id, {
             loaded: progress.loaded,
             ...(progress.total === undefined ? {} : { total: progress.total }),
-          })
+          }, true)
         },
       })
       if (outcome === 'handedOff') {

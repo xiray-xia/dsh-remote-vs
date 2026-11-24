@@ -33,6 +33,18 @@ export interface SaveShortcutEvent {
     target: EventTarget | null;
 }
 /**
+ * Areas where Ctrl+S belongs to somebody else.
+ *
+ * A terminal (xterm) forwards keys to the remote shell and a themed dialog's
+ * input is mid-edit; hijacking the key there would be a surprise, and for the
+ * shell it would also steal a control character (`^S`).
+ *
+ * Exported so the plugin's OTHER window-level shortcut (Ctrl+P in `RemoteRoot`)
+ * draws the same line instead of re-inventing a narrower one — it used to
+ * exclude only `.xterm` and hijacked the host's chat composer.
+ */
+export declare const FOREIGN_TARGET = ".xterm, textarea, input, [contenteditable=\"true\"]";
+/**
  * Is this the save shortcut this module should act on?
  *
  * Pure: the caller passes the event's fields, so the gate can pin every rule
@@ -41,6 +53,15 @@ export interface SaveShortcutEvent {
 export declare function isSaveShortcut(event: SaveShortcutEvent): boolean;
 /** A registered save target: `undefined` = this surface has nothing to save. */
 export type SaveShortcutResolver = () => (() => void) | undefined;
+/**
+ * Is a modal layer (host approval / settings, our own dialog, an open menu) on
+ * screen right now?
+ *
+ * Called from the DOM listener entry points only: `isSaveShortcut` stays a pure
+ * predicate on the event. Without it Ctrl+S silently saved the remote file
+ * underneath a pending host approval dialog — a write the user never confirmed.
+ */
+export declare function isModalLayerOpen(): boolean;
 /**
  * Install the window-level save shortcut for one surface.
  *

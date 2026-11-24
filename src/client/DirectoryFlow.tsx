@@ -237,6 +237,8 @@ function LocalLeg(props: {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
+            // IME candidate Enter must not navigate to a half-composed path.
+            if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
             if (e.key === 'Enter') go()
           }}
           disabled={blocked}
@@ -254,7 +256,19 @@ function LocalLeg(props: {
         {(listing?.entries ?? []).filter((e) => !e.hidden).map((entry) => (
           <div
             key={entry.path}
+            // Same fix as the standalone picker (audit I-10): Enter/Space enter
+            // the directory. While a browse is in flight the row is inert, so it
+            // is taken out of the tab order instead of silently doing nothing.
+            role="button"
+            tabIndex={blocked ? -1 : 0}
+            aria-disabled={blocked === true ? true : undefined}
             onClick={() => { if (!blocked) void browse(entry.path) }}
+            onKeyDown={(e) => {
+              if (blocked) return
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              e.preventDefault()
+              void browse(entry.path)
+            }}
             title={entry.path}
             style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 8px', borderRadius: 4, cursor: blocked ? 'default' : 'pointer', fontSize: 13 }}
             onMouseEnter={(e) => {
@@ -284,6 +298,8 @@ function LocalLeg(props: {
               value={mkdirName}
               onChange={(e) => setMkdirName(e.target.value)}
               onKeyDown={(e) => {
+                // IME candidate Enter must not create a folder from a half-composed name.
+                if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
                 if (e.key === 'Enter') mkdir()
               }}
               placeholder={t('flow.mkdirName')}

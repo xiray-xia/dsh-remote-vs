@@ -162,6 +162,18 @@ export class ForwardManager {
    * first listener orphaned — unreachable from the panel and never closed.
    */
   private readonly starting = new Map<string, Promise<RemoteForwardState>>()
+  /**
+   * Rules stopped while their listener was still BINDING.
+   *
+   * A pending bind is not in `forwards` yet, so `stop()`, `stopAlias()`,
+   * `stopAll()` and `dispose()` used to see nothing to close: the listener the
+   * OS was about to hand out stayed bound with no panel row left to stop it
+   * (click a forward, immediately disable the plugin or delete the host, and
+   * `127.0.0.1:<port>` stayed taken until the Host restarted). The id sits here
+   * until the bind settles; a settling bind that finds its id records itself as
+   * stopped and closes the fresh listener instead of entering `forwards`.
+   */
+  private readonly stoppedWhileBinding = new Set<string>()
   /** Set on unload so a bind that settles afterwards closes itself. */
   private disposed = false
 
@@ -189,17 +201,20 @@ export class ForwardManager {
       throw new Error(`host ${request.alias} already has ${maxPerAlias} local forwards; stop one first`)
     }
     const pending = this.bindForward(id, request, requestedLocalPort).then((forward) => {
-      // Unloaded while the bind was in flight: nobody can ever stop this
-      // listener, so it closes itself instead of leaking.
-      if (this.disposed) {
+      // Unloaded/stopped while the bind was in flight: nobody can ever stop
+      // this listener from the panel, so it closes itself instead of leaking.
+      if (this.disposed || this.stoppedWhileBinding.has(id)) {
         this.closeForward(forward)
-        throw new Error('the port-forward manager was unloaded while the rule was binding')
+        throw new Error(this.disposed
+          ? 'the port-forward manager was unloaded while the rule was binding'
+          : 'the rule was stopped while its local listener was binding')
       }
       this.forwards.set(id, forward)
       this.log('info', `forward ${id} listening on 127.0.0.1:${forward.localPort}`)
       return this.stateOf(forward)
     }).finally(() => {
       this.starting.delete(id)
+      this.stoppedWhileBinding.delete(id)
     })
     this.starting.set(id, pending)
     return pending
@@ -208,10 +223,17 @@ export class ForwardManager {
   /** Stop one rule. Returns false when the id is unknown (already stopped). */
   stop(id: string): boolean {
     const forward = this.forwards.get(id)
-    if (forward === undefined) return false
-    this.forwards.delete(id)
-    this.closeForward(forward)
-    this.log('info', `forward ${id} stopped`)
+    if (forward !== undefined) {
+      this.forwards.delete(id)
+      this.closeForward(forward)
+      this.log('info', `forward ${id} stopped`)
+      return true
+    }
+    // Still binding: the listener does not exist yet, so the stop is recorded
+    // and `start()` closes the listener the moment the bind settles.
+    if (!this.starting.has(id)) return false
+    this.stoppedWhileBinding.add(id)
+    this.log('info', `forward ${id} stopped while binding; its listener will close on settle`)
     return true
   }
 
@@ -230,6 +252,13 @@ export class ForwardManager {
       this.closeForward(forward)
       stopped += 1
     }
+    // Rules still binding have no listener to close yet, but the one they are
+    // about to create belongs to this alias too.
+    for (const id of [...this.starting.keys()]) {
+      if (this.forwards.has(id) || !id.startsWith(`${alias}|`)) continue
+      this.stoppedWhileBinding.add(id)
+      stopped += 1
+    }
     if (stopped > 0) this.log('info', `stopped ${stopped} forward(s) for deleted host ${alias}`)
     return stopped
   }
@@ -246,6 +275,13 @@ export class ForwardManager {
     for (const id of [...this.forwards.keys()]) {
       if (this.stop(id)) stopped += 1
     }
+    // Pending binds are part of "every rule" too: deleting the rows without
+    // waiting for the bind is exactly how a listener used to outlive its panel.
+    for (const id of [...this.starting.keys()]) {
+      if (this.forwards.has(id)) continue
+      this.stoppedWhileBinding.add(id)
+      stopped += 1
+    }
     return stopped
   }
 
@@ -260,7 +296,9 @@ export class ForwardManager {
   /** Close every listener and every proxied connection (plugin unload). */
   dispose(): void {
     this.disposed = true
-    for (const id of [...this.forwards.keys()]) this.stop(id)
+    // `stopAll` covers bound rules AND pending binds (the settle path above
+    // closes a listener that was created after this call started).
+    this.stopAll()
   }
 
   /** Bind the loopback listener. Split out so the error path is one place. */

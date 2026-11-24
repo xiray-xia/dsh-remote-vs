@@ -10,12 +10,12 @@
  * previous explorer, and `insertRemoteReference` still writes into the
  * on-screen session's composer draft.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
 import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
 import { api, uploadFile } from './api.ts'
 import { startDownload, startSelectionDownload } from './downloads.ts'
-import { useConnectionStatus, isConnectionFailure } from './connection.ts'
+import { useConnectionStatus, isConnectionFailure, pruneConnections } from './connection.ts'
 import { createDragExpander, type DragExpander } from './drag-expand.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { ListingRequests } from './listing-requests.ts'
@@ -303,11 +303,149 @@ function formatUploadLabel(
 const LISTING_CACHE_KEEP = 50
 
 /**
+ * How many EXPANDED directories whose rows are currently NOT drawn may keep
+ * their listing cached.
+ *
+ * `trimListings` exempts every open directory, because an evicted open
+ * directory has no rows to draw from and nothing would ever ask for it again.
+ * That exemption was unbounded: collapsing an ancestor leaves its descendants
+ * in `expanded` (so re-opening it restores their expansion), and a long
+ * browsing session in a deep tree therefore kept every directory it ever
+ * opened — each one up to the host's 20000-entry listing cap. The bound below
+ * keeps the RECENT remembered expansions and forgets the oldest ones, which
+ * costs one click (the folder comes back collapsed and re-lists) instead of
+ * holding unbounded memory. Directories whose rows are ON SCREEN are never
+ * touched.
+ */
+const HIDDEN_EXPANDED_KEEP = 20
+
+/**
  * Hover intent before a directory's listing is prefetched: long enough that
  * sweeping the pointer across the tree does not fire a request per row, short
  * enough that arriving at a folder and clicking it finds the listing warm.
  */
 const PREFETCH_HOVER_MS = 150
+
+/**
+ * Height of one painted tree row, in px.
+ *
+ * Fixed rather than measured: the window below turns the scroll offset into a
+ * row index with arithmetic (`offset / height`) and the two spacers stand in
+ * for every row outside the slice, so one row that renders taller than this
+ * makes the whole slice drift from the scrollbar. The stylesheet box alone is
+ * not stable: `.rvs-node` is 18 px line box + 4 + 4 px padding = 26 px, and 30 px
+ * while the hover actions (a 22 px button) are on screen, while the inline
+ * create row with its input is already 28 px. `TREE_ROW_BOX` therefore pins
+ * every row root to this height inline instead of touching the shared CSS.
+ */
+const TREE_ROW_HEIGHT = 28
+
+/** Rows painted above and below the viewport, so a wheel step is already ready. */
+const TREE_OVERSCAN = 8
+
+/**
+ * Rows painted when the scroller has no measurable viewport (jsdom, or a panel
+ * parked behind `display:none`): there is no offset to slice against, and a
+ * tree that renders NOTHING is indistinguishable from an empty one — the gates
+ * that query tree rows would fail on a page that merely has not been laid out.
+ * A visible browser always reports a positive `clientHeight` and never takes
+ * this branch.
+ */
+const TREE_WINDOW_FALLBACK = 40
+
+/** Trees at most this many rows are painted whole by the no-viewport fallback. */
+const TREE_WINDOW_FALLBACK_ALL = 100
+
+/**
+ * Inline box for every row root (entry, create and loading/offline rows).
+ *
+ * The 2 px vertical padding replaces the stylesheet's 4 px so the 22 px hover
+ * button still fits inside the pinned height; horizontal padding stays in CSS
+ * and `paddingLeft` is added per row (indentation).
+ */
+const TREE_ROW_BOX = {
+  height: TREE_ROW_HEIGHT,
+  boxSizing: 'border-box',
+  paddingTop: 2,
+  paddingBottom: 2,
+} as const
+
+/**
+ * The ONE collator every directory listing sorts with.
+ *
+ * A directory is sorted whole on each listings change, so a 20 000-entry folder
+ * costs ~261 000 pairwise comparisons (measured on a shuffled fixture: 20 000 ×
+ * log2(20 000) ≈ 280 000 is the bound), and `String.prototype.localeCompare`
+ * resolves a collator on every single call. Reusing one `Intl.Collator` turns
+ * that into a plain method call.
+ *
+ * The options are `localeCompare()`'s defaults — `undefined` locale is the same
+ * browser default, `sensitivity: 'variant'` is the default (case and accent
+ * significant) — so the resulting ORDER is unchanged, which is the point of this
+ * NIT. `numeric: true` is deliberately NOT set: it would move `file10` after
+ * `file9` (and `v10` after `v2`) — a visible reorder of a tree users already
+ * know, not a performance fix.
+ */
+const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: false, sensitivity: 'variant' })
+
+/** The half-open range of flat rows the tree paints, plus the spacers around it. */
+export interface TreeWindow {
+  /** First painted row index into the flat row list. */
+  from: number
+  /** One past the last painted row index. */
+  to: number
+  /** Height of the rows above `from`, in px. */
+  before: number
+  /** Height of the rows below `to`, in px. */
+  after: number
+}
+
+/**
+ * Which flat rows to paint for one scroll position.
+ *
+ * Pure, so a gate or probe can pin the arithmetic without a layout engine: the
+ * tree is one flat pre-order list with a fixed row height, so the first visible
+ * row is `offset / height` and the painted count is
+ * `ceil(visible height / height) + overscan`. `scrollTop` is the scroller's
+ * offset; `headerHeight` is the block ABOVE the rows inside it (the workspace
+ * root label, the drop hint, `.rvs-tree`'s top padding), because the offset only
+ * starts indexing rows below that block.
+ *
+ * `viewportHeight <= headerHeight` means there is no room for rows at all
+ * (jsdom or a hidden panel): the fallback paints the whole tree while it is
+ * small and `TREE_WINDOW_FALLBACK` rows otherwise. The invariant
+ * `before + (to - from) * TREE_ROW_HEIGHT + after === total * TREE_ROW_HEIGHT`
+ * holds on every branch, which is what keeps the scroll range identical to the
+ * fully-mounted tree the window replaced.
+ */
+export function computeTreeWindow(
+  total: number,
+  scrollTop: number,
+  viewportHeight: number,
+  headerHeight: number,
+  overscan: number = TREE_OVERSCAN,
+): TreeWindow {
+  const rows = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0
+  if (rows === 0) return { from: 0, to: 0, before: 0, after: 0 }
+  const header = Math.max(0, Number.isFinite(headerHeight) ? headerHeight : 0)
+  const view = (Number.isFinite(viewportHeight) ? viewportHeight : 0) - header
+  if (view <= 0) {
+    const painted = rows <= TREE_WINDOW_FALLBACK_ALL ? rows : Math.min(TREE_WINDOW_FALLBACK, rows)
+    return { from: 0, to: painted, before: 0, after: (rows - painted) * TREE_ROW_HEIGHT }
+  }
+  const extra = Math.max(0, Math.trunc(Number.isFinite(overscan) ? overscan : TREE_OVERSCAN))
+  const offset = Number.isFinite(scrollTop) ? scrollTop : 0
+  // The offset is clamped to the last row, not merely guarded against
+  // negatives: a shrinking tree can leave the scroller's offset past the new
+  // content (the browser re-clamps it one layout later), and an unclamped slice
+  // would ask for rows that no longer exist and lose the bottom spacer.
+  const body = Math.max(0, Math.min(offset - header, rows * TREE_ROW_HEIGHT - view))
+  const scrolled = Math.min(Math.floor(body / TREE_ROW_HEIGHT), rows - 1)
+  const visible = Math.max(1, Math.ceil(view / TREE_ROW_HEIGHT))
+  const from = Math.max(0, scrolled - extra)
+  const to = Math.min(rows, Math.max(from + 1, scrolled + visible + extra))
+  return { from, to, before: from * TREE_ROW_HEIGHT, after: (rows - to) * TREE_ROW_HEIGHT }
+}
 
 /**
  * Insert one listing as the newest, so "the first key is the oldest" stays
@@ -351,6 +489,41 @@ function trimListings(
     delete next[key]
   }
   return next ?? prev
+}
+
+/**
+ * Keys of the directories whose rows the flat tree draws RIGHT NOW.
+ *
+ * The walk is the same one `buildVisibleRows` does, but it only collects the
+ * directories: a directory is drawn when it is the root, or when every one of
+ * its ancestors is expanded. Those are exactly the listings the renderer needs,
+ * so they are the ones that must never be evicted (see `HIDDEN_EXPANDED_KEEP`).
+ */
+function drawnDirKeys(input: {
+  root: string
+  alias: string
+  listings: Record<string, RemoteFileEntry[]>
+  expanded: Set<string>
+  /**
+   * Whether an entry is rendered AT ALL — the same hidden-name filter `rowsOf`
+   * applies on the render side. A directory the tree does not paint must not
+   * count as drawn, or its listing (and its expansion) would be exempt from the
+   * eviction cap below for the life of the session.
+   */
+  visible?: (entry: RemoteFileEntry) => boolean
+}): Set<string> {
+  const drawn = new Set<string>()
+  if (input.root === '') return drawn
+  const walk = (dir: string): void => {
+    const key = dirKey(input.alias, dir)
+    drawn.add(key)
+    for (const entry of input.listings[key] ?? []) {
+      if (input.visible !== undefined && !input.visible(entry)) continue
+      if (entry.isDir && input.expanded.has(entry.path)) walk(entry.path)
+    }
+  }
+  walk(input.root)
+  return drawn
 }
 
 /**
@@ -469,6 +642,36 @@ export function nextFocusPath(rows: readonly ExplorerRow[], focusedPath: string 
   return entries[0]?.entry.path
 }
 
+/** Escape a value for a double-quoted CSS attribute selector (`[data-rvs-path="…"]`). */
+function cssAttrValue(value: string): string {
+  // Backslash and the quote are the only characters a double-quoted CSS string
+  // treats specially; control characters have no literal form, so they become
+  // hex escapes (with the trailing space the hex form requires).
+  return value.replace(/[\\"\u0000-\u001f\u007f]/g, (ch) =>
+    ch === '\\' || ch === '"' ? `\\${ch}` : `\\${ch.charCodeAt(0).toString(16)} `)
+}
+
+/**
+ * The MOUNTED row element for `target`, or null.
+ *
+ * Exact attribute selector instead of a document-wide `querySelectorAll` scan:
+ * the old form allocated one array over every rendered row on each call, and
+ * this helper runs per key-repeat while focus moves — the reveal poll below ran
+ * it up to 20 times in a row. `cssAttrValue` keeps any path the shell allows (a
+ * quote, a backslash, a control character, a non-ASCII name) inside a single
+ * selector, and reading the attribute back proves the selector matched the row
+ * this call asked for.
+ *
+ * With the tree windowed, a row that is in the flat list may still be outside
+ * the painted slice, so every DOM lookup by `data-rvs-path` has to be able to
+ * come back empty (and the caller then scrolls the row's index into the slice —
+ * see `scrollTreeToRow`).
+ */
+function rowElement(target: string): HTMLElement | null {
+  const row = document.querySelector<HTMLElement>(`[data-rvs-path="${cssAttrValue(target)}"]`)
+  return row !== null && row.dataset.rvsPath === target ? row : null
+}
+
 /** Handlers one row needs, held in a ref so a memoized row never re-renders for them. */
 export interface ExplorerRowActions {
   select: (entry: RemoteFileEntry, event: React.MouseEvent) => void
@@ -491,6 +694,13 @@ export interface ExplorerRowActions {
 interface ExplorerRowProps {
   entry: RemoteFileEntry
   depth: number
+  /**
+   * ARIA position among the flattened visible rows. The tree is now WINDOWED, so
+   * the DOM sibling count is only the slice; without these two attributes a
+   * screen reader announces "5 of 26" for a row that is really "5005 of 20003".
+   */
+  posinset: number
+  setsize: number
   status: string | undefined
   ignored: boolean
   isSelected: boolean
@@ -514,12 +724,14 @@ interface ExplorerRowProps {
  * the whole expanded tree (a 20 000-entry directory means 20 000 rows).
  */
 export const ExplorerRowView = memo(function ExplorerRowView(props: ExplorerRowProps): ReactNode {
-  const { entry, depth, status, ignored, isSelected, isOpen, isCut, isDropTarget, isRenaming, isFocused, chatEnabled, actions } = props
+  const { entry, depth, posinset, setsize, status, ignored, isSelected, isOpen, isCut, isDropTarget, isRenaming, isFocused, chatEnabled, actions } = props
   const { openMenu } = actions.current
   return (
     <div
       role="treeitem"
       aria-level={depth + 1}
+      aria-posinset={posinset}
+      aria-setsize={setsize}
       aria-selected={isSelected}
       // Directories expose their expansion; files have no aria-expanded.
       {...(entry.isDir ? { 'aria-expanded': isOpen } : {})}
@@ -533,7 +745,7 @@ export const ExplorerRowView = memo(function ExplorerRowView(props: ExplorerRowP
         isDropTarget ? 'drop-target' : '',
         isFocused ? 'focused' : '',
       ].filter(Boolean).join(' ')}
-      style={{ paddingLeft: 8 + depth * 14 }}
+      style={{ ...TREE_ROW_BOX, paddingLeft: 8 + depth * 14 }}
       title={entry.path}
       // Read by the document-level capture drop listeners, which live
       // outside React's tree and cannot see component state.
@@ -610,6 +822,20 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   /** The host link is down: cached rows stay, new listings cannot load. */
   const connection = useConnectionStatus()
   const offline = connection?.state === 'error'
+  /**
+   * Keep `connection.ts`'s per-alias cache in step with the hosts table.
+   *
+   * Its `views`/`probes` maps are keyed by alias and nothing there ever removed
+   * an entry, so a host deleted (or renamed) in Settings left its record in page
+   * memory for the life of the tab. The hosts table is the authoritative list of
+   * aliases this page may still ask about; pruning against it on each refresh is
+   * enough because panels are parked, never unmounted (see `panelFor`), so this
+   * hook stays live for the page.
+   */
+  useEffect(() => {
+    if (!store.ready) return
+    pruneConnections(store.hosts.map(host => host.alias))
+  }, [store.ready, store.hosts])
   const ctx = store.ctx
   const [listings, setListings] = useState<Record<string, RemoteFileEntry[]>>({})
   /**
@@ -653,6 +879,99 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   const folderPickerHandle = useRef<HTMLInputElement | null>(null)
   /** The scroll container that owns the drop zone (capture listeners attach to document). */
   const treeRef = useRef<HTMLDivElement>(null)
+  /**
+   * The sentinel that sits immediately before the first row.
+   *
+   * Everything above it inside the scroller (workspace root label, drop hint,
+   * `.rvs-tree`'s top padding) is HEADER: the rows start below it, so its offset
+   * from the top of the scrollable content is exactly the bias the window has to
+   * subtract from `scrollTop`. Measuring this node instead of adding up the
+   * header's parts means a wrapped root label or a drop hint appearing cannot
+   * desync the slice from the scrollbar.
+   */
+  const rowsTopRef = useRef<HTMLDivElement>(null)
+  /**
+   * The flat pre-order row list, readable synchronously.
+   *
+   * Keyboard navigation, the reveal chain and the focus/window upkeep below all
+   * need "which index is this path" during an event, where the render-time
+   * `visibleRows` value is already current but a state read would be one commit
+   * behind.
+   */
+  const visibleRowsRef = useRef<ExplorerRow[]>([])
+  /** Index of the ENTRY row for `path` in the flat list, or -1. */
+  const entryRowIndex = useCallback((path: string): number => {
+    const rows = visibleRowsRef.current
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      if (row !== undefined && row.kind === 'entry' && row.entry.path === path) return index
+    }
+    return -1
+  }, [])
+  /**
+   * Where the rows start inside the scroll container, and how much room they get.
+   *
+   * `offsetTop` is relative to an offset parent this panel does not control (the
+   * sidebar wrapper), so the sentinel is measured in viewport coordinates and
+   * the scroller's own scroll is added back: that is its distance from the top
+   * of the scrollable CONTENT. A zero reading is jsdom or a hidden panel — the
+   * window's own fallback covers that case.
+   */
+  const measureTreeRows = useCallback((): { header: number; viewport: number; scrollTop: number } => {
+    const scroller = treeRef.current
+    const sentinel = rowsTopRef.current
+    if (scroller === null) return { header: 0, viewport: 0, scrollTop: 0 }
+    const scrollTop = scroller.scrollTop
+    const viewport = scroller.clientHeight
+    if (sentinel === null) return { header: 0, viewport, scrollTop }
+    const header = sentinel.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scrollTop
+    return { header: Math.max(0, header), viewport, scrollTop }
+  }, [])
+  /**
+   * Scroll the content so row `index` sits about a third of the way down.
+   *
+   * This is the ONLY way to bring a row outside the painted slice into the DOM:
+   * the slice follows `scrollTop`, and the row mounts on the commit after that.
+   * The target is deliberately not clamped against `scrollHeight` — the browser
+   * clamps an over-long assignment itself, and `scrollHeight` is one render
+   * behind the spacers this function is often called to reach past.
+   */
+  const scrollTreeToRow = useCallback((index: number): void => {
+    const scroller = treeRef.current
+    if (scroller === null || index < 0) return
+    const { header, viewport } = measureTreeRows()
+    const body = Math.max(0, viewport - header)
+    const target = Math.max(0, header + index * TREE_ROW_HEIGHT - Math.floor(body / 3))
+    if (Math.abs(target - scroller.scrollTop) < 1) return
+    scroller.scrollTop = target
+  }, [measureTreeRows])
+  /**
+   * Minimal scroll that brings row `index` into the VISIBLE area, with one row
+   * of context on the side it came from.
+   *
+   * Keyboard focus and the inline editors only need the row mounted, and every
+   * row inside the viewport is inside the painted slice (which covers the
+   * viewport plus overscan). Minimal rather than centered: holding ArrowDown at
+   * the bottom edge must scroll the tree by a row, not page it.
+   */
+  const scrollTreeRowIntoView = useCallback((index: number): void => {
+    const scroller = treeRef.current
+    if (scroller === null || index < 0) return
+    const { header, viewport } = measureTreeRows()
+    const body = viewport - header
+    if (body <= 0) return
+    // Same clamp as the window: a shrinking tree can leave `scrollTop` past the
+    // content until the browser re-clamps it one layout later.
+    const maxBody = Math.max(0, visibleRowsRef.current.length * TREE_ROW_HEIGHT - body)
+    const seen = Math.max(0, Math.min(scroller.scrollTop - header, maxBody))
+    const top = index * TREE_ROW_HEIGHT
+    const bottom = top + TREE_ROW_HEIGHT
+    let next = scroller.scrollTop
+    if (top < seen) next = header + Math.max(0, top - TREE_ROW_HEIGHT)
+    else if (bottom > seen + body) next = header + Math.min(maxBody, bottom - body + TREE_ROW_HEIGHT)
+    if (Math.abs(next - scroller.scrollTop) < 1) return
+    scroller.scrollTop = Math.max(0, next)
+  }, [measureTreeRows])
   /** Abort handle for the batch on the wire (the upload bar's ✕). */
   const uploadAbort = useRef<AbortController | undefined>(undefined)
   /** True while a remote WRITE batch is in flight (upload/paste/delete serialization). */
@@ -848,17 +1167,22 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     let attempts = 0
     const timer = window.setInterval(() => {
       attempts += 1
-      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
-        .find((candidate) => candidate.dataset.rvsPath === target)
-      if (row !== undefined) {
+      const row = rowElement(target)
+      if (row !== null) {
         window.clearInterval(timer)
         row.scrollIntoView({ block: 'center' })
         return
       }
+      // Windowing: the target can be IN the flat list while being outside the
+      // painted slice, in which case no amount of waiting mounts it. Scroll its
+      // index into the slice — the lookup above stays as the check that it
+      // really arrived, and `scrollIntoView` still does the final centering.
+      const index = entryRowIndex(target)
+      if (index >= 0) scrollTreeToRow(index)
       if (attempts > 20) window.clearInterval(timer)
     }, 150)
     return () => window.clearInterval(timer)
-  }, [store.revealRequest, root, loadDir])
+  }, [store.revealRequest, root, loadDir, entryRowIndex, scrollTreeToRow])
 
   // Root listing + refresh on the shared revision bump (git writes, saves...).
   const revision = store.revision
@@ -912,6 +1236,52 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     setListings(prev => trimListings(prev, keep))
   }, [expanded, alias, listings])
 
+  /**
+   * Forget the OLDEST remembered expansions whose rows are not drawn any more.
+   *
+   * `expanded` keeps a directory open across a collapsed ancestor, which is what
+   * makes re-opening the ancestor restore the view the user left. It also means
+   * the trim above can never evict those descendants' listings, and a deep
+   * session would hold every directory it ever opened. Here the ones that are
+   * not currently drawn (see `drawnDirKeys`) are capped at
+   * `HIDDEN_EXPANDED_KEEP`; the oldest are removed from `expanded` itself, which
+   * is the only way to make their listings evictable without ever leaving an
+   * OPEN folder with no rows to draw. On-screen directories are untouched, and
+   * `expanded` preserves insertion order, so "oldest" is well defined.
+   */
+  useEffect(() => {
+    if (root === '') return
+    // Cheap bail-out: `hidden` is a SUBSET of `expanded`, so a tree with no more
+    // open directories than the cap cannot need any of the work below (and this
+    // is the common case — the walk only runs for a deep remembered tree).
+    if (expanded.size <= HIDDEN_EXPANDED_KEEP) return
+    // The same filter `rowsOf` applies on the render side: with `showHidden`
+    // off, a dot-directory is not painted, so its listing is evictable even
+    // though it is still in `expanded`.
+    const drawn = drawnDirKeys({
+      root,
+      alias,
+      listings,
+      expanded,
+      visible: entry => props.showHidden || !entry.name.startsWith('.'),
+    })
+    const hidden: string[] = []
+    for (const dir of expanded) {
+      if (dir !== root && !drawn.has(dirKey(alias, dir))) hidden.push(dir)
+    }
+    if (hidden.length <= HIDDEN_EXPANDED_KEEP) return
+    const forget = new Set(hidden.slice(0, hidden.length - HIDDEN_EXPANDED_KEEP))
+    setExpanded(prev => {
+      let next: Set<string> | undefined
+      for (const dir of forget) {
+        if (!prev.has(dir)) continue
+        if (next === undefined) next = new Set(prev)
+        next.delete(dir)
+      }
+      return next ?? prev
+    })
+  }, [root, alias, listings, expanded, props.showHidden])
+
   /** Keep the synchronous cache view in step (prefetch reads it at pointer time). */
   useEffect(() => {
     listingsRef.current = listings
@@ -958,7 +1328,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
         const visible = props.showHidden ? rows : rows.filter(entry => !entry.name.startsWith('.'))
         sorted = [...visible].sort((a, b) => {
           if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-          return a.name.localeCompare(b.name)
+          return NAME_COLLATOR.compare(a.name, b.name)
         })
       }
       cache.set(dir, sorted)
@@ -1989,20 +2359,33 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
    * the flat visible rows plus a DOM lookup by `data-rvs-path`: before this the
    * tree had no keyboard path at all (no focusable row, no arrow/Enter/Esc
    * handling), which made the explorer unusable without a pointer.
+   *
+   * With the tree windowed the destination row is not necessarily mounted:
+   * `rowKeyboardTarget` walks the WHOLE flat list, so an arrow key can move the
+   * stop past the edge of the slice. The index is scrolled into the slice and
+   * the DOM lookup is retried for a few frames, because the row mounts on the
+   * commit that follows that scroll.
    */
   const [focusedPath, setFocusedPath] = useState<string | undefined>(undefined)
-  const visibleRowsRef = useRef<ExplorerRow[]>([])
   const focusRow = (path: string | undefined): void => {
     // `undefined` means an arrow key hit an edge: keep the current stop instead
     // of blanking it (the visibility effect only re-homes a path that stopped
     // existing — a no-op move must not cost the tree its Tab stop).
     if (path === undefined) return
     setFocusedPath(path)
-    requestAnimationFrame(() => {
-      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
-        .find(candidate => candidate.dataset.rvsPath === path)
-      row?.focus()
-    })
+    let attempts = 0
+    const retry = (): void => {
+      const row = rowElement(path)
+      if (row !== null) {
+        row.focus()
+        return
+      }
+      const index = entryRowIndex(path)
+      if (index >= 0) scrollTreeRowIntoView(index)
+      attempts += 1
+      if (attempts < 16) requestAnimationFrame(retry)
+    }
+    requestAnimationFrame(retry)
   }
   const onRowKeyDown = (entry: RemoteFileEntry, event: React.KeyboardEvent): void => {
     const rows = visibleRowsRef.current
@@ -2052,8 +2435,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     }
     if ((key === 'F10' && event.shiftKey) || key === 'ContextMenu') {
       event.preventDefault()
-      const row = Array.from(document.querySelectorAll<HTMLElement>('[data-rvs-path]'))
-        .find(candidate => candidate.dataset.rvsPath === entry.path)
+      const row = rowElement(entry.path)
       const rect = row?.getBoundingClientRect()
       openMenu({
         preventDefault: () => undefined,
@@ -2182,6 +2564,104 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   // Keyboard navigation reads the current flat list synchronously.
   visibleRowsRef.current = visibleRows
 
+  // -------------------------------------------------------------- windowing
+
+  /**
+   * The slice of the flat list the DOM paints.
+   *
+   * `visibleRows` stays the single source of truth for ORDER (and for keyboard
+   * navigation, which must be able to leave the screen); the scroller only ever
+   * receives one window of it, with a spacer of the exact height of everything
+   * above and below. A fully expanded 20000-entry directory therefore costs a
+   * screenful of row nodes instead of 20000 rows / 12–20万 nodes, while the
+   * scrollbar keeps the range it had when every row was mounted.
+   *
+   * The initial value is the no-viewport fallback (< `TREE_WINDOW_FALLBACK`
+   * rows), so the FIRST paint already renders a screenful and the layout effect
+   * below corrects it before that frame is shown.
+   */
+  const [treeWindow, setTreeWindow] = useState<TreeWindow>({
+    from: 0,
+    to: TREE_WINDOW_FALLBACK,
+    before: 0,
+    after: 0,
+  })
+  const windowRows = useMemo(
+    () => visibleRows.slice(treeWindow.from, treeWindow.to),
+    [visibleRows, treeWindow.from, treeWindow.to],
+  )
+  /**
+   * Recompute the painted slice from the live geometry.
+   *
+   * Called from the scroll handler, from the ResizeObserver and from the layout
+   * effect below. The state update is skipped when the slice did not move —
+   * `computeTreeWindow` answers the same four numbers — so a wheel storm inside
+   * one row costs one measurement and no render.
+   */
+  const syncTreeWindow = useCallback((): void => {
+    const { header, viewport, scrollTop } = measureTreeRows()
+    const next = computeTreeWindow(visibleRowsRef.current.length, scrollTop, viewport, header)
+    setTreeWindow(prev => (
+      prev.from === next.from && prev.to === next.to && prev.before === next.before && prev.after === next.after
+        ? prev
+        : next
+    ))
+  }, [measureTreeRows])
+  /**
+   * Measure AFTER every commit, BEFORE the paint.
+   *
+   * This cannot be a dependency-keyed effect: the geometry depends on what this
+   * very render mounted (the root label can wrap, the drop hint appears or goes,
+   * the panel can come back from `display:none`, an expansion changes the row
+   * count) and only the committed DOM knows any of that. A no-op measurement
+   * does not re-render, so running it every commit does not loop.
+   */
+  useLayoutEffect(() => {
+    syncTreeWindow()
+  })
+  /** A pane resize (sidebar split, window resize, panel shown) re-slices too. */
+  useEffect(() => {
+    const scroller = treeRef.current
+    if (scroller === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => syncTreeWindow())
+    observer.observe(scroller)
+    return () => observer.disconnect()
+  }, [syncTreeWindow])
+
+  /**
+   * Keep the row an in-row EDITOR depends on mounted.
+   *
+   * Two states put an input INSIDE a row — the inline rename and the inline
+   * create row — and with a window an unmounted row means the input never mounts
+   * (create) or unmounts while it is being typed in (rename). The roving Tab
+   * stop has the same problem after `nextFocusPath` re-homes it to a row that is
+   * not in the slice: a `tabIndex=0` row outside the DOM leaves the whole tree
+   * unreachable by keyboard.
+   *
+   * Edge-triggered on the target, never on the slice: a user who scrolls the
+   * focused row out of view must not be dragged back to it on every scroll step.
+   */
+  let pinnedRowKey = ''
+  if (renaming !== undefined) pinnedRowKey = `rename:${renaming}`
+  else if (creating !== undefined) pinnedRowKey = `create:${creating.dir}`
+  else if (focusedPath !== undefined) pinnedRowKey = `focus:${focusedPath}`
+  const keptRowRef = useRef('')
+  useEffect(() => {
+    if (pinnedRowKey === '') {
+      keptRowRef.current = ''
+      return
+    }
+    if (keptRowRef.current === pinnedRowKey) return
+    keptRowRef.current = pinnedRowKey
+    const rows = visibleRowsRef.current
+    let index = -1
+    if (renaming !== undefined) index = rows.findIndex(row => row.kind === 'entry' && row.entry.path === renaming)
+    else if (creating !== undefined) index = rows.findIndex(row => row.kind === 'create' && row.dir === creating.dir)
+    else if (focusedPath !== undefined) index = rows.findIndex(row => row.kind === 'entry' && row.entry.path === focusedPath)
+    if (index < 0 || (index >= treeWindow.from && index < treeWindow.to)) return
+    scrollTreeRowIntoView(index)
+  }, [pinnedRowKey, renaming, creating, focusedPath, visibleRows, treeWindow, scrollTreeRowIntoView])
+
   /**
    * Keep a Tab stop on screen.
    *
@@ -2218,9 +2698,24 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     const referenceTitle = chatEnabled ? t('files.referenceFile') : t('files.refDisabled')
     const symlinkTitle = t('files.symlink')
     const cutPaths = clipboard !== undefined && clipboard.mode === 'cut' ? new Set(clipboard.paths) : undefined
+    // The roving Tab stop: the focused row while it is PAINTED, otherwise the
+    // first painted entry. A row scrolled out of the window is unmounted, and a
+    // tree whose only `tabIndex=0` row is not in the DOM cannot be reached with
+    // Tab at all — the pointer would be the only way back in, which is exactly
+    // what the roving tabindex exists to prevent.
+    const focusedRowPainted = windowRows.some(row => row.kind === 'entry' && row.entry.path === focusedPath)
+    const tabStopPath = focusedRowPainted
+      ? focusedPath
+      : windowRows.find((row): row is Extract<ExplorerRow, { kind: 'entry' }> => row.kind === 'entry')?.entry.path
     return (
       <>
-        {visibleRows.map(row => {
+        {/* The rows scrolled past. Height, not transform: the spacer has to leave
+            a real scroll range behind, or the rows below the window are
+            unreachable. It is also why the slice must use one fixed row height. */}
+        {treeWindow.before > 0 && (
+          <div aria-hidden="true" style={{ height: treeWindow.before }} />
+        )}
+        {windowRows.map((row, offset) => {
           if (row.kind === 'create') {
             return (
               <CreateRow
@@ -2241,8 +2736,15 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
           }
           if (row.kind === 'pending') {
             // Same copy/order as the root placeholder (offline before loading).
+            // Fixed 28 px like every other row (`.rvs-empty` alone is 18+18 px
+            // of padding): a placeholder that is taller than a row would put the
+            // slice one index off behind it.
             return (
-              <div key={`pending:${row.dir}`} className="rvs-empty" style={{ paddingLeft: 12 + row.depth * 14 }}>
+              <div
+                key={`pending:${row.dir}`}
+                className="rvs-empty"
+                style={{ ...TREE_ROW_BOX, paddingLeft: 12 + row.depth * 14 }}
+              >
                 {row.reason === 'offline' ? t('files.offline') : t('common.loading')}
               </div>
             )
@@ -2252,6 +2754,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
               key={row.entry.path}
               entry={row.entry}
               depth={row.depth}
+              posinset={treeWindow.from + offset + 1}
+              setsize={visibleRows.length}
               status={statusFor(row.entry)}
               ignored={ignoredFor(row.entry)}
               isSelected={selected.has(row.entry.path)}
@@ -2259,7 +2763,7 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
               isCut={cutPaths !== undefined && cutPaths.has(row.entry.path)}
               isDropTarget={dropTarget === row.entry.path}
               isRenaming={renaming === row.entry.path}
-              isFocused={focusedPath === row.entry.path}
+              isFocused={tabStopPath === row.entry.path}
               chatEnabled={chatEnabled}
               referenceTitle={referenceTitle}
               symlinkTitle={symlinkTitle}
@@ -2267,6 +2771,10 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
             />
           )
         })}
+        {/* The rows still below the window, same reasoning as the top spacer. */}
+        {treeWindow.after > 0 && (
+          <div aria-hidden="true" style={{ height: treeWindow.after }} />
+        )}
       </>
     )
   }
@@ -2411,6 +2919,9 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
           setDropHint(undefined)
         }}
         onDrop={(e) => handleDrop(root, e)}
+        // The window follows the scroll position; the handler only re-renders
+        // when the slice changes (see `syncTreeWindow`).
+        onScroll={() => syncTreeWindow()}
       >
         <div
           className="rvs-tree"
@@ -2433,6 +2944,11 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
               {`${t('files.dropToUpload')} → ${dropTarget.split('/').slice(-1)[0] || dropTarget}`}
             </div>
           )}
+          {/* Sentinel: every node above this one inside the scroller is HEADER
+              (root label, drop hint, `.rvs-tree`'s top padding). `measureTreeRows`
+              reads its offset, so the slice can never drift from the scrollbar
+              when the label wraps or a drop hint appears. Zero height, no box. */}
+          <div ref={rowsTopRef} aria-hidden="true" style={{ height: 0 }} />
           {root !== '' && renderDir(root, 0)}
           {root === '' && <div className="rvs-empty">{t('files.selectWorkspace')}</div>}
         </div>
@@ -2456,7 +2972,7 @@ function CreateRow(props: {
   t: (key: string) => string
 }): ReactNode {
   return (
-    <div className="rvs-node" style={{ paddingLeft: 8 + props.depth * 14 }} onClick={(e) => e.stopPropagation()}>
+    <div className="rvs-node" style={{ ...TREE_ROW_BOX, paddingLeft: 8 + props.depth * 14 }} onClick={(e) => e.stopPropagation()}>
       <span className="rvs-node-icon">{props.kind === 'folder' ? props.folderIcon : props.fileIcon}</span>
       <RenameInput
         initial=""
@@ -2509,8 +3025,17 @@ function RenameInput(props: {
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); commit() } else if (e.key === 'Escape') { e.preventDefault(); cancel() }
+        // An IME candidate window uses Enter to pick a name and Escape to drop
+        // it. Acting on them would rename/create with an uncommitted name, and
+        // preventDefault alone can swallow the candidate commit. Stopping
+        // propagation first keeps the host/tree shortcuts out of the composing
+        // keystroke. `isComposing` is the platform-agnostic signal;
+        // `keyCode === 229` is the fallback for engines that dispatch
+        // compositionend before the keydown of the very same Enter (Chrome), so
+        // that Enter is still dropped instead of committing once more.
         e.stopPropagation()
+        if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
+        if (e.key === 'Enter') { e.preventDefault(); commit() } else if (e.key === 'Escape') { e.preventDefault(); cancel() }
       }}
       onBlur={() => {
         // A blur after Enter/Escape is a no-op; an empty create row is dropped.

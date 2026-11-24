@@ -31,6 +31,14 @@ export declare class RemoteApiError extends Error {
      * happened (the Host successfully protected the file).
      */
     conflict?: RemoteWriteConflict;
+    /**
+     * The Host's own words, kept when the message was rewritten for the user.
+     *
+     * Today only the loopback fence's `403 forbidden: loopback-only` takes this
+     * path (see `loopbackFenceMessage`): the readable sentence explains what to do,
+     * while this keeps the exact server string for diagnostics and logs.
+     */
+    detail?: string;
     constructor(status: number, message: string);
 }
 /** Query for one remote terminal socket. */

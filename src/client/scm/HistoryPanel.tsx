@@ -25,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { GitCommit, GitCommitFile } from '../../protocol.ts'
 import { GIT_LOG_MAX } from '../../git-format.ts'
 import { api } from '../api.ts'
-import { gitReadSettleMs, useExplorer } from '../store.tsx'
+import { gitReadSettleMs, shallowEqual, useExplorerSelector, type ExplorerValue } from '../store.tsx'
 import { checkoutCommit, joinRemote, loadCommitFiles, loadCommitMessage, loadCommitPatch } from './actions.ts'
 import { CommitPane } from './CommitPane.tsx'
 import { isHistoryTab, needsPatchLoad, refBadgeClass, refBadgeLabel, type HistoryTab } from './commit-model.ts'
@@ -207,8 +207,29 @@ interface CommitPatchState {
   error?: string
 }
 
+/**
+ * The store fields this panel reads — and only those.
+ *
+ * Same reasoning as `ScmPanel`'s slice: the commit graph (up to `GIT_LOG_MAX`
+ * rows) and the pane below it used to be rebuilt on EVERY store publish, which
+ * includes saves, git refreshes and rail switches that this view cannot show.
+ * The slice below is what a graph/pane actually depends on: the repository
+ * identity the log is read for, the branch pill, and the actions.
+ */
+const selectHistoryStore = (snapshot: ExplorerValue) => ({
+  t: snapshot.t,
+  lang: snapshot.lang,
+  alias: snapshot.alias,
+  repoRoot: snapshot.repoRoot,
+  head: snapshot.head,
+  afterWrite: snapshot.afterWrite,
+  openCommitFile: snapshot.openCommitFile,
+  revealInExplorer: snapshot.revealInExplorer,
+  openTerminalAt: snapshot.openTerminalAt,
+})
+
 export function HistoryPanel(): ReactNode {
-  const store = useExplorer()
+  const store = useExplorerSelector(selectHistoryStore, shallowEqual)
   const { t, lang, alias, repoRoot } = store
   const [commits, setCommits] = useState<GitCommit[]>([])
   /**

@@ -8,9 +8,9 @@
  * and every successful write refreshes the shared status so the tree markers
  * and the change list never disagree.
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject, type ReactNode } from 'react'
 import type { GitBranch, GitRemote, GitStash, RemoteExecResult } from '../../protocol.ts'
-import { gitReadSettleMs, useExplorer } from '../store.tsx'
+import { gitReadSettleMs, shallowEqual, useExplorerSelector, type ExplorerValue } from '../store.tsx'
 import { RemoteApiError, gitTimeoutMs } from '../api.ts'
 import {
   branchOp,
@@ -102,20 +102,237 @@ function messageOf(error: unknown): string {
   return error instanceof GitOpError || error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * How often the live exec panel repaints its log tail and running clock.
+ *
+ * The tail is accumulated in a REF by the SSE callback (`execLog`), so this
+ * cadence is the only thing that decides how often the panel paints: a
+ * per-chunk setState would repaint for every line git prints.
+ */
+const EXEC_TICK_MS = 250
+
+/**
+ * The same tick while the SIDEBAR is parked.
+ *
+ * The exec panel is portaled to `<body>` (a running push must stay reachable
+ * with its stop button even when another rail view is selected), so it is still
+ * on screen and must keep moving — it just does not need 4 Hz for a log the user
+ * is not looking at. Slowing down is what keeps that guarantee while parked.
+ */
+const EXEC_TICK_PARKED_MS = 1000
+
+/**
+ * The network verb's panel, ticking on ITS OWN state instead of the panel's.
+ *
+ * Why this is a component: the clock and the log tail are the only things that
+ * change while a fetch/push runs, but the timer used to live in `ScmPanel` and
+ * call `setExecPanel` — so every 250 ms the WHOLE source-control panel (up to
+ * 4000 change rows, plus the repository/stash/branch sections) re-rendered for
+ * a clock that belongs to one portaled box. Here the tick re-renders this small
+ * component only; the parent still hears about the run exactly twice (start and
+ * final status), which is the moment its own sections actually change.
+ */
+function LiveExecPanel(props: {
+  state: ExecPanelState
+  /** Reads the log the stream callback has accumulated so far (no state per chunk). */
+  readLog: () => string
+  onCancel: () => void
+  onClose: () => void
+  /** `false` = the SCM panel is parked (the portal itself stays visible). */
+  visible: boolean
+  t: (key: string) => string
+}): ReactNode {
+  const { state, readLog, visible, t } = props
+  const running = state.status === 'running'
+  const [output, setOutput] = useState(state.output)
+  /** Revision counter only: `Date.now()` below is what the clock paints. */
+  const [, bumpClock] = useState(0)
+  /** The finished state carries the final log; only a running one grows. */
+  const shown = running ? output : state.output
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => {
+      const tail = readLog()
+      // Same string = same log: keep the previous value so the fold/render
+      // memo in `ExecPanel` is not invalidated by an identical copy.
+      setOutput(previous => (previous === tail ? previous : tail))
+      bumpClock(step => step + 1)
+    }, visible ? EXEC_TICK_MS : EXEC_TICK_PARKED_MS)
+    return () => window.clearInterval(timer)
+  }, [running, visible, readLog])
+  return (
+    <ExecPanel
+      state={{
+        ...state,
+        output: shown,
+        // A finished run keeps the duration it ended with; a running one counts.
+        elapsedMs: running ? Date.now() - state.startedAt : state.elapsedMs,
+      }}
+      onCancel={props.onCancel}
+      onClose={props.onClose}
+      t={t}
+    />
+  )
+}
+
+/**
+ * Handlers a change row needs, held in a REF (the same pattern as
+ * `ExplorerRowView` in the file tree).
+ *
+ * The panel rebuilds these closures on every render, and a render happens on
+ * every store publish; passing them as props would make the memo on the row
+ * pointless. The row reads them at CLICK time, so the current render's state is
+ * what a click acts on.
+ */
+interface ChangeRowActions {
+  activate: (entry: ChangeEntry, isStaged: boolean) => void
+  openMenu: (event: ReactMouseEvent, entry: ChangeEntry) => void
+  stage: (entry: ChangeEntry, isStaged: boolean) => void
+  discard: (entry: ChangeEntry) => void
+}
+
+interface ChangeRowProps {
+  entry: ChangeEntry
+  isStaged: boolean
+  depth: number
+  /** An untracked-directory row whose files are already expanded below it. */
+  expanded: boolean
+  /** Any remote verb is running: every row's buttons are disabled together. */
+  busy: boolean
+  t: (key: string) => string
+  actions: MutableRefObject<ChangeRowActions>
+}
+
+/**
+ * One change row.
+ *
+ * Memoized on primitives, because the panel re-renders on every store publish
+ * (an editor save is 3-4 publishes) and rebuilding a 4000-row list means ~8
+ * elements per row every time. `entry` is a stable object from the store's
+ * status buckets, so an unchanged row now skips its own render entirely.
+ *
+ * `depth > 0` means it is a file inside an expanded untracked directory: same
+ * row, indented, and still fully actionable (staging such a file adds it to
+ * "staged changes" — see `store.applyLocalStage`). An UNTRACKED DIRECTORY row
+ * (`dir/`) is the one row whose click does not open a diff: it expands instead,
+ * because `-u normal` reported the directory alone and its files are otherwise
+ * invisible.
+ */
+const ChangeRowView = memo(function ChangeRowView(props: ChangeRowProps): ReactNode {
+  const { entry, isStaged, depth, expanded, busy, t, actions } = props
+  const expandable = !isStaged && entry.path.endsWith('/')
+  const activate = (): void => { actions.current.activate(entry, isStaged) }
+  return (
+    <div
+      className="rvs-scm-item"
+      role="button"
+      tabIndex={0}
+      style={depth === 0 ? undefined : { paddingLeft: `${22 + depth * 12}px` }}
+      title={expandable ? `${entry.path}\n${t('scm.dirToggle')}` : `${entry.path}\n${t('scm.openHint')}`}
+      onClick={activate}
+      onContextMenu={(event) => actions.current.openMenu(event, entry)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') activate() }}
+    >
+      {/* The chevron slot is reserved on EVERY row (11px), so a directory row
+          and its files stay in one column instead of shifting by an icon. */}
+      <span className={`rvs-chevron${expanded ? ' open' : ''}`} style={{ width: 11 }} aria-hidden="true">
+        {expandable ? <IconChevronRight size={11} /> : null}
+      </span>
+      <span className="rvs-node-icon">{expandable ? <IconFolder size={14} /> : <FileIcon path={entry.path} size={14} />}</span>
+      <span className="rvs-scm-path">{entry.path}</span>
+      {(entry.oldPath ?? '') !== '' && <span className="rvs-scm-dir">← {entry.oldPath}</span>}
+      <span className={`rvs-file-status rvs-letter-${gitStatusClass(entry.status)}`}>{gitLetter(entry.status)}</span>
+      <span className="rvs-scm-actions">
+        <IconButton
+          title={isStaged ? t('scm.unstage') : t('scm.stage')}
+          disabled={busy}
+          onClick={() => actions.current.stage(entry, isStaged)}
+        >
+          {isStaged ? <IconClose size={12} /> : <IconPlus size={13} />}
+        </IconButton>
+        {!isStaged && (
+          <IconButton
+            title={entry.status === '?' ? t('scm.deleteUntracked') : t('scm.discard')}
+            danger
+            disabled={busy}
+            onClick={() => actions.current.discard(entry)}
+          >
+            <IconTrash size={13} />
+          </IconButton>
+        )}
+      </span>
+    </div>
+  )
+})
+
+/**
+ * The store fields the panel reads — and ONLY those.
+ *
+ * The panel used to subscribe to the whole snapshot (`useExplorer()`), so every
+ * publish repainted it: a save in the editor (3-4 publishes), a git refresh, a
+ * rail switch. With the change list allowed to reach 4000 rows, that meant
+ * rebuilding the whole list for a change in a field this panel does not read.
+ * `useExplorerSelector` + `shallowEqual` re-render it only when one of the
+ * fields below actually changed.
+ *
+ * Module-level so the selector identity is stable: between publishes the hook's
+ * cache answers without running it. Actions are module-level functions in the
+ * store (`build()` copies the same references every time), and `t`/`lang` are
+ * constants, so they never invalidate the slice.
+ */
+const selectScmStore = (snapshot: ExplorerValue) => ({
+  t: snapshot.t,
+  lang: snapshot.lang,
+  buckets: snapshot.buckets,
+  head: snapshot.head,
+  alias: snapshot.alias,
+  root: snapshot.root,
+  repoRoot: snapshot.repoRoot,
+  repoSubdir: snapshot.repoSubdir,
+  repoWorkdir: snapshot.repoWorkdir,
+  repoMissing: snapshot.repoMissing,
+  gitBusy: snapshot.gitBusy,
+  gitError: snapshot.gitError,
+  gitCached: snapshot.gitCached,
+  gitDeadlineMs: snapshot.gitDeadlineMs,
+  untrackedDirs: snapshot.untrackedDirs,
+  floatAvailable: snapshot.floatAvailable,
+  afterWrite: snapshot.afterWrite,
+  setRepoSubdir: snapshot.setRepoSubdir,
+  stageOptimistic: snapshot.stageOptimistic,
+  toggleUntrackedDir: snapshot.toggleUntrackedDir,
+  openFile: snapshot.openFile,
+  openDiff: snapshot.openDiff,
+  openDiffInFloatEditor: snapshot.openDiffInFloatEditor,
+  openInFloatEditor: snapshot.openInFloatEditor,
+})
+
 export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean }): ReactNode {
-  const store = useExplorer()
+  const store = useExplorerSelector(selectScmStore, shallowEqual)
   const { t, lang, buckets, head, alias, repoRoot } = store
   const [folded, setFolded] = useState<Record<string, boolean>>({})
   /** Live log of the running network verb (undefined = panel closed). */
   const [execPanel, setExecPanel] = useState<ExecPanelState | undefined>(undefined)
   const execAbort = useRef<AbortController | undefined>(undefined)
   const execLog = useRef('')
-  /** The live-log repaint interval (kept out of render state on purpose). */
-  const execTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
-  // Leaving the panel mid-push must not leave a 250 ms setState loop running.
-  useEffect(() => () => {
-    if (execTimer.current !== undefined) clearInterval(execTimer.current)
-  }, [])
+  /**
+   * Stable reader for the live log tail, handed to `LiveExecPanel`.
+   *
+   * The stream appends into the ref (a setState per chunk would repaint the
+   * panel for every line git prints); the panel's own component polls this on
+   * its tick and owns the paint cadence.
+   */
+  const readExecLog = useCallback((): string => execLog.current, [])
+  /**
+   * Current change-row handlers, read at click time by the memoized rows (see
+   * `ChangeRowActions`). Assigned after the closures are defined.
+   */
+  const changeActions = useRef<ChangeRowActions>({
+    activate: () => {},
+    openMenu: () => {},
+    stage: () => {},
+    discard: () => {},
+  })
   const [message, setMessage] = useState<string>(() => {
     try {
       return localStorage.getItem(MSG_KEY) ?? ''
@@ -525,9 +742,10 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
    *
    * `streamNetworkVerb` speaks the SSE route; an older Host that has no such
    * route falls back to the unary verb and shows the complete result in the same
-   * panel. The timer and the log are painted on their own 250 ms cadence — a
-   * per-chunk setState would re-render the whole SCM panel for every line git
-   * prints.
+   * panel. The log tail and the running clock are accumulated in `execLog` and
+   * painted by `LiveExecPanel`'s own tick — a per-chunk setState (or a timer
+   * owned by THIS panel) would re-render the whole SCM panel for every line git
+   * prints. Only the start and the final status pass through `execPanel`.
    */
   const runNetwork = async (
     kind: 'fetch' | 'pull' | 'push' | 'sync',
@@ -541,20 +759,6 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
     execLog.current = ''
     setExecPanel({ title, output: '', status: 'running', startedAt, elapsedMs: 0 })
     setBusy(kind)
-    let painted = ''
-    const timer = setInterval(() => {
-      if (execLog.current !== painted) {
-        painted = execLog.current
-        setExecPanel(prev => (prev === undefined || prev.status !== 'running'
-          ? prev
-          : { ...prev, output: painted, elapsedMs: Date.now() - startedAt }))
-        return
-      }
-      setExecPanel(prev => (prev === undefined || prev.status !== 'running'
-        ? prev
-        : { ...prev, elapsedMs: Date.now() - startedAt }))
-    }, 250)
-    execTimer.current = timer
     /** True when the unary fallback answered (no exit code was observed then). */
     let fallbackUsed = false
     /** Cancel: no refresh storm while the user is just stopping a run. */
@@ -646,8 +850,6 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
         }))
       toast(t('exec.unknownResult'), true)
     } finally {
-      clearInterval(timer)
-      execTimer.current = undefined
       execAbort.current = undefined
       setBusy(undefined)
       // A cancel already stopped the command; a full status+extras refresh would
@@ -708,67 +910,47 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   }
 
   /**
-   * One row. `depth > 0` means it is a file inside an expanded untracked
-   * directory: same row, indented, and still fully actionable (staging such a
-   * file adds it to "staged changes" — see `store.applyLocalStage`).
+   * What a row's click does, as one callback the memoized rows can call.
    *
-   * An UNTRACKED DIRECTORY row (`dir/`) is the one row whose click does not
-   * open a diff: it expands instead, because `-u normal` reported the directory
-   * alone and its files are otherwise invisible.
+   * A directory row toggles its files (an untracked directory has no single
+   * diff to open); everything else opens its file/diff. Kept in the parent
+   * because it is the same behaviour for every row and must not re-render one.
    */
-  const changeRow = (entry: ChangeEntry, isStaged: boolean, depth = 0): ReactNode => {
-    const expandable = !isStaged && entry.path.endsWith('/')
-    const expanded = expandable && store.untrackedDirs.has(entry.path)
-    const activate = (): void => {
-      if (!expandable) {
-        openChange(entry)
-        return
-      }
+  const activateRow = (entry: ChangeEntry, isStaged: boolean): void => {
+    if (!isStaged && entry.path.endsWith('/')) {
       void store.toggleUntrackedDir(entry.path).catch((error: unknown) => { toast(messageOf(error), true) })
+      return
     }
-    return (
-      <div
-        key={`${isStaged ? 's' : 'u'}:${entry.path}`}
-        className="rvs-scm-item"
-        role="button"
-        tabIndex={0}
-        style={depth === 0 ? undefined : { paddingLeft: `${22 + depth * 12}px` }}
-        title={expandable ? `${entry.path}\n${t('scm.dirToggle')}` : `${entry.path}\n${t('scm.openHint')}`}
-        onClick={activate}
-        onContextMenu={(event) => openRowMenu(event, entry)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') activate() }}
-      >
-        {/* The chevron slot is reserved on EVERY row (11px), so a directory row
-            and its files stay in one column instead of shifting by an icon. */}
-        <span className={`rvs-chevron${expanded ? ' open' : ''}`} style={{ width: 11 }} aria-hidden="true">
-          {expandable ? <IconChevronRight size={11} /> : null}
-        </span>
-        <span className="rvs-node-icon">{expandable ? <IconFolder size={14} /> : <FileIcon path={entry.path} size={14} />}</span>
-        <span className="rvs-scm-path">{entry.path}</span>
-        {(entry.oldPath ?? '') !== '' && <span className="rvs-scm-dir">← {entry.oldPath}</span>}
-        <span className={`rvs-file-status rvs-letter-${gitStatusClass(entry.status)}`}>{gitLetter(entry.status)}</span>
-        <span className="rvs-scm-actions">
-          <IconButton
-            title={isStaged ? t('scm.unstage') : t('scm.stage')}
-            disabled={busy !== undefined}
-            onClick={() => { void stageOne(entry, isStaged) }}
-          >
-            {isStaged ? <IconClose size={12} /> : <IconPlus size={13} />}
-          </IconButton>
-          {!isStaged && (
-            <IconButton
-              title={entry.status === '?' ? t('scm.deleteUntracked') : t('scm.discard')}
-              danger
-              disabled={busy !== undefined}
-              onClick={() => { void discardOne(entry) }}
-            >
-              <IconTrash size={13} />
-            </IconButton>
-          )}
-        </span>
-      </div>
-    )
+    openChange(entry)
   }
+
+  // The world a memoized row sees. Reassigned on every render ON PURPOSE: the
+  // closures carry this render's `busy`/repository/selection, and a row only
+  // holds the ref (not the closures), so refreshing it is free.
+  changeActions.current = {
+    activate: activateRow,
+    openMenu: openRowMenu,
+    stage: stageOne,
+    discard: (entry) => { void discardOne(entry) },
+  }
+
+  /**
+   * One row element. The component behind it is memoized (`ChangeRowView`), so
+   * this wrapper only decides its props — a publish that changes nothing about
+   * a row no longer rebuilds that row's ~8 elements.
+   */
+  const changeRow = (entry: ChangeEntry, isStaged: boolean, depth = 0, expanded = false): ReactNode => (
+    <ChangeRowView
+      key={`${isStaged ? 's' : 'u'}:${entry.path}`}
+      entry={entry}
+      isStaged={isStaged}
+      depth={depth}
+      expanded={expanded}
+      busy={busy !== undefined}
+      t={t}
+      actions={changeActions}
+    />
+  )
 
   /**
    * Rows plus the contents of any expanded untracked directory, in place.
@@ -780,7 +962,12 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   const changeRows = (entries: readonly ChangeEntry[], depth = 0): ReactNode =>
     entries.map(entry => (
       <Fragment key={`${depth}:${entry.path}`}>
-        {changeRow(entry, false, depth)}
+        {changeRow(
+          entry,
+          false,
+          depth,
+          entry.path.endsWith('/') && store.untrackedDirs.has(entry.path),
+        )}
         {depth < 8
           ? changeRows(store.untrackedDirs.get(entry.path) ?? [], depth + 1)
           : null}
@@ -790,8 +977,13 @@ export function ScmPanel(props: { onOpenHistory: () => void; visible: boolean })
   return (
     <div className="rvs-pane grow">
       {execPanel !== undefined && (
-        <ExecPanel
+        <LiveExecPanel
+          // A new run starts a fresh clock/log; without the key the previous
+          // run's tail would be on screen until the first tick.
+          key={execPanel.startedAt}
           state={execPanel}
+          readLog={readExecLog}
+          visible={props.visible}
           onCancel={cancelNetwork}
           onClose={() => { setExecPanel(undefined) }}
           t={t}

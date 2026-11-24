@@ -8,13 +8,15 @@
  * already-staged diff can only be un-staged. 变更后 switches to a real
  * CodeMirror buffer so the file can be edited in place.
  *
- * The row count is the WHOLE file, so the split mode is windowed (see
- * `useRowWindow`): before that, a 3000-line file put 9000 line containers and
- * ~2N tokenized lines in the DOM at once, and every store publish rebuilt all
- * of them. Note which element scrolls: the two panes only own their HORIZONTAL
- * scroll (`.rvs-diff-col`), while vertical scrolling belongs to `.rvs-diff-grid`
- * outside them — so ONE window serves all three columns and no column can
- * drift out of lockstep with another.
+ * The row count is the WHOLE file, so every pane is windowed (see
+ * `useScrollWindow`): before that, a 3000-line file put 9000 line containers and
+ * ~2N tokenized lines in the DOM at once, and every store publish rebuilt all of
+ * them — the "变更前 / 变更后" panes mounted every line of one side as well. In
+ * the split mode note which element scrolls: the two panes only own their
+ * HORIZONTAL scroll (`.rvs-diff-col`), while vertical scrolling belongs to
+ * `.rvs-diff-grid` outside them — so ONE window serves all three columns and no
+ * column can drift out of lockstep with another. The whole-file panes scroll
+ * their own `.rvs-code` box and take the same window from the same hook.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { EditorTab } from '../store.tsx'
@@ -28,7 +30,7 @@ import { CodeEditor, type CodeEditorHandle } from '../CodeEditor.tsx'
 import { buildReviewPrompt, diffByteLength, pickReviewMode, reviewScopeOf } from '../ai-review.ts'
 import { appendToDraft, canInsertDraft, sameLocalDir } from '../composer.ts'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
-import { langFromPath, tokenizeDocument, type Token } from '../vsc/tokenize.ts'
+import { langFromPath, lexState, tokenizeLine, type LangId, type Token } from '../vsc/tokenize.ts'
 import {
   IconButton,
   IconChevronDown,
@@ -44,27 +46,45 @@ import {
 type ViewMode = 'split' | 'before' | 'after'
 
 /**
- * Height of one diff row, in px. Must track `.rvs-dline`'s declared height
- * (`vsc.css`), because the window below converts scroll offsets to row indices
- * with it: if the CSS box is not exactly this tall the rendered slice drifts
- * from the spacer that stands in for the rest of the file.
+ * Height of one row, in px, in EVERY windowed pane.
+ *
+ * Must track the row heights in `vsc.css` — `.rvs-dline` (split) and
+ * `.rvs-code-line` (the whole-file panes) both render at 18px, the latter via
+ * its inherited line-height (no explicit `height`; it is `min-width: max-content`
+ * and never wraps) — because the window below
+ * converts scroll offsets to line indices with it: if the box is not exactly
+ * this tall the rendered slice drifts from the spacer that stands in for the
+ * rest of the file.
  */
 const ROW_HEIGHT = 18
 
 /** Rows rendered above and below the viewport, so a wheel step is already ready. */
 const OVERSCAN_ROWS = 8
 
-/** Rows assumed to fit before the grid has been measured (one frame at most). */
+/** Rows assumed to fit before a scroller has been measured (one frame at most). */
 const FALLBACK_VISIBLE_ROWS = 30
 
-/** The half-open row range the diff columns paint, plus what they leave blank. */
-interface RowWindow {
-  /** First rendered row index into `model.rows`. */
+/**
+ * `.rvs-code`'s `padding-top`, in px (`vsc.css`).
+ *
+ * The whole-file panes scroll the same fixed 18px rows as the split columns, but
+ * their scroller is `.rvs-code`, whose content box starts 6px down: that offset
+ * has to come out of `scrollTop` before it is turned into a line index, or the
+ * pane paints one row behind the scrollbar and the first line cannot be reached
+ * at the top. The 16px bottom padding needs no arithmetic — it belongs to the
+ * same scroller, so it stays inside the scroll range on its own.
+ */
+const CODE_PAD_TOP = 6
+
+/** The half-open line range a windowed pane paints, plus what it leaves blank. */
+export interface LineWindow {
+  /** First rendered line index. */
   from: number
-  /** One past the last rendered row index. */
+  /** One past the last rendered line index. */
   to: number
-  /** Height of the rows above `from` / below `to`, in px. */
+  /** Height of the lines above `from`, in px. */
   before: number
+  /** Height of the lines below `to`, in px. */
   after: number
 }
 
@@ -76,101 +96,169 @@ interface RowWindowing {
   /** The rows to paint, already sliced and clamped. */
   rows: DiffRow[]
   /** The range that slice came from, for effects that must re-measure with it. */
-  range: RowWindow
+  range: LineWindow
   /** Height of the rows above / below the slice, in px. */
   before: number
   after: number
 }
 
 /**
- * The rows to render for one scroll position.
+ * The lines to paint for one scroll offset — arithmetic, not measurement,
+ * because every windowed row is a hard `ROW_HEIGHT`.
  *
- * Memoised against the row LIST, not just the numbers: a reload hands over a
- * new `model.rows` while `scrollTop` looks unchanged, and a window remembered
- * from the previous file would render the new file from the old offset. Handing
- * back the settled object in every other case is what lets a scroll event that
- * stays inside one row cost nothing.
+ * `total` is the number of lines the FULL pane would have rendered, which is
+ * what the scroll range has to cover: `before + painted + after` is exactly
+ * `total * ROW_HEIGHT`, so the scrollbar behaves as it did when every line was
+ * mounted.
+ *
+ * `offset` is the scroller's own top padding (`CODE_PAD_TOP` on `.rvs-code`, 0
+ * on `.rvs-diff-grid`).
+ *
+ * The offset is clamped to the LAST line, not merely guarded against negatives:
+ * a reload can replace a 3000-line side with a 40-line one while the browser
+ * still holds the old offset (it re-clamps the scroller only once the new
+ * spacer height is in the DOM). An unclamped slice would ask for lines that no
+ * longer exist, `from` would exceed the text, and the two spacers would then add
+ * up to less than the file — the bottom of the new text would be unreachable.
+ * Clamping keeps `before + painted + after` exactly equal to
+ * `total * ROW_HEIGHT`, which is what the scroller's range was before this
+ * window existed.
+ *
+ * Pure and exported so a probe can pin the boundaries without a browser.
  */
-function computeRowWindow(
-  rows: DiffRow[],
+export function computeLineWindow(
+  total: number,
   scrollTop: number,
   height: number,
-  last: React.MutableRefObject<{ rows: DiffRow[]; window: RowWindow }>,
-): RowWindow {
-  const visibleRows = Math.ceil(height / ROW_HEIGHT)
+  offset = 0,
+  overscan = OVERSCAN_ROWS,
+): LineWindow {
+  // A pane can be measured while hidden (height 0) and a browser can hand back a
+  // non-finite offset during teardown; the arithmetic must stay total.
+  const lines = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0
+  const view = Number.isFinite(height) ? Math.max(0, height) : 0
+  const top = Number.isFinite(scrollTop) ? scrollTop : 0
+  const visibleRows = Math.ceil(view / ROW_HEIGHT)
+  const scrolledRows = Math.max(0, Math.min(Math.floor((top - offset) / ROW_HEIGHT), Math.max(0, lines - 1)))
+  const from = Math.max(0, scrolledRows - overscan)
+  const to = Math.min(lines, Math.max(from + 1, scrolledRows + visibleRows + overscan))
+  return { from, to, before: from * ROW_HEIGHT, after: Math.max(0, (lines - to) * ROW_HEIGHT) }
+}
+
+/** The window a pane last settled on, so a slice that did not move keeps its identity. */
+interface WindowCache {
   /**
-   * The offset is clamped to the last row, not merely guarded against
-   * negatives: a reload can replace a 3000-line model with a 40-line one while
-   * the browser still holds the old offset (it re-clamps the scroller only once
-   * the new spacer height is in the DOM). An unclamped slice would ask for rows
-   * that no longer exist, `from` would exceed the model, and the two spacers
-   * would then add up to less than the file — the bottom of the new file would
-   * be unreachable. Clamping keeps `before + slice + after` exactly equal to
-   * `rows.length * ROW_HEIGHT`, which is what the scroller's range was before
-   * this window existed.
+   * The line count that window was computed for: part of the identity because a
+   * reload can change the count under an unchanged offset (the case
+   * `computeLineWindow` clamps for).
    */
-  const scrolledRows = Math.max(0, Math.min(Math.floor(scrollTop / ROW_HEIGHT), Math.max(0, rows.length - 1)))
-  const from = Math.max(0, scrolledRows - OVERSCAN_ROWS)
-  const to = Math.min(rows.length, Math.max(from + 1, scrolledRows + visibleRows + OVERSCAN_ROWS))
-  const settled = last.current
-  if (settled.rows === rows && settled.window.from === from && settled.window.to === to) return settled.window
-  const window = { from, to, before: from * ROW_HEIGHT, after: Math.max(0, (rows.length - to) * ROW_HEIGHT) }
-  last.current = { rows, window }
-  return window
+  total: number
+  window: LineWindow
 }
 
 /**
- * Fixed-height windowing for the side-by-side columns.
+ * `computeLineWindow`, but handing back the PREVIOUS object while the slice did
+ * not move.
  *
- * `.rvs-diff-grid` is the only vertical scroller in the diff view, and
- * `.rvs-dline` is a hard 18px, so the visible slice is arithmetic rather than
- * measurement: offset → first row, viewport height → row count. What is NOT
- * rendered is covered by a spacer of the right height, so the scroll range
- * covers the whole file and the scrollbar behaves exactly as it did when every
- * row was mounted.
+ * That identity is what makes a wheel storm cheap: `onScroll` bumps the revision
+ * counter only when the returned object differs from the one the last render
+ * used, so a scroll that stays inside the same lines re-renders nothing. What it
+ * costs is one 4-field object per scroll event, against a render that would
+ * remount up to `visibleRows + 2 * OVERSCAN_ROWS` rows.
+ */
+function settledLineWindow(
+  total: number,
+  scrollTop: number,
+  height: number,
+  offset: number,
+  last: React.MutableRefObject<WindowCache | undefined>,
+): LineWindow {
+  const next = computeLineWindow(total, scrollTop, height, offset)
+  const settled = last.current
+  if (settled !== undefined && settled.total === total && settled.window.from === next.from && settled.window.to === next.to) {
+    return settled.window
+  }
+  last.current = { total, window: next }
+  return next
+}
+
+/** What one render pass gets from `useScrollWindow`. */
+interface Windowing {
+  /** Goes on the element that owns the vertical scroll. */
+  attach: (node: HTMLDivElement | null) => void
+  onScroll: (event: React.UIEvent<HTMLDivElement>) => void
+  /** The lines to paint, already clamped. */
+  range: LineWindow
+}
+
+/**
+ * Fixed-height windowing for every pane that paints a whole file.
  *
- * Scroll geometry is read through refs instead of React state: a `scrollTop`
- * per wheel event would re-render on every pixel, while only crossing a row
+ * ONE implementation, because the arithmetic, the resize bookkeeping and the
+ * "only a crossing re-renders" policy are the parts that are easy to get subtly
+ * different: the split view needs the window's ROWS (it slices `model.rows`),
+ * the "变更前 / 变更后" panes need only the window's LINE INDEXES, and both take
+ * the range from here — see `useRowWindow` for the split adapter.
+ *
+ * A scroller owns a fixed-row-height list, so the visible slice is arithmetic
+ * rather than measurement: offset → first line, viewport height → line count.
+ * What is NOT rendered is covered by a spacer of the right height, so the scroll
+ * range covers the whole file and the scrollbar behaves exactly as it did when
+ * every line was mounted.
+ *
+ * Scroll geometry is read through refs instead of React state: a `scrollTop` per
+ * wheel event would re-render on every pixel, while only crossing a line
  * boundary changes anything on screen. The state here is just a revision
  * counter, and the arithmetic above is what decides whether it moves.
  *
  * Nothing is pinned outside the window: an off-screen hunk button is reached by
  * scrolling to its row, the same gesture as before.
  */
-function useRowWindow(rows: DiffRow[]): RowWindowing {
+function useScrollWindow(total: number, offset = 0): Windowing {
   const scrollTopRef = useRef(0)
   const heightRef = useRef(FALLBACK_VISIBLE_ROWS * ROW_HEIGHT)
-  const lastWindowRef = useRef<{ rows: DiffRow[]; window: RowWindow }>({
-    rows: [],
-    window: { from: -1, to: -1, before: 0, after: 0 },
-  })
+  const lastWindowRef = useRef<WindowCache | undefined>(undefined)
   const observerRef = useRef<ResizeObserver | null>(null)
   const [, bumpWindow] = useState(0)
 
   /**
-   * A CALLBACK ref, so the grid is measured whenever it actually mounts.
+   * A CALLBACK ref, so the scroller is measured whenever it actually mounts.
    *
-   * A layout effect cannot do this job: a diff opens on its loading branch,
-   * where there is no grid to point at, and the grid only appears once the
-   * model arrives — at which point no dependency has changed and the effect
-   * would never run. The height would stay at the fallback and the bottom of a
-   * tall viewport would sit blank until the first scroll. React calls this on
-   * mount and with `null` on the way out, which is also the observer teardown.
+   * A layout effect cannot do this job: a diff opens on its loading branch, where
+   * there is no scroller to point at, and it only appears once the model arrives
+   * — at which point no dependency has changed and the effect would never run.
+   * The height would stay at the fallback and the bottom of a tall viewport would
+   * sit blank until the first scroll. React calls this on mount and with `null`
+   * on the way out, which is also the observer teardown.
    *
    * Measuring here keeps the guarantee that motivated the layout effect: the
-   * first painted frame already carries the right slice, so opening or resizing
-   * the split does not flash the opening rows and then jump. A 0-height reading
-   * is the grid being hidden, not a collapsed viewport, so the last real height
-   * is kept. The pane can also change size without the window following (a
-   * sidebar split, a window resize, the editor header appearing), which is what
-   * the observer below is for.
+   * first painted frame already carries the right slice, so opening or resizing a
+   * pane does not flash the opening rows and then jump. A 0-height reading is the
+   * pane being hidden (or a scroller with no layout at all — jsdom), NOT a
+   * collapsed viewport, so the last real height is kept and the window falls back
+   * to `FALLBACK_VISIBLE_ROWS`: a fixed slice, never the whole file.
+   *
+   * The offset is re-read here as well, and a change repaints: a mode switch
+   * UNMOUNTS one scroller and mounts another, so the ref can still hold the
+   * previous pane's offset while this render has already laid the window out from
+   * it. A fresh node starts at 0, and getting that wrong would paint a blank
+   * spacer above the first lines until the next scroll event.
    */
-  const attachGrid = useCallback((node: HTMLDivElement | null): void => {
+  const attach = useCallback((node: HTMLDivElement | null): void => {
     observerRef.current?.disconnect()
     observerRef.current = null
-    if (node === null || typeof ResizeObserver === 'undefined') return
+    if (node === null) return
+    let repaint = node.scrollTop !== scrollTopRef.current
     scrollTopRef.current = node.scrollTop
-    if (node.clientHeight > 0) heightRef.current = node.clientHeight
+    if (node.clientHeight > 0 && node.clientHeight !== heightRef.current) {
+      heightRef.current = node.clientHeight
+      repaint = true
+    }
+    if (repaint) bumpWindow(step => step + 1)
+    // A scroller can also be mounted somewhere without `ResizeObserver` (jsdom,
+    // an older embedded webview): the measurement above is then the only one,
+    // and there is simply nothing to follow later.
+    if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.borderBoxSize[0]
       const measured = box === undefined ? node.clientHeight : box.blockSize
@@ -183,35 +271,41 @@ function useRowWindow(rows: DiffRow[]): RowWindowing {
     observerRef.current = observer
   }, [])
 
-  const range = computeRowWindow(rows, scrollTopRef.current, heightRef.current, lastWindowRef)
+  const range = settledLineWindow(total, scrollTopRef.current, heightRef.current, offset, lastWindowRef)
   /**
    * Recomputed on every scroll event and handed to React as the same object
-   * whenever the slice did not move (`computeRowWindow`), so a wheel storm that
-   * stays inside one row re-renders nothing. The measured `clientHeight` comes
+   * whenever the slice did not move (`settledLineWindow`), so a wheel storm that
+   * stays inside one line re-renders nothing. The measured `clientHeight` comes
    * along because it tracks a pane resize the window itself cannot see.
    */
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>): void => {
-    const grid = event.currentTarget
-    scrollTopRef.current = grid.scrollTop
-    if (grid.clientHeight > 0) heightRef.current = grid.clientHeight
-    // Only a slice change is worth a render. `computeRowWindow` hands back the
+    const scroller = event.currentTarget
+    scrollTopRef.current = scroller.scrollTop
+    if (scroller.clientHeight > 0) heightRef.current = scroller.clientHeight
+    // Only a slice change is worth a render. `settledLineWindow` hands back the
     // very object the last render used while the wheel stays inside the same
-    // rows, so comparing against the window that was current BEFORE the call is
+    // lines, so comparing against the window that was current BEFORE the call is
     // the whole test — without it every scroll event re-rendered the diff,
     // which is the cost the windowing exists to remove.
-    const previous = lastWindowRef.current.window
-    if (computeRowWindow(rows, grid.scrollTop, heightRef.current, lastWindowRef) !== previous) {
+    const previous = lastWindowRef.current?.window
+    if (settledLineWindow(total, scroller.scrollTop, heightRef.current, offset, lastWindowRef) !== previous) {
       bumpWindow(step => step + 1)
     }
-  }, [rows])
+  }, [total, offset])
 
+  return { attach, onScroll, range }
+}
+
+/** The split view's window: `useScrollWindow` plus the `model.rows` slice. */
+function useRowWindow(rows: DiffRow[]): RowWindowing {
+  const windowing = useScrollWindow(rows.length)
   return {
-    attachGrid,
-    onScroll,
-    rows: rows.slice(range.from, range.to),
-    range,
-    before: range.before,
-    after: range.after,
+    attachGrid: windowing.attach,
+    onScroll: windowing.onScroll,
+    rows: rows.slice(windowing.range.from, windowing.range.to),
+    range: windowing.range,
+    before: windowing.range.before,
+    after: windowing.range.after,
   }
 }
 
@@ -225,6 +319,94 @@ function Line(props: { tokens: Token[]; empty?: boolean }): ReactNode {
       ))}
     </>
   )
+}
+
+/**
+ * The lines of one whole-file side ("变更前" / a staged "变更后").
+ *
+ * The split columns' treatment, one pane deep: only the window's lines are
+ * mounted, the lines above and below it are spacers of the right height, and the
+ * gutter numbers are the side's own line indexes + 1. `.rvs-code-line` is a hard
+ * 18px row and does not wrap (`min-width: max-content`), which is what lets the
+ * shared window use the same arithmetic here as in the split view.
+ *
+ * Rendered inside `.rvs-code`, whose 6px top padding is the window's `offset`
+ * (see `CODE_PAD_TOP`), so the first rendered line sits exactly where the scroll
+ * offset says it does.
+ */
+function CodeLines(props: { tokens: SideTokens; range: LineWindow; emptyText: string }): ReactNode {
+  if (props.range.to <= props.range.from) return <div className="rvs-empty">{props.emptyText}</div>
+  return (
+    <>
+      <div className="rvs-drows-blank" style={{ height: props.range.before }} />
+      {Array.from({ length: props.range.to - props.range.from }, (_, offset) => props.range.from + offset).map(line => (
+        <div key={line} className="rvs-code-line">
+          <span className="rvs-num">{line + 1}</span>
+          <span className="rvs-code-text"><Line tokens={props.tokens.at(line) ?? []} /></span>
+        </div>
+      ))}
+      <div className="rvs-drows-blank" style={{ height: props.range.after }} />
+    </>
+  )
+}
+
+/**
+ * One side of the diff, tokenized ON DEMAND down to the deepest line asked for.
+ *
+ * Why not `tokenizeDocument` on open: the split view paints only the rows in
+ * its window, but the old code tokenized BOTH whole sides before painting a
+ * single line — on a 2 MB diff (the host's `GIT_CAP`) that is tens of thousands
+ * of lines of work spent before the first screenful appears.
+ *
+ * Why it cannot simply tokenize the window's slice: `tokenizeLine` is stateful
+ * (a line inside a `/* … *\/` block comment only tokenizes correctly after the
+ * lines that opened it), so this walks the side from line 0, keeps the block
+ * state and the arrays produced so far, and stops as soon as the deepest
+ * requested line is covered. Opening a file at the top therefore tokenizes a
+ * screenful, scrolling or jumping deeper extends the cache incrementally, and
+ * every line is still tokenized exactly once per reload.
+ *
+ * The string split is deferred to the first line actually asked for, and a side
+ * that is never painted (its pane is not on screen) now costs nothing at all.
+ *
+ * Both halves of the view read through this: the split columns take the lines
+ * their rows name, and the windowed whole-file panes take their visible range.
+ * `tokenizeDocument` walks exactly the same lines with the same state, so the
+ * per-line arrays are identical either way.
+ */
+interface SideTokens {
+  /** Number of lines in the text (a trailing newline ends with an empty line). */
+  readonly lineCount: number
+  /** Tokens for the 0-based line, or `undefined` past the end of the text. */
+  at(lineIndex: number): Token[] | undefined
+}
+
+/** Lines in `text`, counted without allocating the split array. */
+function countLines(text: string): number {
+  let count = 1
+  for (let index = text.indexOf('\n'); index >= 0; index = text.indexOf('\n', index + 1)) count += 1
+  return count
+}
+
+/** A side with nothing to show yet: never allocates and never tokenizes. */
+const NO_TOKENS: SideTokens = { lineCount: 0, at: () => undefined }
+
+function createSideTokens(text: string, lang: LangId | undefined): SideTokens {
+  const lineCount = countLines(text)
+  let lines: string[] | undefined
+  const tokens: Token[][] = []
+  const state = lexState()
+  return {
+    lineCount,
+    at(lineIndex: number): Token[] | undefined {
+      if (lineIndex < 0 || lineIndex >= lineCount) return undefined
+      const source = lines ?? (lines = text.split('\n'))
+      while (tokens.length <= lineIndex) {
+        tokens.push(tokenizeLine(source[tokens.length] ?? '', lang, state))
+      }
+      return tokens[lineIndex]
+    },
+  }
 }
 
 /**
@@ -462,14 +644,69 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
   const sideLang = useMemo(() => langFromPath(tab.rel), [tab.rel])
   const model = tab.model
   const counts = useMemo(() => (model === undefined ? { added: 0, removed: 0 } : diffCounts(model)), [model])
-  const beforeLines = useMemo(
-    () => (model === undefined ? [] : tokenizeDocument(tab.diff?.oldText ?? '', sideLang)),
+  /**
+   * The two sides, tokenized lazily as a window asks for lines (see
+   * `createSideTokens`). Memoized on the TEXT, not the tab: a store publish hands
+   * over a fresh tab object for a dirty/saving flip while the diff bytes are
+   * unchanged, and rebuilding both caches would re-tokenize the file.
+   *
+   * The memo refuses to run while `model` is missing (F7): the payload arrives in
+   * two publishes, so `tab.diff` can be populated a publish before `tab.model`,
+   * and the old memo walked the whole side text for a pane that could not be
+   * painted yet. `NO_TOKENS` is the stand-in for that state.
+   */
+  const beforeSide = useMemo(
+    () => (model === undefined ? NO_TOKENS : createSideTokens(tab.diff?.oldText ?? '', sideLang)),
     [model, tab.diff?.oldText, sideLang],
   )
-  const afterLines = useMemo(
-    () => (model === undefined ? [] : tokenizeDocument(tab.diff?.newText ?? '', sideLang)),
+  const afterSide = useMemo(
+    () => (model === undefined ? NO_TOKENS : createSideTokens(tab.diff?.newText ?? '', sideLang)),
     [model, tab.diff?.newText, sideLang],
   )
+  /**
+   * The whole-file pane's side and its window.
+   *
+   * Both "变更前 / 变更后" panes read through the SAME lazy tokenizer as the split
+   * columns instead of `tokenizeDocument`-ing the whole side, which is what makes
+   * windowing them pay off: only the lines near the viewport are ever tokenized.
+   * An UNSTAGED "变更后" is the editable CodeMirror buffer, not a text pane, so it
+   * gets `NO_TOKENS` and tokenizes nothing.
+   */
+  const codeSide = mode === 'before'
+    ? beforeSide
+    : mode === 'after' && tab.staged
+      ? afterSide
+      : NO_TOKENS
+  const codeWindow = useScrollWindow(codeSide.lineCount, CODE_PAD_TOP)
+  /**
+   * Materialise every token array this frame's rows will read (F7).
+   *
+   * `SideTokens.at` is not a pure read: the first call for a line advances an
+   * append-only cache over the stateful `tokenizeLine`. While it was called from
+   * the row JSX, a render pass mutated that cache, so a double render (StrictMode,
+   * a discarded concurrent render) interleaved advancement with reading. The token
+   * ARRAYS are a pure function of the side's text and language, so the output
+   * never differed — what was wrong is that the render phase changed state nobody
+   * could see.
+   *
+   * The prefetch asks the same questions ONCE per window (this memo is keyed by
+   * the window, not by the scroll event) and the row loops below are then pure
+   * cache hits. It mirrors their guards deliberately; if one ever drifts the cost
+   * is a render-time miss, not a wrong token.
+   */
+  useMemo(() => {
+    if (mode === 'split') {
+      const rows = model?.rows ?? []
+      for (let index = rowsInView.range.from; index < rowsInView.range.to; index += 1) {
+        const row = rows[index]
+        if (row === undefined) continue
+        if (row.old !== '') beforeSide.at((row.oldNum ?? 1) - 1)
+        if (row.inNew !== false && row.new !== '') afterSide.at((row.newNum ?? 1) - 1)
+      }
+      return
+    }
+    for (let line = codeWindow.range.from; line < codeWindow.range.to; line += 1) codeSide.at(line)
+  }, [mode, model, beforeSide, afterSide, codeSide, rowsInView.range, codeWindow.range])
 
   const runHunk = async (index: number, kind: 'stage' | 'unstage' | 'revert'): Promise<void> => {
     // A hunk action is a remote write, and it ships a patch parsed out of a
@@ -636,8 +873,9 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
         <span style={{ color: 'var(--rvs-git-d)' }}>-{counts.removed}</span>
         {tab.staged && <span className="rvs-pill">{t('scm.stagedReadonly')}</span>}
         <span className="rvs-einfo-spacer" />
-        {/* Prev/next change: only the split view is windowed, so only it has a
-            row offset to jump to. The counter doubles as the "where am I" cue. */}
+        {/* Prev/next change: the hunk list indexes the SPLIT model's rows, so the
+            counter belongs to the split view; the side panes paint file lines.
+            The counter doubles as the "where am I" cue. */}
         {mode === 'split' && hunkRows.length > 0 && (
           <span className="rvs-hunknav" title={t('scm.hunkNavHint')}>
             <IconButton title={t('scm.prevHunk')} onClick={() => jumpHunk(-1)}>
@@ -705,7 +943,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                     <span className="rvs-dline-text">
                       {row.old === ''
                         ? <span className="rvs-row-empty">{'\u00a0'}</span>
-                        : <Line tokens={beforeLines[(row.oldNum ?? 1) - 1] ?? [{ text: row.old, kind: 'plain' }]} />}
+                        : <Line tokens={beforeSide.at((row.oldNum ?? 1) - 1) ?? [{ text: row.old, kind: 'plain' }]} />}
                     </span>
                   </div>
                 ))}
@@ -767,7 +1005,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                     <span className="rvs-dline-text">
                       {row.inNew === false || row.new === ''
                         ? <span className="rvs-row-empty">{'\u00a0'}</span>
-                        : <Line tokens={afterLines[(row.newNum ?? 1) - 1] ?? [{ text: row.new, kind: 'plain' }]} />}
+                        : <Line tokens={afterSide.at((row.newNum ?? 1) - 1) ?? [{ text: row.new, kind: 'plain' }]} />}
                     </span>
                   </div>
                 ))}
@@ -778,27 +1016,15 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
         </>
       )}
       {mode === 'before' && (
-        <div className="rvs-code rvs-scroll">
-          {beforeLines.length === 0
-            ? <div className="rvs-empty">{t('scm.emptySide')}</div>
-            : beforeLines.map((tokens, index) => (
-              <div key={index} className="rvs-code-line">
-                <span className="rvs-num">{index + 1}</span>
-                <span className="rvs-code-text"><Line tokens={tokens} /></span>
-              </div>
-            ))}
+        <div className="rvs-code rvs-scroll" ref={codeWindow.attach} onScroll={codeWindow.onScroll}>
+          <CodeLines tokens={codeSide} range={codeWindow.range} emptyText={t('scm.emptySide')} />
         </div>
       )}
       {mode === 'after' && (
         tab.staged
           ? (
-            <div className="rvs-code rvs-scroll">
-              {afterLines.map((tokens, index) => (
-                <div key={index} className="rvs-code-line">
-                  <span className="rvs-num">{index + 1}</span>
-                  <span className="rvs-code-text"><Line tokens={tokens} /></span>
-                </div>
-              ))}
+            <div className="rvs-code rvs-scroll" ref={codeWindow.attach} onScroll={codeWindow.onScroll}>
+              <CodeLines tokens={codeSide} range={codeWindow.range} emptyText={t('scm.emptySide')} />
             </div>
           )
           : (

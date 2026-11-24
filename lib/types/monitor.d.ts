@@ -53,5 +53,13 @@ export declare class HostMonitor {
     sample(alias: string, force?: boolean): Promise<RemoteHostMetrics>;
     /** Drop everything known about one alias (host edited or deleted). */
     forget(alias: string): void;
+    /**
+     * Snapshots already in the cache, without dialing anything.
+     *
+     * A GET must not have a dial side effect: listing what the Host knows is the
+     * read-only shape, and only an explicit per-host request (or the opt-in batch
+     * flag) may wake a sleeping host.
+     */
+    cached(): RemoteHostMetrics[];
     private probe;
 }

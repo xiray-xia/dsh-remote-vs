@@ -56,4 +56,6 @@ export declare function makeRoutes(deps: RemoteRoutesDeps): {
     routes: WebRoute[];
     upgrade: WebUpgradeRoute;
     terminalSessions: TerminalSessionRegistry;
+    /** Close the terminal upgrade server (plugin unload); idempotent. */
+    close: () => void;
 };

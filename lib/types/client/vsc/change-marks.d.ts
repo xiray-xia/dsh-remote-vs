@@ -23,6 +23,13 @@ import { EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@co
 /** 改动点的三种形态。 */
 export type ChangeKind = 'add' | 'mod' | 'del';
 /**
+ * 字典翻译函数，由调用方传入（`CodeEditor` 把页面语言解析好的那个 `t` 交下来）。
+ *
+ * 本模块自己不选语言：同样的 `t` 与同样的数据永远画出同样的 DOM，纯函数性得以
+ * 保持；语言变了由调用方重装扩展（`changeMarksExtension(t)`）。
+ */
+export type Translate = (key: string) => string;
+/**
  * 新增/修改行里"真正变化的字符区间"：相对所属行的列偏移，**0-based、半开区间**。
  *
  * 行背景回答"哪几行变了"，这个回答"那一行的哪几个字变了" —— 只改一个词的编辑在
@@ -145,23 +152,26 @@ export declare function changeBlockAt(state: EditorState, line: number): {
 declare class ChangeMarkHighlighter {
     decorations: DecorationSet;
     private readonly view;
-    constructor(view: EditorView);
+    /** 解析标记文案的翻译函数；由 `changeMarkPlugin(t)` 装进来。 */
+    private readonly t;
+    constructor(view: EditorView, t: Translate);
     update(update: ViewUpdate): void;
     private rebuild;
 }
 /**
  * 视口内行装饰的 ViewPlugin。
  *
- * 导出是为了让自检脚本能直接读 `view.plugin(changeMarkPlugin).decorations.size`
- * —— "只装饰视口内的行"这件事在 DOM 上看不出来（CodeMirror 本来就让 DOM 只保留
- * 可见行），只有读这份 RangeSet 的条数才有判别力。
+ * 用工厂而不是模块级常量：标记与 chip 的文案由调用方的 `t` 解析。仍然导出是为了
+ * 让自检脚本能直接读 `view.plugin(changeMarkPlugin(t)).decorations.size` ——
+ * "只装饰视口内的行"这件事在 DOM 上看不出来（CodeMirror 本来就让 DOM 只保留可见
+ * 行），只有读这份 RangeSet 的条数才有判别力。
  */
-export declare const changeMarkPlugin: ViewPlugin<ChangeMarkHighlighter, undefined>;
+export declare function changeMarkPlugin(t: Translate): ViewPlugin<ChangeMarkHighlighter>;
 /**
  * 编辑器侧的完整扩展：数据字段 + 作废标记 + 左侧 gutter + 行背景。
  *
  * `CodeEditor` 只在调用方真的传了 `changeSet` 时把它装进编辑器（Compartment），
  * 没传时不装 —— 这样"没有会话改动"的文件连一条 gutter 都不会多出来。
  */
-export declare const changeMarksExtension: Extension;
+export declare function changeMarksExtension(t: Translate): Extension;
 export {};

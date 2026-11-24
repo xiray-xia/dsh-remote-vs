@@ -40,8 +40,12 @@ export interface SaveShortcutEvent {
  * A terminal (xterm) forwards keys to the remote shell and a themed dialog's
  * input is mid-edit; hijacking the key there would be a surprise, and for the
  * shell it would also steal a control character (`^S`).
+ *
+ * Exported so the plugin's OTHER window-level shortcut (Ctrl+P in `RemoteRoot`)
+ * draws the same line instead of re-inventing a narrower one — it used to
+ * exclude only `.xterm` and hijacked the host's chat composer.
  */
-const FOREIGN_TARGET = '.xterm, textarea, input, [contenteditable="true"]'
+export const FOREIGN_TARGET = '.xterm, textarea, input, [contenteditable="true"]'
 
 /**
  * Is this the save shortcut this module should act on?
@@ -86,8 +90,50 @@ const resolvers = new Set<SaveShortcutResolver>()
 /** True while the single window listener is installed. */
 let listening = false
 
+/**
+ * The layers that own the keyboard while they are open.
+ *
+ * Mirrors the modal selector the host's own shortcut dispatcher trims commands
+ * with (`[role="dialog"][aria-modal="true"], [role="menu"]` in
+ * `@deepseek-ai/dsh-client-shortcuts`). These window listeners register nothing
+ * with `ctx.shortcuts`, so no host mechanism keeps them from firing THROUGH a
+ * dialog. Blanket on purpose: our own `.rvs-modal-mask`, QuickOpen and the
+ * context menus are modal too, and a global shortcut must not pierce those
+ * either. A caller that owns a layer and wants a toggle inside it (Ctrl+P
+ * closes QuickOpen) skips this check while its own layer is up.
+ *
+ * `role="menu"` is the one exception to the blanket: it is what the host's
+ * dispatcher treats as modal, but a NON-modal picker floats over the editor
+ * while the editor is still the surface in use, so swallowing Ctrl+S there was
+ * a real regression (audit NIT-5). Such a menu opts out with
+ * `[data-rvs-nonmodal]` — the breadcrumb dropdown (`vsc/breadcrumb.tsx`) carries
+ * it now, so no class-name bridge is needed.
+ * RESIDUAL, deliberately conservative: any future non-modal menu that carries
+ * neither marker still swallows Ctrl+S, and a modal layer that lacks
+ * `aria-modal="true"` is not caught by the dialog branch. Failing safe matters
+ * more here than a missed save: the alternative is writing a remote file
+ * underneath a layer the user is answering.
+ */
+const MODAL_LAYER = '[role="dialog"][aria-modal="true"], '
+  + '[role="menu"]:not([data-rvs-nonmodal])'
+
+/**
+ * Is a modal layer (host approval / settings, our own dialog, an open menu) on
+ * screen right now?
+ *
+ * Called from the DOM listener entry points only: `isSaveShortcut` stays a pure
+ * predicate on the event. Without it Ctrl+S silently saved the remote file
+ * underneath a pending host approval dialog — a write the user never confirmed.
+ */
+export function isModalLayerOpen(): boolean {
+  if (typeof document === 'undefined') return false
+  return document.querySelector(MODAL_LAYER) !== null
+}
+
 function onKeyDown(event: KeyboardEvent): void {
   if (!isSaveShortcut(event)) return
+  // A dialog or menu on screen owns the keyboard (see `isModalLayerOpen`).
+  if (isModalLayerOpen()) return
   for (const resolve of [...resolvers].reverse()) {
     const save = resolve()
     if (save === undefined) continue

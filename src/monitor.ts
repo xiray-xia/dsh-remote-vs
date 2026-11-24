@@ -135,6 +135,19 @@ export class HostMonitor {
     this.generations.set(alias, (this.generations.get(alias) ?? 0) + 1)
   }
 
+  /**
+   * Snapshots already in the cache, without dialing anything.
+   *
+   * A GET must not have a dial side effect: listing what the Host knows is the
+   * read-only shape, and only an explicit per-host request (or the opt-in batch
+   * flag) may wake a sleeping host.
+   */
+  cached(): RemoteHostMetrics[] {
+    return [...this.cache.values()]
+      .map(entry => entry.snapshot)
+      .sort((left, right) => left.alias.localeCompare(right.alias))
+  }
+
   private async probe(alias: string): Promise<RemoteHostMetrics> {
     const generation = this.generations.get(alias) ?? 0
     const startedAt = this.now()

@@ -182,6 +182,17 @@ export declare function toast(text: string, error?: boolean): void;
  * confirm dialog would paint twice.
  */
 export declare function DialogHost(): ReactNode;
+/**
+ * Focusable elements inside one dialog, in DOM order.
+ *
+ * The modal is portaled to the END of `<body>`, so without a Tab trap a
+ * keyboard user tabs through the whole page to reach its buttons. Exported for
+ * the other portaled layers that need the same walk (the terminal snippet
+ * popover); `DoctorPanel` keeps its own copy because it deliberately does not
+ * import this module (its copy path must not use the silently-failing
+ * `copyText`, which `check-doctor.mjs` pins).
+ */
+export declare function focusables(root: HTMLElement | null): HTMLElement[];
 export interface MenuEntry {
     label: string;
     onSelect: () => void;

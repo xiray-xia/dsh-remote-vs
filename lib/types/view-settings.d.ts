@@ -21,6 +21,11 @@ export declare class RemoteViewSettingsStore {
      * @returns the settings as stored.
      */
     patch(patch: Record<string, unknown>): RemoteViewSettings;
+    /**
+     * File identity right now; `null` when the file is absent (or cannot be
+     * statted — `get()` fails loud on that case anyway).
+     */
+    private stampOf;
     /** Write one document atomically: a crash never leaves a half-written file. */
     private save;
 }

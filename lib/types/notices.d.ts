@@ -18,5 +18,20 @@ export interface HostNotice {
 }
 /** Queue one notice for the next JSON response. */
 export declare function pushHostNotice(notice: HostNotice): void;
-/** Take everything queued; the caller attaches it and the queue starts over. */
+/**
+ * Take the notices queued for ONE host alias.
+ *
+ * A response only reports news about the host it is about. Draining the whole
+ * queue from whichever response was written first delivered host A's helper
+ * push into a window looking at host B — and consumed it, so A never saw it.
+ * Notices for other aliases stay queued for a response about their host.
+ */
+export declare function takeHostNotices(alias: string): HostNotice[];
+/**
+ * Take everything queued (no host filtering).
+ *
+ * Kept for callers that own the whole queue — the offline probes reset it, and
+ * a response written OUTSIDE the route table has no host to filter by
+ * (`src/http.ts` keeps that historical drain-all answer).
+ */
 export declare function drainHostNotices(): HostNotice[];

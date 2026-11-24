@@ -61,6 +61,18 @@ export declare class ForwardManager {
      * first listener orphaned — unreachable from the panel and never closed.
      */
     private readonly starting;
+    /**
+     * Rules stopped while their listener was still BINDING.
+     *
+     * A pending bind is not in `forwards` yet, so `stop()`, `stopAlias()`,
+     * `stopAll()` and `dispose()` used to see nothing to close: the listener the
+     * OS was about to hand out stayed bound with no panel row left to stop it
+     * (click a forward, immediately disable the plugin or delete the host, and
+     * `127.0.0.1:<port>` stayed taken until the Host restarted). The id sits here
+     * until the bind settles; a settling bind that finds its id records itself as
+     * stopped and closes the fresh listener instead of entering `forwards`.
+     */
+    private readonly stoppedWhileBinding;
     /** Set on unload so a bind that settles afterwards closes itself. */
     private disposed;
     constructor(deps: ForwardManagerDeps);

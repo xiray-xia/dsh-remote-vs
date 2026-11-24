@@ -12,7 +12,7 @@
  * Remote work stays lazy: a directory is listed once per expansion, a diff
  * loads both revisions on demand, and git status is one NUL-separated call.
  */
-import { useEffect, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   DiffModel,
@@ -832,6 +832,128 @@ export function useExplorer(): ExplorerValue {
     },
     () => snapshot,
   )
+}
+
+/**
+ * The store's subscription, extracted so `useExplorerSelector` passes React a
+ * STABLE function: a fresh arrow per render makes `useSyncExternalStore`
+ * unsubscribe/resubscribe on every paint.
+ */
+function subscribeStore(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+/**
+ * Shallow equality for selector results — one level deep, `Object.is` per field.
+ *
+ * Selectors naturally build a fresh `{ repoRoot, head, … }` object out of the
+ * snapshot, and a plain `Object.is` would then see a new reference on every
+ * publish and repaint the panel anyway (defeating the whole point). Passing this
+ * as `equal` compares the FIELDS, so "the snapshot was rebuilt but none of the
+ * fields I read changed" answers `true` and the previous value (and render) is
+ * kept. Arrays are compared as objects, i.e. by index.
+ *
+ * Shallow is deliberate: every selected field is either a primitive or a
+ * REFERENCE the store already owns (`status`, `buckets`, `tabs`, `untrackedDirs`
+ * …). Comparing those by reference is a real value check — the store only
+ * replaces them when they actually change.
+ */
+export function shallowEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  const left = a as Record<string, unknown>
+  const right = b as Record<string, unknown>
+  const keys = Object.keys(left)
+  if (keys.length !== Object.keys(right).length) return false
+  for (const key of keys) {
+    // `hasOwnProperty` first: `Object.is(undefined, undefined)` must still pass
+    // only for a field that EXISTS on both sides (a shorter object is a change).
+    if (!Object.prototype.hasOwnProperty.call(right, key)) return false
+    if (!Object.is(left[key], right[key])) return false
+  }
+  return true
+}
+
+/**
+ * Subscribe to ONE slice of the explorer store.
+ *
+ * Why this exists: `useExplorer()` hands out the whole `ExplorerValue`, and
+ * every `publish()` builds a NEW snapshot object — so every subscriber repaints
+ * on every mutation, including mutations its panel does not read (a save bumps
+ * the tab array, a git refresh replaces `status`, a rail switch changes `view`).
+ * With the panels kept MOUNTED, one publish therefore repainted every panel,
+ * and the SCM panel's change list (up to 4000 rows) was rebuilt for a change in
+ * an unrelated field.
+ *
+ * This hook re-renders its component ONLY when the selected value changes:
+ *  - `publish()` still notifies every listener (that is how the store stays a
+ *    single source of truth), but React asks this hook for a fresh value and
+ *    `Object.is`-compares it with the last rendered one; equal means no render;
+ *  - the selector runs at most once per (snapshot, selector) pair, and its
+ *    result is kept in a per-hook cache, so an equal result keeps the PREVIOUS
+ *    reference (downstream `useMemo`s keyed on it stay valid).
+ *
+ * Constraints, all from `useSyncExternalStore`:
+ *  - the value returned for an UNCHANGED snapshot must be stable. This hook
+ *    guarantees it (cache keyed on the snapshot identity), which is also why a
+ *    selector may safely return a fresh object — with `shallowEqual` it is
+ *    compared and the old reference is kept, and without `equal` it is cached
+ *    and only recomputed when the snapshot itself changes;
+ *  - `selector` must be PURE and should read only the snapshot. It may be an
+ *    inline arrow (the hook tracks its identity, so a selector that closes over
+ *    props is recomputed when it changes), but a module-level selector is
+ *    cheaper: its identity is stable, so between publishes the cache answers
+ *    without running it at all;
+ *  - `selector` must not mutate the snapshot.
+ *
+ * @param selector - pure read of the fields this component needs.
+ * @param equal - comparison used to decide whether the new selection is the
+ *   same value; defaults to `Object.is`. Pass `shallowEqual` for object slices.
+ */
+export function useExplorerSelector<T>(
+  selector: (snapshot: ExplorerValue) => T,
+  equal: (a: T, b: T) => boolean = Object.is,
+): T {
+  /**
+   * Last (snapshot, selector) → value. A `useRef`, not module state: two
+   * components selecting different fields must not evict each other.
+   */
+  const cache = useRef<{ source: ExplorerValue; selector: (snapshot: ExplorerValue) => T; value: T } | undefined>(undefined)
+  /**
+   * Latest selector/equal, kept in refs so `getSelection` can stay stable
+   * (one `useCallback([])`) while still calling the CURRENT functions. A
+   * selector that closes over props changes identity every render; comparing it
+   * with the cached one is what makes such a selector recompute (and see the new
+   * props) instead of returning the previous, now stale, value.
+   */
+  const selectorRef = useRef(selector)
+  selectorRef.current = selector
+  const equalRef = useRef(equal)
+  equalRef.current = equal
+  const getSelection = useCallback((): T => {
+    const source = snapshot
+    const current = cache.current
+    if (current !== undefined && current.source === source && current.selector === selectorRef.current) {
+      // Same snapshot, same selector: the cached value is the answer. This is
+      // what `useSyncExternalStore` requires (a changing value here would loop),
+      // and what keeps two consecutive reads of one snapshot identical.
+      return current.value
+    }
+    const next = selectorRef.current(source)
+    if (current !== undefined && equalRef.current(current.value, next)) {
+      // The snapshot moved but this slice did not: keep the OLD reference so
+      // React sees no change (no render) and downstream memo keys stay stable.
+      cache.current = { source, selector: selectorRef.current, value: current.value }
+      return current.value
+    }
+    cache.current = { source, selector: selectorRef.current, value: next }
+    return next
+  }, [])
+  return useSyncExternalStore(subscribeStore, getSelection)
 }
 
 /** The repo-relative path of an absolute remote path ('' when outside). */

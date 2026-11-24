@@ -78,6 +78,36 @@ export declare function rekeyPaths(set: Set<string>, from: string, to: string): 
 export declare function withoutListingPaths(listings: Record<string, RemoteFileEntry[]>, alias: string, removed: readonly string[]): Record<string, RemoteFileEntry[]>;
 /** Re-key cached listings after a rename/move (memo keys are `alias:path`). */
 export declare function rekeyListings(listings: Record<string, RemoteFileEntry[]>, alias: string, from: string, to: string): Record<string, RemoteFileEntry[]>;
+/** The half-open range of flat rows the tree paints, plus the spacers around it. */
+export interface TreeWindow {
+    /** First painted row index into the flat row list. */
+    from: number;
+    /** One past the last painted row index. */
+    to: number;
+    /** Height of the rows above `from`, in px. */
+    before: number;
+    /** Height of the rows below `to`, in px. */
+    after: number;
+}
+/**
+ * Which flat rows to paint for one scroll position.
+ *
+ * Pure, so a gate or probe can pin the arithmetic without a layout engine: the
+ * tree is one flat pre-order list with a fixed row height, so the first visible
+ * row is `offset / height` and the painted count is
+ * `ceil(visible height / height) + overscan`. `scrollTop` is the scroller's
+ * offset; `headerHeight` is the block ABOVE the rows inside it (the workspace
+ * root label, the drop hint, `.rvs-tree`'s top padding), because the offset only
+ * starts indexing rows below that block.
+ *
+ * `viewportHeight <= headerHeight` means there is no room for rows at all
+ * (jsdom or a hidden panel): the fallback paints the whole tree while it is
+ * small and `TREE_WINDOW_FALLBACK` rows otherwise. The invariant
+ * `before + (to - from) * TREE_ROW_HEIGHT + after === total * TREE_ROW_HEIGHT`
+ * holds on every branch, which is what keeps the scroll range identical to the
+ * fully-mounted tree the window replaced.
+ */
+export declare function computeTreeWindow(total: number, scrollTop: number, viewportHeight: number, headerHeight: number, overscan?: number): TreeWindow;
 /**
  * One rendered line of the flattened tree.
  *
@@ -179,6 +209,13 @@ export interface ExplorerRowActions {
 interface ExplorerRowProps {
     entry: RemoteFileEntry;
     depth: number;
+    /**
+     * ARIA position among the flattened visible rows. The tree is now WINDOWED, so
+     * the DOM sibling count is only the slice; without these two attributes a
+     * screen reader announces "5 of 26" for a row that is really "5005 of 20003".
+     */
+    posinset: number;
+    setsize: number;
     status: string | undefined;
     ignored: boolean;
     isSelected: boolean;

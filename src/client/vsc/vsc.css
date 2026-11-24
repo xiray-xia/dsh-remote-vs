@@ -8,7 +8,8 @@
  * (dsh-solution-explorer): 13px/20px panel type, 5px/10px tree rows with a
  * 10px radius, a 30px activity button with the badge tucked into the icon's
  * bottom-right corner, GitHub-Dark token colors, and the
- * `--e2b714 / #4ec9b0 / #f14c4c` modified/added/deleted triple.
+ * `--e2b714 / #4ec9b0 / #ff8b8b` modified/added/deleted triple (the light
+ * scheme gets the GitHub-Light set from the `body:not(...)` block below).
  */
 
 .rvs-root {
@@ -19,22 +20,39 @@
   --rvs-active: var(--dsw-alias-interactive-bg-active, rgba(77, 107, 254, .22));
   --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
   --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  /* Region boundaries — panel header underline, activity-bar edge, diff gutter
+     columns, SCM sections. border-l1 is a 4%-black hairline: it composites to
+     1.09–1.25:1 and reads as no line at all, so structure takes the l3 step
+     (1.31/1.67/1.41/1.98). Pure decoration keeps `--rvs-border`. */
+  --rvs-divider: var(--dsw-alias-border-l3, rgba(127, 127, 127, .32));
   --rvs-input: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
   --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
   --rvs-layer3: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, .16));
   --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
   --rvs-accent: var(--dsw-alias-button-info-fill, #4d6bfe);
   --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
-  --rvs-ok: #2ea043;
+  /* The error colour as TEXT (banner copy, status read-outs). The state token
+     is tuned for a white plate: 4.30:1 on the panel and 3.08–3.43:1 on the
+     banner's own red tint, so text takes a deeper step of the same hue. */
+  --rvs-danger-text: #ff8b8b;
+  --rvs-error: var(--rvs-danger-text);
+  /* Dark scheme status colours. The dark leaves composite to #1b1b1c
+     (vanilla) / #222944 (island), where the GitHub-Dark steps measured
+     D 4.00, X 2.80, ok 4.24 — the light block below keeps its own (≥4.5) set. */
+  --rvs-ok: #3fb950;
   --rvs-git-m: #e2b714;
   --rvs-git-a: #4ec9b0;
-  --rvs-git-d: #f14c4c;
+  --rvs-git-d: #ff8b8b;
   --rvs-git-r: #4ec9b0;
   --rvs-git-c: #58a6ff;
-  --rvs-git-u: #f14c4c;
-  --rvs-git-x: #6e6e6e;
+  --rvs-git-u: #ff8b8b;
+  --rvs-git-x: #9aa0a6;
   --rvs-add-bg: rgba(78, 201, 176, .15);
   --rvs-del-bg: rgba(241, 76, 76, .15);
+  /* Diff row text, kept apart from the git-* letter colours: a row sits on a
+     tint of its own hue, which costs ~1.1:1, so these two are a shade deeper. */
+  --rvs-diff-add: #146c2e;
+  --rvs-diff-del: #a40e26;
   /* Opaque equivalents, for elements that must not show what scrolls under
      them (the pinned diff line numbers). */
   --rvs-add-solid: #e4f6f1;
@@ -73,12 +91,55 @@ body[data-ds-dark-theme] .rvs-root {
   --rvs-code-bg: #1e1e1e;
   --rvs-code-fg: #d4d4d4;
   --rvs-code-gutter-fg: #858585;
+  --rvs-diff-add: #7ee2c6;
+  --rvs-diff-del: #ff8b8b;
   --rvs-add-solid: #16332e;
   --rvs-del-solid: #3b2325;
   --rvs-editor-panel-bg: #252526;
   --rvs-editor-panel-fg: #cccccc;
   --rvs-editor-input-bg: #3c3c3c;
   --rvs-editor-chrome-border: rgba(255, 255, 255, .12);
+}
+
+/**
+ * Light scheme for the NON-code surfaces. The token block above is GitHub-Dark:
+ * on a white/cream panel its git triple reads 1.7–3.4:1, so light gets the
+ * GitHub-Light set (all ≥4.5:1 — measured 2026-11-23). The code surfaces are
+ * scheme-fixed rather than skin-fixed and are already flipped by the block
+ * above, so they are deliberately not repeated here.
+ */
+body:not([data-ds-dark-theme]) .rvs-root {
+  --rvs-ok: #1a7f37;
+  --rvs-git-m: #8a5c00;
+  --rvs-git-a: #1a7f37;
+  --rvs-git-d: #cf222e;
+  --rvs-git-r: #1a7f37;
+  --rvs-git-c: #0969da;
+  --rvs-git-u: #cf222e;
+  --rvs-git-x: #57606a;
+  --rvs-add-bg: rgba(26, 127, 55, .10);
+  --rvs-del-bg: rgba(207, 34, 46, .10);
+  --rvs-danger-text: #a52a2a;
+}
+
+/**
+ * The sidebar panel gets its own base in the light schemes. Without one every
+ * text colour in this sheet is composited against whatever leaf the host — and,
+ * under a skin, the wallpaper behind it — paints under the sidebar: the skin's
+ * leaf is `rgba(250,247,234,.74)`, which already costs the tertiary step 0.2:1
+ * and drops it to 2.67:1 if a host mount paints no leaf at all.
+ *
+ * Light-only on purpose: the dark leaf is opaque and stable, and raising the
+ * dark panel to bg-layer-2 (#2c2c2e) would cost the python sheet icon 3.36:1 →
+ * 2.72:1 for no readability gain.
+ *
+ * The two other surfaces that carry `.rvs-root` paint their own base and must
+ * keep it: `.rvs-float-window` is an opaque code surface, and `.rvs-center` is
+ * documented as chrome-transparent so the full-width mount sits on the host's
+ * own background.
+ */
+body:not([data-ds-dark-theme]) .rvs-root:not(.rvs-float-window):not(.rvs-center) {
+  background: var(--dsw-alias-bg-layer-2, #ffffff);
 }
 
 .rvs-edge {
@@ -101,7 +162,7 @@ body[data-ds-dark-theme] .rvs-root {
   align-items: center;
   gap: 4px;
   padding: 8px 0;
-  border-right: 1px solid var(--rvs-border);
+  border-right: 1px solid var(--rvs-divider);
   background: var(--dsw-specific-sidebar-fill, transparent);
 }
 
@@ -117,7 +178,7 @@ body[data-ds-dark-theme] .rvs-root {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   cursor: pointer;
 }
 
@@ -133,7 +194,7 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-rail-btn.danger:hover {
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-rail-badge {
@@ -144,8 +205,11 @@ body[data-ds-dark-theme] .rvs-root {
   height: 14px;
   padding: 0 3px;
   border-radius: 7px;
-  background: var(--rvs-accent);
-  color: #fff;
+  /* Ink badge. A filled accent behind white text measures 2.1–3.0:1 under the
+     skins (4.2 in plain light), so the count rides the fg/code-bg pair, which
+     contrasts in every scheme and skin. */
+  background: var(--rvs-fg);
+  color: var(--rvs-code-bg);
   font-size: 9px;
   font-weight: 700;
   line-height: 14px;
@@ -158,7 +222,7 @@ body[data-ds-dark-theme] .rvs-root {
   width: 20px;
   height: 1px;
   margin: 4px 0;
-  background: var(--rvs-border);
+  background: var(--rvs-divider);
 }
 
 /* -------------------------------------------------------- panel + editor */
@@ -221,7 +285,7 @@ body[data-ds-dark-theme] .rvs-root {
   gap: 6px;
   height: 34px;
   padding: 0 8px 0 10px;
-  border-bottom: 1px solid var(--rvs-border);
+  border-bottom: 1px solid var(--rvs-divider);
 }
 
 .rvs-header .rvs-title {
@@ -234,7 +298,7 @@ body[data-ds-dark-theme] .rvs-root {
   font-weight: 700;
   letter-spacing: .04em;
   text-transform: uppercase;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-hbtn {
@@ -248,7 +312,7 @@ body[data-ds-dark-theme] .rvs-root {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   cursor: pointer;
 }
 
@@ -258,8 +322,12 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-hbtn.danger:hover {
-  color: #fff;
-  background: var(--rvs-danger);
+  /* Ink icon on the hover wash plus a 1px danger ring. White on the state token
+     measures 3.29:1 in dark and 2.71:1 under island-dark; the ring keeps the
+     destructive cue at ≥3.6:1 without depending on a filled red. */
+  color: var(--rvs-fg);
+  background: var(--rvs-hover);
+  box-shadow: inset 0 0 0 1px var(--rvs-danger);
 }
 
 .rvs-hbtn:disabled {
@@ -280,7 +348,7 @@ body[data-ds-dark-theme] .rvs-root {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--rvs-border);
+  border-bottom: 1px solid var(--rvs-divider);
   font-size: 11px;
 }
 
@@ -332,7 +400,7 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-conn-error {
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-conn-error .rvs-conn-dot {
@@ -429,7 +497,9 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-node.drop-target {
   background: var(--rvs-active);
-  outline: 1px solid var(--rvs-brand);
+  /* The drop row's outline is the STATE cue, not decoration: the skin's mint
+     brand is 1.94:1 on the selected-row tint, the fg is 8.4–13.7:1. */
+  outline: 1px solid var(--rvs-fg);
   outline-offset: -1px;
 }
 
@@ -441,7 +511,7 @@ body[data-ds-dark-theme] .rvs-root {
   border: 1px dashed var(--rvs-brand);
   border-radius: 3px;
   font-size: 11px;
-  color: var(--rvs-brand);
+  color: var(--rvs-fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -458,7 +528,7 @@ body[data-ds-dark-theme] .rvs-root {
   gap: 6px;
   padding: 3px 10px 4px;
   font-size: 11px;
-  color: var(--dsw-alias-text-secondary, rgba(127, 127, 127, .95));
+  color: var(--dsw-alias-label-secondary, rgba(127, 127, 127, .95));
 }
 
 .rvs-upload-text {
@@ -479,6 +549,22 @@ body[data-ds-dark-theme] .rvs-root {
   align-items: center;
   justify-content: center;
   color: var(--rvs-fg3);
+}
+
+/**
+ * The file-type palette in `file-icons.tsx` is the dark-friendly set: on a white
+ * or cream tree 101 of its 109 `color:` uses measure below 3:1 (js #d5c93f
+ * 1.45, archive #d9b64a 1.66, shell #4ec9b0 1.73, tsx #4fc3f7 1.70). One
+ * paint-level step for the light schemes only takes the worst case to 3.01:1
+ * (python's #ffd75e mark) and the JS sheet to 3.64:1 — measured in-engine with
+ * `ctx.filter`, not hand-computed. The artwork is untouched and the dark
+ * schemes keep the palette as designed. Scoped to `.rvs-fi`, which only the
+ * coloured `FileTypeIcon` / `FolderGlyph` artwork carries: `.rvs-node-icon` is a
+ * layout wrapper shared with the neutral outline glyphs (search / SCM / commit),
+ * which must not be darkened.
+ */
+body:not([data-ds-dark-theme]) .rvs-fi {
+  filter: brightness(.62) saturate(1.1);
 }
 
 .rvs-node-name {
@@ -535,7 +621,7 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-empty {
   padding: 18px 14px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 12px;
   text-align: center;
   line-height: 1.7;
@@ -558,7 +644,7 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-banner.error {
   background: rgba(200, 60, 60, .16);
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-banner.warn {
@@ -600,14 +686,14 @@ body[data-ds-dark-theme] .rvs-root {
   position: sticky;
   top: 0;
   padding: 4px 8px;
-  background: var(--rvs-panel, var(--rvs-hover));
+  background: var(--rvs-hover);
   border-bottom: 1px solid var(--rvs-border);
   font-family: inherit;
 }
 
 .rvs-conflict-hunk-head {
   padding: 2px 8px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   border-bottom: 1px solid var(--rvs-border);
 }
 
@@ -618,23 +704,23 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-conflict-row.add {
   background: rgba(78, 201, 176, .14);
-  color: var(--rvs-git-a);
+  color: var(--rvs-diff-add);
 }
 
 .rvs-conflict-row.del {
   background: rgba(241, 76, 76, .12);
-  color: var(--rvs-git-d);
+  color: var(--rvs-diff-del);
 }
 
 .rvs-conflict-more {
   padding: 4px 8px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* --------------------------------------------------------- source control */
 
 .rvs-scm-section {
-  border-bottom: 1px solid var(--rvs-border);
+  border-bottom: 1px solid var(--rvs-divider);
 }
 
 .rvs-scm-head {
@@ -661,7 +747,7 @@ body[data-ds-dark-theme] .rvs-root {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-scm-head-actions {
@@ -718,7 +804,7 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-scm-dir {
   flex: none;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-scm-actions {
@@ -735,7 +821,7 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-commit-box {
   flex: none;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--rvs-border);
+  border-bottom: 1px solid var(--rvs-divider);
 }
 
 .rvs-commit-input {
@@ -755,7 +841,9 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-commit-input:focus {
-  border-color: var(--rvs-brand);
+  /* Focus is a theme pair, not the brand hue: the skin's mint brand lands at
+     2.22:1 on the input surface, the fg pair at 7.4–15.9:1 in every scheme. */
+  border-color: var(--rvs-fg);
 }
 
 .rvs-commit-row {
@@ -769,8 +857,9 @@ body[data-ds-dark-theme] .rvs-root {
   padding: 5px 8px;
   border: none;
   border-radius: 6px;
-  background: var(--rvs-accent);
-  color: #fff;
+  /* See .rvs-rail-badge: ink pair instead of accent + white. */
+  background: var(--rvs-fg);
+  color: var(--rvs-code-bg);
   font: inherit;
   font-size: 12.5px;
   font-weight: 600;
@@ -810,7 +899,7 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-repo-branch {
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-pill {
@@ -830,7 +919,7 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-pill-cached {
   flex: none;
   font-weight: 500;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   border: 1px solid var(--rvs-border2);
   background: transparent;
 }
@@ -869,15 +958,18 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-chip.primary {
-  background: var(--rvs-accent);
+  background: var(--rvs-fg);
   border-color: transparent;
-  color: #fff;
+  color: var(--rvs-code-bg);
 }
 
 .rvs-chip.danger:hover {
-  background: var(--rvs-danger);
-  border-color: transparent;
-  color: #fff;
+  /* Same call as `.rvs-hbtn.danger`: white on the state token is 2.7–3.3:1 in
+     the dark schemes; the ink pair plus a danger border keeps both halves
+     readable. */
+  background: var(--rvs-hover);
+  border-color: var(--rvs-danger);
+  color: var(--rvs-fg);
 }
 
 .rvs-input {
@@ -894,7 +986,7 @@ body[data-ds-dark-theme] .rvs-root {
 }
 
 .rvs-input:focus {
-  border-color: var(--rvs-brand);
+  border-color: var(--rvs-fg);
 }
 
 .rvs-select {
@@ -1007,7 +1099,7 @@ body[data-ds-dark-theme] .rvs-root {
   border-right: 1px solid transparent;
   border-radius: 4px 4px 0 0;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font: inherit;
   font-size: 11px;
   white-space: nowrap;
@@ -1207,7 +1299,7 @@ body[data-ds-dark-theme] .rvs-root {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-status-btn {
@@ -1225,7 +1317,7 @@ body[data-ds-dark-theme] .rvs-root {
   color: var(--rvs-fg);
 }
 
-.rvs-status-error { color: var(--rvs-danger); }
+.rvs-status-error { color: var(--rvs-danger-text); }
 
 /* Conversation mount: the status line belongs to the editor, so it takes the
    panel's foreground instead of the sidebar's dimmer one. */
@@ -1319,7 +1411,7 @@ body[data-ds-dark-theme] .rvs-root {
   flex: 0 0 auto;
   padding: 3px 6px;
   border-bottom: 1px solid var(--rvs-editor-chrome-border);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -1359,12 +1451,12 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-crumb-menu-note {
   padding: 6px 10px;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* The note doubles as the dropdown's error line (see `.rvs-status-error`);
    the compound selector outranks the note's own muted colour. */
-.rvs-crumb-menu-note.rvs-status-error { color: var(--rvs-danger); }
+.rvs-crumb-menu-note.rvs-status-error { color: var(--rvs-danger-text); }
 
 .rvs-crumb-menu-item {
   display: flex;
@@ -1435,7 +1527,7 @@ body[data-ds-dark-theme] .rvs-root {
   gap: 10px;
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-image-preview-hint { opacity: .75; }
@@ -1458,7 +1550,7 @@ body[data-ds-dark-theme] .rvs-root {
   gap: 6px;
   padding: 16px;
   font-size: 12px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   background: var(--rvs-code-bg);
   text-align: center;
 }
@@ -1480,7 +1572,7 @@ body[data-ds-dark-theme] .rvs-root {
   gap: 8px;
   padding: 24px;
   text-align: center;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-editor-empty-glyph {
@@ -1509,7 +1601,7 @@ body[data-ds-dark-theme] .rvs-root {
 
 .rvs-empty-hint {
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   margin-top: 4px;
 }
 
@@ -1562,7 +1654,7 @@ body[data-ds-dark-theme] .rvs-root {
   border-left: 3px solid var(--rvs-border2);
   color: var(--rvs-fg2);
 }
-.rvs-markdown a { color: var(--dsw-alias-label-link, #58a6ff); text-decoration: none; }
+.rvs-markdown a { color: var(--dsw-alias-link, #58a6ff); text-decoration: none; }
 .rvs-markdown a:hover { text-decoration: underline; }
 .rvs-markdown table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
 .rvs-markdown th, .rvs-markdown td { border: 1px solid var(--rvs-border2); padding: 4px 8px; }
@@ -1594,7 +1686,7 @@ body[data-ds-dark-theme] .rvs-root {
   padding: 3px 8px;
   border-bottom: 1px solid var(--rvs-border);
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /**
@@ -1616,7 +1708,7 @@ body[data-ds-dark-theme] .rvs-root {
   text-align: center;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   user-select: none;
 }
 
@@ -1784,8 +1876,8 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-gutter-col {
   flex: none;
   width: 30px;
-  border-left: 1px solid var(--rvs-border);
-  border-right: 1px solid var(--rvs-border);
+  border-left: 1px solid var(--rvs-divider);
+  border-right: 1px solid var(--rvs-divider);
   user-select: none;
 }
 
@@ -1824,7 +1916,7 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-row-del .rvs-dline-text,
 .rvs-row-del .rvs-dline-num,
 .rvs-row-del .rvs-num {
-  color: #f14c4c;
+  color: var(--rvs-diff-del);
 }
 
 .rvs-row-add {
@@ -1834,11 +1926,11 @@ body[data-ds-dark-theme] .rvs-root {
 .rvs-row-add .rvs-dline-text,
 .rvs-row-add .rvs-dline-num,
 .rvs-row-add .rvs-num {
-  color: #4ec9b0;
+  color: var(--rvs-diff-add);
 }
 
 .rvs-row-empty {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   opacity: .35;
 }
 
@@ -1848,8 +1940,8 @@ body[data-ds-dark-theme] .rvs-root {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-left: 1px solid var(--rvs-border);
-  border-right: 1px solid var(--rvs-border);
+  border-left: 1px solid var(--rvs-divider);
+  border-right: 1px solid var(--rvs-divider);
   user-select: none;
 }
 
@@ -1875,7 +1967,7 @@ body[data-ds-dark-theme] .rvs-root {
   border: none;
   border-radius: 3px;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -1925,6 +2017,8 @@ body:not([data-ds-dark-theme]) .rvs-t-variable { color: #001080; }
 body:not([data-ds-dark-theme]) .rvs-t-operator,
 body:not([data-ds-dark-theme]) .rvs-t-punct { color: #1f1f1f; }
 body:not([data-ds-dark-theme]) .rvs-t-meta { color: #af00db; }
+body:not([data-ds-dark-theme]) .rvs-t-insert { color: var(--rvs-diff-add); }
+body:not([data-ds-dark-theme]) .rvs-t-delete { color: var(--rvs-diff-del); }
 
 /**
  * CodeMirror token colors, applied through FIXED class names emitted by the
@@ -2299,7 +2393,9 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-block-del {
 .rvs-change-nav-btn:hover {
   border-color: var(--rvs-border2);
   background: var(--rvs-hover);
-  color: var(--rvs-brand);
+  /* The ball is a control users must find; the brand token is 2.6:1 under the
+     island light skin, so the glyph rides the primary foreground instead. */
+  color: var(--rvs-fg);
 }
 
 .rvs-change-nav-btn:active { background: var(--rvs-active); }
@@ -2341,7 +2437,8 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-block-del {
 .rvs-undo-affordance:hover {
   background-color: #f85149;
   border-color: #f85149;
-  color: #fff;
+  /* Dark ink, not white: white on #f85149 is 3.35:1. */
+  color: #1e2229;
 }
 
 .rvs-undo-affordance:active {
@@ -2349,8 +2446,11 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-block-del {
 }
 
 .rvs-undo-affordance:focus-visible {
-  outline: 2px solid #58a6ff;
-  outline-offset: 1px;
+  /* The pill hangs off <body>, where `--rvs-*` does not resolve, so its focus
+     ring comes from its own two-scheme pair: the pale ink of the dark pill
+     (9.4:1 on the code surface) and the deep red of the light pill (7.9:1). */
+  outline: 2px solid #ffb4ae;
+  outline-offset: 2px;
 }
 
 /* 删除锚点：这一行其实已经不在了，虚线边框把它和"真实存在的行"分开。 */
@@ -2372,7 +2472,7 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:hover {
 }
 
 body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
-  outline-color: #4d6bfe;
+  outline-color: #a40e26;
 }
 
 /**
@@ -2400,7 +2500,7 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   padding: 0 5px;
   border: 1px solid var(--rvs-border);
   border-radius: 4px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10px;
   font-family: var(--rvs-mono);
   opacity: .85;
@@ -2419,6 +2519,11 @@ body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
   --rvs-editor-panel-fg: #1f1f1f;
   --rvs-editor-input-bg: #ffffff;
   --rvs-editor-chrome-border: rgba(0, 0, 0, .12);
+  /* The "no results" count. `.rvs-find` is portalled outside `.rvs-root`, so
+     red tokens never resolved here: the `.none` rule silently inherited the
+     panel fg instead of turning red. This local pair makes the state real and
+     readable on the editor plate (7.1:1 light / 6.8:1 dark). */
+  --rvs-danger-text: #a52a2a;
   position: absolute;
   top: 6px;
   right: 18px;
@@ -2440,6 +2545,7 @@ body[data-ds-dark-theme] .rvs-find {
   --rvs-editor-panel-fg: #cccccc;
   --rvs-editor-input-bg: #3c3c3c;
   --rvs-editor-chrome-border: rgba(255, 255, 255, .12);
+  --rvs-danger-text: #ff8b8b;
 }
 
 .rvs-find-input {
@@ -2455,7 +2561,11 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-find-input:focus {
-  border-color: var(--rvs-brand);
+  /* `.rvs-find` is portalled away from `.rvs-root`, so `--rvs-brand` never
+     resolved here (the declaration was invalid and fell back to currentColor):
+     the editor's own fg is the pair that exists in this subtree. 16.5:1 light /
+     6.9:1 dark. */
+  border-color: var(--rvs-editor-panel-fg);
 }
 
 .rvs-find-count {
@@ -2468,7 +2578,7 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-find-count.none {
-  color: var(--rvs-git-d);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-code {
@@ -2539,7 +2649,7 @@ body[data-ds-dark-theme] .rvs-find {
   flex: none;
   font-family: var(--rvs-mono);
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-commit-msg {
@@ -2553,7 +2663,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-commit-date {
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-ref-badge {
@@ -2589,7 +2699,7 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-detail-meta {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   margin-bottom: 6px;
   white-space: pre-wrap;
@@ -2704,7 +2814,7 @@ body[data-ds-dark-theme] .rvs-find {
   border: none;
   border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font: inherit;
   font-size: 12px;
   padding: 5px 8px 4px;
@@ -2730,7 +2840,7 @@ body[data-ds-dark-theme] .rvs-find {
   margin-right: 2px;
   font-family: var(--rvs-mono);
   font-size: 10.5px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /**
@@ -2768,7 +2878,7 @@ body[data-ds-dark-theme] .rvs-find {
   gap: 6px;
   min-height: 21px;
   font-size: 11.5px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-hmeta-icon {
@@ -2846,7 +2956,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-hhint {
   margin-bottom: 6px;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* One line: how many files, and the path filter that makes a 60-file commit
@@ -2861,7 +2971,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-hcount {
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-hfilter {
@@ -2905,7 +3015,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-hfolder-count {
   flex: none;
   font-size: 10.5px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* Files under a folder keep the editor tree's indent idiom. */
@@ -2936,7 +3046,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-commit-item:focus-visible,
 .rvs-patch-chevron:focus-visible,
 .rvs-vsplit-handle:focus-visible {
-  outline: 2px solid var(--rvs-brand);
+  outline: 2px solid var(--rvs-fg);
   outline-offset: -2px;
 }
 
@@ -3153,7 +3263,7 @@ body[data-ds-dark-theme] .rvs-find {
   margin: 2px 0;
   border-top: 1px dashed var(--rvs-border);
   border-bottom: 1px dashed var(--rvs-border);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   text-align: center;
   user-select: none;
@@ -3162,7 +3272,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-patch-note {
   padding: 6px 8px;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* ---------------------------------------------------- floating editor window */
@@ -3242,9 +3352,15 @@ body[data-ds-dark-theme] .rvs-find {
   outline: none;
 }
 
-.rvs-float-ball:hover,
+.rvs-float-ball:hover {
+  background: var(--rvs-hover);
+}
+
+/* `outline: none` on the ball removed the only keyboard cue; restore it. */
 .rvs-float-ball:focus-visible {
   background: var(--rvs-hover);
+  outline: 2px solid var(--rvs-fg);
+  outline-offset: 2px;
 }
 
 .rvs-float-ball-glyph {
@@ -3301,7 +3417,7 @@ body[data-ds-dark-theme] .rvs-find {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11.5px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   direction: rtl;
   unicode-bidi: plaintext;
   text-align: left;
@@ -3336,7 +3452,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-float-close:hover {
   background: rgba(241, 76, 76, .18);
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-float-body {
@@ -3385,7 +3501,7 @@ body[data-ds-dark-theme] .rvs-find {
   gap: 10px;
   padding: 24px;
   text-align: center;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 12.5px;
 }
 
@@ -3402,8 +3518,46 @@ body[data-ds-dark-theme] .rvs-find {
 
 /* --------------------------------------------------------- context menu */
 
-.rvs-portal {
+/**
+ * PORTALED surfaces (menu / modal / toast) mount on <body>, i.e. OUTSIDE
+ * `.rvs-root` where the tokens are declared — without this block every var()
+ * below resolves to nothing: the confirm button lost its fill and painted white
+ * text straight on the light dialog plate (1.1–1.2:1, reported 2026-11-23 on
+ * the git-push confirm), the menu had no border and no hover feedback, and the
+ * toast fell back to inherited text colour. Keep this subset in sync with
+ * `.rvs-root`; it lists exactly the tokens the `.rvs-menu*`, `.rvs-modal*`,
+ * `.rvs-input`, `.rvs-toast*` and `.rvs-snips-panel` rules read.
+ *
+ * `.rvs-toasts` is NOT inside `.rvs-portal` (DialogHost portals the modal and
+ * the toast stack as separate body children), so it carries the same block.
+ */
+.rvs-portal,
+.rvs-toasts {
+  --rvs-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --rvs-fg2: var(--dsw-alias-label-secondary, #b9b9b9);
+  --rvs-fg3: var(--dsw-alias-label-tertiary, #8b8b8b);
+  --rvs-hover: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .14));
+  --rvs-active: var(--dsw-alias-interactive-bg-active, rgba(77, 107, 254, .22));
+  --rvs-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
+  --rvs-border2: var(--dsw-alias-border-l2, rgba(127, 127, 127, .38));
+  --rvs-input: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
+  --rvs-layer3: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, .16));
+  --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
+  --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  /* The opaque "ink" pair filled buttons use: --rvs-fg and --rvs-code-bg
+     contrast in every scheme/skin, which the accent tokens do not. */
+  --rvs-code-bg: #ffffff;
+  --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
   font-family: inherit;
+}
+
+body[data-ds-dark-theme] .rvs-portal,
+body[data-ds-dark-theme] .rvs-toasts {
+  --rvs-code-bg: #1e1e1e;
+  /* The dark overlay plate is mid-grey (#61666b), not near-black: the host's
+     secondary label token reads 3.85:1 there. Portal copy steps up to a value
+     that clears AA on that plate (measured 4.9:1). */
+  --rvs-fg2: #e9ebed;
 }
 
 /**
@@ -3419,6 +3573,23 @@ body[data-ds-dark-theme] .rvs-find {
   background-color: Canvas;
   background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
   color: var(--rvs-fg);
+}
+
+/*
+ * Dark floating plates. The host dark `--dsw-alias-bg-overlay` is MID-GREY
+ * (#61666b), not near-black: menu labels measured 2.5-3.4:1, the menu red
+ * 3.41:1, and the body copy of the INLINE modals (which take `.rvs-root`
+ * tokens) 3.85:1 there. The host paints its own menus on a dark elevated
+ * surface, so every dark floating surface takes bg-layer-2 over the Canvas
+ * base (#121212): labels then measure 7.9-13.3:1 and the modal body 9.6:1.
+ * The error toast keeps its own dark-red plate (`:not(.error)` keeps the two
+ * rules disjoint); light is untouched.
+ */
+body[data-ds-dark-theme] .rvs-menu,
+body[data-ds-dark-theme] .rvs-modal-box,
+body[data-ds-dark-theme] .rvs-snips-panel,
+body[data-ds-dark-theme] .rvs-toast:not(.error) {
+  background-image: linear-gradient(var(--dsw-alias-bg-layer-2, #2c2c2e), var(--dsw-alias-bg-layer-2, #2c2c2e));
 }
 
 .rvs-menu {
@@ -3461,11 +3632,30 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-menu-item.danger {
-  color: var(--vsc-danger, #f14c4c);
+  color: var(--rvs-danger, #f14c4c);
 }
+
+/* The host error token targets a plain surface: on the menu's opaque overlay
+   plate it reads 3.8 (vanilla light) / 4.4 (vanilla dark), so each scheme gets
+   a local red that clears AA. */
+body:not([data-ds-dark-theme]) .rvs-menu-item.danger { color: #cf222e; }
+/* The dark plate is mid-grey: #ff7b72 reads 2.30 there, so use a lighter red
+   that keeps the "danger" hue while clearing AA (measured 5.7). */
+body[data-ds-dark-theme] .rvs-menu-item.danger { color: #ffb3b3; }
 
 .rvs-menu-item.danger:hover {
   background: rgba(241, 76, 76, .16);
+}
+
+/* The hover tint lightens the plate, so the danger label needs a deeper red on
+   light schemes and a brighter one on dark. */
+body:not([data-ds-dark-theme]) .rvs-menu-item.danger:hover {
+  background: rgba(207, 34, 46, .10);
+  color: #a40e26;
+}
+body[data-ds-dark-theme] .rvs-menu-item.danger:hover {
+  background: rgba(255, 255, 255, .10);
+  color: #ffd7d5;
 }
 
 .rvs-menu-item:disabled {
@@ -3480,7 +3670,12 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-menu-hint {
   margin-left: auto;
   font-size: 11px;
-  opacity: .6;
+  /* 11 px text on the menu plate: at .6 the shortcut hints measured 3.19:1 on
+     island-light (light host plate) — below the 4.5 small-text floor. .8 lifts
+     that to ~5.2:1 and leaves the light vanilla case (4.68 → ~6:1) and both
+     dark plates above it. The colour stays the inherited `--rvs-fg`; only the
+     alpha moves, so the approved ink/portal/fg2 scheme is untouched. */
+  opacity: .8;
 }
 
 /* ------------------------------------------------------- modal + toast */
@@ -3545,16 +3740,27 @@ body[data-ds-dark-theme] .rvs-find {
   background: var(--rvs-hover);
 }
 
+/* Filled controls use the ink pair, never "accent fill + #fff": the accent
+   under white text is 2.1–4.2:1 once the skins remap it (measured 2026-11-23).
+   Danger keeps its red as the BORDER so the label stays on the plate's own
+   foreground instead of white-on-red. */
 .rvs-modal-btn.primary {
   border-color: transparent;
-  background: var(--rvs-accent);
-  color: #fff;
+  background: var(--rvs-fg);
+  color: var(--rvs-code-bg);
 }
 
 .rvs-modal-btn.danger {
+  /* Solid fill with an ink label, not a 1px red outline: the outline measured
+     1.76:1 on the dark mid-grey plate, i.e. the only "danger" cue vanished. */
   border-color: transparent;
-  background: var(--rvs-danger);
+  background: #cf222e;
   color: #fff;
+}
+
+body[data-ds-dark-theme] .rvs-modal-btn.danger {
+  background: #f25a5a;
+  color: #1e2229;
 }
 
 .rvs-toasts {
@@ -3586,6 +3792,10 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-toast.error {
   border-color: rgba(241, 76, 76, .6);
   background-image: linear-gradient(rgba(58, 31, 34, .92), rgba(58, 31, 34, .92));
+  /* The error toast keeps its deliberately dark red plate in BOTH schemes, so
+     its label cannot follow --rvs-fg (a near-black label in the light theme:
+     1.2–1.6:1). */
+  color: #ffe3e0;
 }
 
 /* ------------------------------------------------------------- terminal */
@@ -3618,7 +3828,7 @@ body[data-ds-dark-theme] .rvs-find {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -3755,10 +3965,10 @@ body[data-ds-dark-theme] .rvs-find {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  border: 1px solid var(--rvs-fg2);
   border-radius: 5px;
   background: transparent;
-  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--rvs-fg2);
   font: inherit;
   font-size: 14px;
   line-height: 1;
@@ -3766,8 +3976,10 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-snips-add:hover {
-  background: var(--dsw-alias-brand-primary, #4d6bfe);
-  color: #fff;
+  /* Same ink pair as the other filled controls: a brand fill behind #fff is
+     1.8–3.0:1 under the skins. */
+  background: var(--dsw-alias-label-primary, CanvasText);
+  color: var(--rvs-code-bg, Canvas);
 }
 
 .rvs-snips-list {
@@ -3782,7 +3994,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-snips-empty {
   padding: 10px 8px;
-  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  color: var(--rvs-fg2);
   font-size: 11px;
   line-height: 1.6;
 }
@@ -3803,7 +4015,7 @@ body[data-ds-dark-theme] .rvs-find {
 .rvs-snips-grip {
   flex: none;
   padding: 0 2px;
-  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  color: var(--rvs-fg2);
   font-size: 11px;
   cursor: grab;
   user-select: none;
@@ -3849,7 +4061,7 @@ body[data-ds-dark-theme] .rvs-find {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--dsw-alias-label-secondary, #b9b9b9);
+  color: var(--rvs-fg2);
   font-family: var(--rvs-mono, ui-monospace, monospace);
   font-size: 11px;
 }
@@ -3865,7 +4077,7 @@ body[data-ds-dark-theme] .rvs-find {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  color: var(--rvs-fg2);
   font: inherit;
   font-size: 12px;
   line-height: 1;
@@ -3883,7 +4095,7 @@ body[data-ds-dark-theme] .rvs-find {
   flex: none;
   padding: 4px 8px;
   border-top: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, .25));
-  color: var(--dsw-alias-label-tertiary, #8b8b8b);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
 }
 
@@ -3895,7 +4107,7 @@ body[data-ds-dark-theme] .rvs-find {
   flex-direction: column;
   gap: 4px;
   margin: 8px 0;
-  color: var(--dsw-alias-label-secondary, CanvasText);
+  color: var(--rvs-fg2);
   font-size: 11.5px;
 }
 
@@ -3915,7 +4127,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-snips-field input:focus,
 .rvs-snips-field textarea:focus {
-  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  border-color: var(--rvs-fg);
 }
 
 .rvs-snips-command {
@@ -4006,7 +4218,7 @@ body[data-ds-dark-theme] .rvs-find {
   flex: none;
   align-self: center;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   white-space: nowrap;
 }
 
@@ -4052,7 +4264,7 @@ body[data-ds-dark-theme] .rvs-find {
   font-size: 10.5px;
   line-height: 15px;
   text-align: center;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-hit-lineno {
@@ -4082,7 +4294,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-hit-dir {
   flex: none;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -4096,7 +4308,7 @@ body[data-ds-dark-theme] .rvs-find {
   border: 1px solid var(--rvs-border2);
   border-radius: 4px;
   font-size: 10px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 /* --- SCM: repository directory row (git runs in THIS directory) ------------- */
@@ -4107,13 +4319,13 @@ body[data-ds-dark-theme] .rvs-find {
   gap: 4px;
   padding: 4px 8px 4px 10px;
   border-bottom: 1px solid var(--rvs-border);
-  background: var(--rvs-bg2, var(--dsw-alias-bg-layer-1, #1b1b1b));
+  background: var(--dsw-alias-bg-layer-1, #1b1b1b);
   font-size: 11px;
   flex: none;
 }
 
 .rvs-repo-bar-label {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   white-space: nowrap;
 }
 
@@ -4129,7 +4341,7 @@ body[data-ds-dark-theme] .rvs-find {
   padding: 2px 6px;
   border: 1px solid var(--rvs-border2);
   border-radius: 4px;
-  background: var(--rvs-bg3, rgba(255, 255, 255, .04));
+  background: var(--rvs-input);
   color: var(--rvs-fg);
   font-family: var(--rvs-mono, ui-monospace, Consolas, monospace);
   font-size: 11px;
@@ -4138,7 +4350,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-repo-bar-path:hover {
   border-color: var(--rvs-brand);
-  color: var(--rvs-brand-fg, var(--rvs-fg));
+  color: var(--rvs-fg);
 }
 
 .rvs-repo-bar-fix {
@@ -4185,13 +4397,13 @@ body[data-ds-dark-theme] .rvs-find {
   background: none;
   padding: 1px 3px;
   border-radius: 3px;
-  color: var(--rvs-brand-fg, var(--rvs-fg));
+  color: var(--rvs-fg);
   font: inherit;
   cursor: pointer;
 }
 
 .rvs-crumb:hover {
-  background: var(--rvs-row-hover, rgba(255, 255, 255, .07));
+  background: var(--rvs-hover);
 }
 
 .rvs-repopick-probe {
@@ -4199,7 +4411,7 @@ body[data-ds-dark-theme] .rvs-find {
   border-radius: 4px;
   font-size: 11.5px;
   border: 1px solid var(--rvs-border2);
-  background: var(--rvs-bg3, rgba(255, 255, 255, .04));
+  background: var(--rvs-input);
   color: var(--rvs-fg2);
 }
 
@@ -4210,7 +4422,7 @@ body[data-ds-dark-theme] .rvs-find {
 
 .rvs-repopick-probe.inside {
   border-color: var(--rvs-brand);
-  color: var(--rvs-brand-fg, var(--rvs-fg));
+  color: var(--rvs-fg);
 }
 
 .rvs-repopick-found {
@@ -4222,7 +4434,7 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-repopick-found-label {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -4234,7 +4446,7 @@ body[data-ds-dark-theme] .rvs-find {
   overflow: auto;
   border: 1px solid var(--rvs-border);
   border-radius: 5px;
-  background: var(--rvs-bg-layer, rgba(0, 0, 0, .18));
+  background: rgba(0, 0, 0, .18);
   padding: 2px;
 }
 
@@ -4255,7 +4467,7 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-repopick-row:hover {
-  background: var(--rvs-row-hover, rgba(255, 255, 255, .07));
+  background: var(--rvs-hover);
 }
 
 .rvs-repopick-row span {
@@ -4265,7 +4477,7 @@ body[data-ds-dark-theme] .rvs-find {
 }
 
 .rvs-repopick-dim {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11.5px;
   padding: 6px;
 }
@@ -4310,6 +4522,7 @@ body[data-ds-dark-theme] .rvs-find {
   --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
   --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
   --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-danger-text: #ff8b8b;
   --rvs-git-m: #e2b714;
   --rvs-git-a: #4ec9b0;
   --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
@@ -4336,6 +4549,16 @@ body[data-ds-dark-theme] .rvs-execpanel {
   --rvs-code-fg: #d4d4d4;
 }
 
+/* The triple above is the DARK set: on the light overlay plate its mint "done"
+   is 1.72:1 and its amber "cancelled" 1.61:1. The pair `.rvs-root` uses brings
+   them to 5.52 / 4.91 (vanilla) and 6.01 / 5.35 (skin cream), declared here
+   because this panel is portalled away from `.rvs-root`. */
+body:not([data-ds-dark-theme]) .rvs-execpanel {
+  --rvs-git-m: #8a5c00;
+  --rvs-git-a: #146c2e;
+  --rvs-danger-text: #a52a2a;
+}
+
 
 .rvs-execpanel-head {
   flex: none;
@@ -4358,12 +4581,12 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-execpanel-status {
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-variant-numeric: tabular-nums;
 }
 
 .rvs-execpanel-status.done { color: var(--rvs-git-a); }
-.rvs-execpanel-status.error { color: var(--rvs-danger); }
+.rvs-execpanel-status.error { color: var(--rvs-danger-text); }
 .rvs-execpanel-status.cancelled { color: var(--rvs-git-m); }
 
 .rvs-execpanel-spacer {
@@ -4391,7 +4614,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   flex: none;
   padding: 4px 10px 6px;
   border-top: 1px solid var(--rvs-border);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -4407,6 +4630,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   --rvs-overlay: var(--dsw-alias-bg-overlay, #24262e);
   --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
   --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-danger-text: #ff8b8b;
   --rvs-git-m: #e2b714;
   --rvs-git-a: #4ec9b0;
   position: fixed;
@@ -4430,6 +4654,12 @@ body[data-ds-dark-theme] .rvs-execpanel {
   background: var(--rvs-overlay);
   color: var(--rvs-fg);
   box-shadow: 0 18px 60px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .28);
+}
+
+body:not([data-ds-dark-theme]) .rvs-downloads {
+  --rvs-git-m: #8a5c00;
+  --rvs-git-a: #146c2e;
+  --rvs-danger-text: #a52a2a;
 }
 
 .rvs-download {
@@ -4469,11 +4699,11 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-download-status {
   flex: none;
   font-size: 11px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-download-status.done { color: var(--rvs-git-a); }
-.rvs-download-status.failed { color: var(--rvs-danger); }
+.rvs-download-status.failed { color: var(--rvs-danger-text); }
 .rvs-download-status.cancelled { color: var(--rvs-git-m); }
 
 .rvs-download-bar {
@@ -4508,13 +4738,13 @@ body[data-ds-dark-theme] .rvs-execpanel {
 
 .rvs-download-meta {
   overflow: hidden;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rvs-download-meta.failed { color: var(--rvs-danger); white-space: normal; word-break: break-word; }
+.rvs-download-meta.failed { color: var(--rvs-danger-text); white-space: normal; word-break: break-word; }
 .rvs-download-meta.done { color: var(--rvs-fg2); }
 .rvs-download-meta.cancelled { color: var(--rvs-git-m); }
 
@@ -4556,6 +4786,28 @@ body[data-ds-dark-theme] .rvs-execpanel {
   border-radius: 8px;
   background: var(--rvs-overlay);
   box-shadow: 0 8px 32px rgba(0, 0, 0, .35);
+}
+
+/* `ok` / `missing` on the light plate: #2ea043 is 3.09:1 on the skin's cream,
+   #8a5c00 keeps the amber readable (5.35:1). Declared here because this sheet
+   is portalled away from `.rvs-root`, whose light overrides cannot reach it. */
+body:not([data-ds-dark-theme]) .rvs-doctor {
+  --rvs-ok: #146c2e;
+  --rvs-git-m: #8a5c00;
+}
+
+/*
+ * Dark tool plates. The exec panel, download dock and doctor card carry
+ * status colours from the dark git set, tuned for the #1b1b1c / #222944
+ * leaves: on the mid-grey overlay plate they measured 1.7-3.0:1 (done
+ * 2.85, cancelled 3.04, error 2.57, status 2.72). They are OPAQUE tool
+ * windows, so dark paints the code surface (#1e1e1e, the log body colour)
+ * and every status then measures 6.2-8.7:1. Light is unchanged.
+ */
+body[data-ds-dark-theme] .rvs-execpanel,
+body[data-ds-dark-theme] .rvs-downloads,
+body[data-ds-dark-theme] .rvs-doctor {
+  --rvs-overlay: #1e1e1e;
 }
 
 .rvs-doctor-head {
@@ -4628,7 +4880,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-doctor-badge.unknown { color: var(--rvs-fg3); }
 
 .rvs-doctor-detail {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-family: var(--rvs-mono);
   font-size: 11px;
   word-break: break-word;
@@ -4639,7 +4891,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   flex: none;
   padding: 8px 12px;
   border-top: 1px solid var(--rvs-border);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -4692,7 +4944,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-ports-label {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -4732,7 +4984,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   padding: 0 6px;
   border-radius: 999px;
   background: var(--rvs-hover);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
   letter-spacing: 0;
 }
@@ -4773,7 +5025,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -4795,13 +5047,13 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-ports-conn {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   white-space: nowrap;
 }
 
 .rvs-ports-err {
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -4822,7 +5074,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 
 .rvs-ports-hint {
   margin-top: 4px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -4877,7 +5129,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-monitor-settings-hint {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
 }
 
@@ -4938,7 +5190,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
 }
 
@@ -4961,15 +5213,15 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-monitor-state.error {
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-monitor-state.unknown {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
 }
 
 .rvs-monitor-age {
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-variant-numeric: tabular-nums;
 }
 
@@ -5103,7 +5355,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   align-items: center;
   gap: 7px;
   flex: none;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10px;
 }
 
@@ -5162,13 +5414,13 @@ body[data-ds-dark-theme] .rvs-execpanel {
 .rvs-monitor-spark-empty {
   padding: 8px 0 4px;
   text-align: center;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
 }
 
 .rvs-monitor-hint {
   margin-top: 8px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -5182,7 +5434,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 
 .rvs-monitor-summary {
   padding: 0 2px 4px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -5233,7 +5485,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
 }
 
@@ -5261,7 +5513,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
@@ -5310,6 +5562,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   --rvs-input: var(--dsw-alias-bg-input, rgba(127, 127, 127, .12));
   --rvs-brand: var(--dsw-alias-brand-primary, #4d6bfe);
   --rvs-danger: var(--dsw-alias-state-error-primary, #e05555);
+  --rvs-danger-text: #ff8b8b;
   --rvs-git-m: #e2b714;
   --rvs-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
   position: fixed;
@@ -5323,6 +5576,11 @@ body[data-ds-dark-theme] .rvs-execpanel {
   background: rgba(0, 0, 0, .38);
   backdrop-filter: blur(2px);
   animation: rvsFade .12s ease;
+}
+
+body:not([data-ds-dark-theme]) .rvs-qo-mask {
+  --rvs-git-m: #8a5c00;
+  --rvs-danger-text: #a52a2a;
 }
 
 /**
@@ -5369,12 +5627,12 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-qo-input:focus {
-  border-color: var(--rvs-brand);
+  border-color: var(--rvs-fg);
 }
 
 .rvs-qo-hint {
   flex: none;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -5411,7 +5669,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11.5px;
 }
 
@@ -5439,7 +5697,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
   overflow-y: auto;
   padding: 6px 12px;
   border-top: 1px solid var(--rvs-border);
-  color: var(--rvs-fg3);
+  color: var(--rvs-fg2);
   font-size: 11px;
 }
 
@@ -5450,7 +5708,7 @@ body[data-ds-dark-theme] .rvs-execpanel {
 }
 
 .rvs-qo-note.error {
-  color: var(--rvs-danger);
+  color: var(--rvs-danger-text);
 }
 
 .rvs-qo-note.warn {

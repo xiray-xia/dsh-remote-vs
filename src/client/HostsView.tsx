@@ -6,6 +6,7 @@ import type { RemoteDeployState, RemoteHostSummary } from '../protocol.ts'
 import { RemoteApiError, api, type HostForm } from './api.ts'
 import { DoctorPanel } from './DoctorPanel.tsx'
 import { Btn, Field, Notice, Row, hairline, inputStyle } from './ui.tsx'
+import { confirmDialog } from './vsc/kit.tsx'
 
 function err(e: unknown): string {
   return e instanceof RemoteApiError ? e.message : String(e)
@@ -204,8 +205,16 @@ export function HostsView(props: {
     )
   }
 
-  const runDelete = (alias: string): void => {
-    if (!window.confirm(t('hosts.confirmDelete'))) return
+  const runDelete = async (alias: string): Promise<void> => {
+    // Themed confirm instead of `window.confirm`: the native one ignores the
+    // plugin theme, is not keyboard-trapped with the rest of the UI and cannot
+    // mark the action as destructive.
+    const ok = await confirmDialog({
+      title: t('hosts.confirmDelete'),
+      danger: true,
+      okText: t('hosts.delete'),
+    })
+    if (!ok) return
     setBusy(`del:${alias}`)
     api.deleteHost(alias).then(
       () => { setBusy(undefined); say(t('hosts.deleted').replace('{alias}', alias)); props.onChanged() },
@@ -303,7 +312,7 @@ export function HostsView(props: {
             <Btn onClick={() => { setEditing(editing === h.alias ? null : h.alias); setNotice(undefined); setError(undefined) }} disabled={disabled}>
               {t('hosts.edit')}
             </Btn>
-            <Btn kind="danger" onClick={() => runDelete(h.alias)} disabled={disabled}>{t('hosts.delete')}</Btn>
+            <Btn kind="danger" onClick={() => { void runDelete(h.alias) }} disabled={disabled}>{t('hosts.delete')}</Btn>
           </Row>
           {editing === h.alias && (
             <HostFormView t={t} initial={h} busy={disabled} onSave={saveForm} onCancel={() => setEditing(null)} />

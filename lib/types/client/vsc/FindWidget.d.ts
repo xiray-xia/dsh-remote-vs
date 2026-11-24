@@ -59,6 +59,12 @@ export declare function stepFind(view: EditorView, forward: boolean, state?: Fin
 export declare function FindWidget(props: {
     view: EditorView | undefined;
     open: boolean;
+    /**
+     * The page's dictionary translator. Required, not defaulted: the widget has
+     * no language of its own, and a silent Chinese fallback is exactly the
+     * hardcoded copy this prop replaced.
+     */
+    t: (key: string) => string;
     /** A selection carried in by Ctrl+F (`id` bumps to re-trigger). */
     seed: {
         text: string;

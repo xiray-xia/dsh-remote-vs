@@ -11,7 +11,16 @@
  * Snapshot + subscribe come from `terminal-snippets.ts` (one list shared with the
  * Ctrl+B quick-add shortcut, which `XTerm` reports as a counter prop).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import {
   addSnippet,
@@ -23,7 +32,7 @@ import {
   updateSnippets,
   type TerminalSnippet,
 } from './terminal-snippets.ts'
-import { confirmDialog } from './vsc/kit.tsx'
+import { confirmDialog, focusables } from './vsc/kit.tsx'
 
 /** Props of the panel (plus the button that opens it). */
 export interface TerminalSnippetsProps {
@@ -87,6 +96,57 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
     setDropIndex(undefined)
   }, [])
 
+  /**
+   * The open panel owns the keyboard.
+   *
+   * It is portaled to the END of `<body>`, so a keyboard user who opened it from
+   * the ⚡ button otherwise had to Tab through the whole page to reach the first
+   * row. The first command is where the user wants to be; an empty library
+   * starts on the add button. Closing hands focus back to the trigger — but only
+   * when the user did not already put it somewhere else (closing by clicking the
+   * terminal must not steal the caret back).
+   */
+  useEffect(() => {
+    if (anchor === undefined) return
+    const panel = panelRef.current
+    if (panel === null) return
+    const first = panel.querySelector<HTMLElement>('.rvs-snips-insert') ?? focusables(panel)[0]
+    first?.focus()
+    return () => {
+      const active = document.activeElement
+      if (active === null || active === document.body || panelRef.current?.contains(active) === true) {
+        buttonRef.current?.focus()
+      }
+    }
+  }, [anchor])
+
+  /**
+   * List navigation inside the panel (audit I-9): ↑/↓ walk the command rows,
+   * Enter is the focused row's native button activation (so it inserts), and Esc
+   * is handled HERE, not on `document`: it used to be document-wide, so pressing
+   * Esc in the terminal closed the panel while the shell received the same ESC.
+   */
+  const onPanelKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.nativeEvent.isComposing) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closePanel()
+      return
+    }
+    // Alt+↑/↓ is the grip's reorder chord; leave it to the row.
+    if (event.altKey) return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const panel = panelRef.current
+    if (panel === null) return
+    const rows = Array.from(panel.querySelectorAll<HTMLElement>('.rvs-snips-insert'))
+    if (rows.length === 0) return
+    event.preventDefault()
+    const at = rows.indexOf(document.activeElement as HTMLElement)
+    const next = event.key === 'ArrowDown' ? (at + 1) % rows.length : (at <= 0 ? rows.length - 1 : at - 1)
+    rows[next]?.focus()
+  }
+
   // Ctrl+B from the terminal: open the ADD form (and the panel behind it) with
   // the draft the terminal handed over — selection first, else the typed line.
   useEffect(() => {
@@ -96,9 +156,11 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
     setForm({ mode: 'add', content: props.addContent })
   }, [props.addRequest, props.addContent, openPanel])
 
-  // Close on outside click / Esc / window resize (a fixed popover would be left
+  // Close on outside click / window resize (a fixed popover would be left
   // pointing at nothing). Capture phase so xterm's own mousedown cannot refocus
-  // the terminal first, which would make the panel look unclosable.
+  // the terminal first, which would make the panel look unclosable. Esc lives on
+  // the panel itself (see `onPanelKeyDown`): the keystroke must not be taken from
+  // the shell.
   useEffect(() => {
     if (anchor === undefined) return
     const onMouseDown = (event: MouseEvent): void => {
@@ -108,11 +170,23 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
       if (buttonRef.current?.contains(target) === true) return
       closePanel()
     }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.isComposing) return
-      if (event.key === 'Escape' && form === undefined) closePanel()
-    }
     const onResize = (): void => closePanel()
+    /**
+     * Esc while the focus is anywhere EXCEPT the panel.
+     *
+     * The panel handles its own Esc when it has focus (`onPanelKeyDown`), but it
+     * can be visibly open while the focus sits elsewhere (clicking its title or
+     * scrolling it leaves the activeElement outside) — the old document-level
+     * handler closed it from anywhere. Restore that, but never steal Esc from
+     * the shell: a focus inside `.xterm` means the key belongs to the terminal.
+     */
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      const active = document.activeElement
+      if (active instanceof Node && panelRef.current?.contains(active) === true) return
+      if (active instanceof Element && active.closest('.xterm') !== null) return
+      closePanel()
+    }
     document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('keydown', onKeyDown, true)
     window.addEventListener('resize', onResize)
@@ -121,7 +195,7 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
       document.removeEventListener('keydown', onKeyDown, true)
       window.removeEventListener('resize', onResize)
     }
-  }, [anchor, form, closePanel])
+  }, [anchor, closePanel])
 
   /** Paste one command and get out of the way. */
   const insert = (snippet: TerminalSnippet): void => {
@@ -158,6 +232,7 @@ export function TerminalSnippets(props: TerminalSnippetsProps): ReactNode {
         className="rvs-portal rvs-snips-panel"
         role="dialog"
         aria-label={t('term.snippets')}
+        onKeyDown={onPanelKeyDown}
         style={{ left: `${anchor.left}px`, top: `${anchor.top}px`, width: `${anchor.width}px` }}
       >
         <div className="rvs-snips-head">

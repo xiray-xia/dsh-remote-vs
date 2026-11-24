@@ -386,6 +386,7 @@ helper RPC（fs）/ ssh2（进程），本地一切不变；两者同 Host、共
 ## 安全模型
 
 - 所有 `/api/dsh-remote/*` 路由仅限 loopback + 同源访问。
+- **远程 Web 访问（中继 / 隧道）下插件不可用**：上面的围栏只认 loopback socket + loopback `Host` + 同源 Origin，经 `ds-harness-remote` 或 cloudflared 等隧道从公网打开 GUI 时，这些路由一律返回 `403 forbidden: loopback-only`——客户端把它显示为「插件 API 仅限本机访问」的可读提示，而不是英文原文。这是围栏生效而非故障，请在本机浏览器打开 DSH；SSH 能力本身由本机 Host 发起，不受影响。
 - 密码 / 私钥口令以明文保存在 `dsh-remote.json`（0600），与现有 SSH 插件同一信任模型。
 - 推送物逐包验 sha256（tarball 进、binary 出，双重校验）；helper 安装目录与工作区分开；sidecar 的 `version`、平台与 tarball 路径都走白名单校验（不内插未校验字符串到远端 shell 行），安装失败会保留上一版。
 - 主机配置写入走 fsync + 变更戳复核（读-改-写窗口内被别的进程改过会重放，而不是静默覆盖）。
@@ -449,11 +450,13 @@ node .spike/letter-check.mjs     # 状态字母：未跟踪 ? 与冲突 U 不再
 > 失败时才触发，所以「调用点 57」与「跑出来 55」本来就该差 2）。
 
 真机回归仍是 `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`。
-DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 57 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
+DSH 发新版时先读本地维护文档 `docs/MAINTENANCE.md`（§2 逐项耦合点 + §3 升级清单）再动手；该文件被 .gitignore，克隆仓库的人看不到。改动后（无论 host 半还是 client 半）的必做动作是：`pnpm run build` → `node scripts/verify-lib.mjs`（核对 `lib/` 齐全、已入库、能加载）→ 重启 `dsh web`，提交前把 `scripts/` 下的本地门禁逐个跑一遍（`node scripts/check-*.mjs`，当前 70 个；另有 `verify-lib.mjs` 与共享 TS 加载器 `_ts-hook.mjs`）。
 
 ## 开源许可
 
 MIT © 2026 xiray-xia —— 见 [LICENSE](./LICENSE)。
+
+发行包内联/依赖的第三方组件与许可证见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
 
 `vendor/` 里的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.2-rc.4`
 tag 以官方原脚本构建，具体流程与两处有记录的偏离见上文"Helper 自编译"节

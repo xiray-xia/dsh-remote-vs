@@ -136,7 +136,7 @@ export function RepoPicker(props: {
 
   return (
     <div className="rvs-modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) props.onClose() }}>
-      <div className="rvs-modal-box rvs-repopick" role="dialog" aria-label={t('scm.pickTitle')}>
+      <div className="rvs-modal-box rvs-repopick" role="dialog" aria-modal="true" aria-label={t('scm.pickTitle')}>
         <div className="rvs-modal-title">
           {t('scm.pickTitle')}
           <IconButton title={t('common.close')} onClick={props.onClose}><IconClose size={13} /></IconButton>

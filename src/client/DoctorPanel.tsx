@@ -94,6 +94,20 @@ async function copyReport(text: string): Promise<boolean> {
   }
 }
 
+/**
+ * Focusable controls inside this layer, in DOM order.
+ *
+ * Same rule as `vsc/kit.tsx`'s `focusables`, inlined instead of imported: this
+ * panel deliberately does not import the kit (its copy path must not use the
+ * silently-failing `copyText`), and `check-doctor.mjs` pins that.
+ */
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+function focusables(root: HTMLElement | null): HTMLElement[] {
+  if (root === null) return []
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE))
+}
+
 export function DoctorPanel(props: {
   t: (key: string) => string
   alias: string
@@ -103,6 +117,10 @@ export function DoctorPanel(props: {
   /** `undefined` = the probe is still running. */
   const [items, setItems] = useState<DoctorItem[] | undefined>(undefined)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  /** The card, so the Tab trap below has one root to walk. */
+  const cardRef = useRef<HTMLDivElement>(null)
+  /** Where focus came from (the "环境自检" button); handed back on close. */
+  const openerRef = useRef<HTMLElement | null>(null)
   const alive = useRef(true)
   // Re-armed on every setup: a StrictMode/replay remount runs setup → cleanup →
   // setup, and a flag that only ever got set to false would freeze the panel on
@@ -124,14 +142,59 @@ export function DoctorPanel(props: {
     run()
   }, [run])
 
+  /**
+   * The layer takes the keyboard on open and gives it back on close.
+   *
+   * The panel declared `role="dialog" aria-modal="true"` but nothing moved the
+   * focus into it, so Tab walked straight out into the DSH Settings form behind
+   * the overlay while a screen reader had been told that form is inert. It lives
+   * INSIDE the host Settings dialog, hence both halves: keep the keyboard here,
+   * and give it back to the button that opened this layer.
+   */
+  useEffect(() => {
+    openerRef.current = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+    // First paint first: the copy button is still disabled while the probe runs,
+    // so this settles on the close button — a safe, always-present target.
+    const focusTimer = window.setTimeout(() => { focusables(cardRef.current)[0]?.focus() }, 0)
+    return () => {
+      window.clearTimeout(focusTimer)
+      const opener = openerRef.current
+      if (opener !== null && document.body.contains(opener)) opener.focus()
+    }
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape') return
-      // CAPTURE phase + stop: the panel lives inside the DSH Settings dialog,
-      // whose own Escape handler would otherwise close the whole dialog (and the
-      // report) together with this layer.
-      e.stopPropagation()
-      props.onClose()
+      if (e.key === 'Escape') {
+        // CAPTURE phase + stop: the panel lives inside the DSH Settings dialog,
+        // whose own Escape handler would otherwise close the whole dialog (and the
+        // report) together with this layer.
+        e.stopPropagation()
+        props.onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+      // Tab trap, first <-> last (same shape as the kit's ModalCard).
+      const controls = focusables(cardRef.current)
+      if (controls.length === 0) return
+      const first = controls[0] as HTMLElement
+      const last = controls[controls.length - 1] as HTMLElement
+      const active = document.activeElement
+      const inside = cardRef.current?.contains(active) === true
+      // Focus outside the card: a plain Tab used to walk straight into the DSH
+      // Settings form behind the overlay (only Shift+Tab was pulled back, so the
+      // trap was not a closed loop). Both directions now return to the card.
+      if (!inside) {
+        e.preventDefault()
+        if (e.shiftKey) last.focus()
+        else first.focus()
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
@@ -160,7 +223,7 @@ export function DoctorPanel(props: {
       aria-label={title}
       onClick={props.onClose}
     >
-      <div className="rvs-doctor-card" onClick={(e) => e.stopPropagation()}>
+      <div ref={cardRef} className="rvs-doctor-card" onClick={(e) => e.stopPropagation()}>
         <div className="rvs-doctor-head">
           <span className="rvs-doctor-title">{title}</span>
           <span style={{ flex: 1 }} />

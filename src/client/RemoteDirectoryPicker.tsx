@@ -157,6 +157,8 @@ export function RemoteDirectoryPicker(props: {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              // IME candidate Enter must not navigate to a half-composed path.
+              if (e.nativeEvent.isComposing === true || e.keyCode === 229) return
               if (e.key === 'Enter') go()
             }}
             placeholder="/home/user/project"
@@ -174,7 +176,17 @@ export function RemoteDirectoryPicker(props: {
           {entries.map((entry) => (
             <div
               key={entry.path}
+              // A directory row was pointer-only: keyboard users could not enter
+              // it at all (audit I-10). Role + tabIndex + Enter/Space make it a
+              // real button without changing how it looks.
+              role="button"
+              tabIndex={0}
               onClick={() => void browse(entry.path)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return
+                e.preventDefault()
+                void browse(entry.path)
+              }}
               title={entry.path}
               style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 13 }}
               onMouseEnter={(e) => {

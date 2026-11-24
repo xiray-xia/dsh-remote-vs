@@ -500,10 +500,37 @@ export class RemoteFiles {
         })
         this.trackPartial(alias, partial)
         const size = await streamIntoFile(sftp, partial, source, maxBytes)
-        // Move into place. SFTP v3 `rename` refuses to clobber, so an overwrite
-        // removes the old file first — the same window a normal editor save has.
-        if (overwrite) await unlinkAsync(sftp, path).catch(() => undefined)
-        await renameAsync(sftp, partial, path)
+        // Move into place the same way a save does: an overwrite must never
+        // delete the target first. The old unlink→rename pair left the directory
+        // empty when the rename failed, and the catch below then removed the new
+        // bytes too — the upload reported a failure and the user's file was gone.
+        // `replaceFile` swaps the names (posix-rename, or target-aside with a
+        // rollback), so the previous bytes survive every failure with the real
+        // error attached.
+        if (overwrite) {
+          // A write target must be a regular file (or absent). On servers without
+          // `posix-rename@openssh.com` the fallback renames the target aside — and
+          // SFTP v3 `rename` happily renames a DIRECTORY that way, so a file
+          // dropped onto a same-named folder would move the folder to `*.bak-*`
+          // (never swept) and report success. Fail before anything moves.
+          const targetStat = await lstatAsync(sftp, path).catch((error: unknown) => {
+            if ((error as { code?: number }).code === SFTP_NO_SUCH_FILE) return undefined
+            throw error
+          })
+          // `Stats.isDirectory()` is the real ssh2 shape; accept the raw mode for
+          // fake SFTPs (and any future backend) that only carry attributes.
+          const targetIsDirectory = targetStat !== undefined && (
+            typeof (targetStat as { isDirectory?: () => boolean }).isDirectory === 'function'
+              ? (targetStat as { isDirectory: () => boolean }).isDirectory()
+              : (targetStat.mode & 0o170000) === 0o040000
+          )
+          if (targetIsDirectory) throw new Error(`not a file: ${path} is a directory`)
+          await replaceFile(sftp, partial, path)
+        } else {
+          // No consent to replace: SFTP v3 `rename` refuses to clobber, so a file
+          // that appeared after the route's 409 check is kept.
+          await renameAsync(sftp, partial, path)
+        }
         this.forgetPartial(alias, partial)
         this.remember(this.knownDirs, dirKey(alias, dir))
         await this.sweepOrphanDirs(sftp, alias, dir)
@@ -701,16 +728,18 @@ export class RemoteFiles {
     try {
       await mkdirAsync(sftp, path)
     } catch (error) {
-      // EEXIST (code 4, "Failure") means the level is already there.
       const code = (error as { code?: number }).code
-      if (code !== 4 && code !== undefined) throw error
-      if (code === undefined) {
-        // Unknown failure: verify by stat before ignoring.
-        try {
-          await lstatAsync(sftp, path)
-        } catch {
-          throw error
-        }
+      // OpenSSH's sftp-server answers EEXIST, EACCES, EROFS and ENOSPC with the
+      // same opaque `SSH_FX_FAILURE(4)`, so 4 cannot mean "already there" on its
+      // own: swallowing it hid a permission or disk-space refusal until it
+      // surfaced later as a misleading "no such file" (S3). Verify the path
+      // instead — an existing level is the case this walk must tolerate, any
+      // other failure rethrows the original status.
+      if (code !== SFTP_FAILURE && code !== undefined) throw error
+      try {
+        await lstatAsync(sftp, path)
+      } catch {
+        throw error
       }
     }
   }
@@ -955,7 +984,15 @@ async function explainSftpFailure(
   if (code !== SFTP_NO_SUCH_FILE && code !== SFTP_FAILURE) return undefined
   const kind = await pathKind(sftp, path)
   if (kind.kind === 'missing') {
-    return new Error(wanted === 'directory' ? `no such directory: ${path}` : `no such file: ${path}`)
+    // A status 4 with nothing at the path usually is not "it never existed":
+    // OpenSSH reports EACCES/EROFS/ENOSPC with that same code, and the path may
+    // be unreadable rather than absent. Name the alternative instead of guessing
+    // one cause — EACCES in particular keeps its own status (3), so hard-coding
+    // "permission denied" here would be wrong for this code path.
+    const hint = code === SFTP_FAILURE
+      ? ' (the server reported only status 4: this can also be a permission or disk-space problem)'
+      : ''
+    return new Error(wanted === 'directory' ? `no such directory: ${path}${hint}` : `no such file: ${path}${hint}`)
   }
   if (wanted === 'directory' && kind.kind !== 'dir') {
     return new Error(`not a directory: ${path} is ${describeKind(kind)}`)

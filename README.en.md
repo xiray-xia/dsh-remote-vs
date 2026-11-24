@@ -441,6 +441,7 @@ Upstream never published helper binaries (all Release assets are empty), so this
 ## Security model
 
 - All `/api/dsh-remote/*` routes are loopback + same-origin only.
+- **Unavailable behind a remote Web UI (relay / tunnel)**: that fence only admits a loopback socket, a loopback `Host` header and a same-origin request, so opening the GUI through `ds-harness-remote` or a cloudflared tunnel makes every `/api/dsh-remote/*` route answer `403 forbidden: loopback-only` — the client shows a readable "plugin API is local-access-only" message instead of the raw phrase. This is the fence working, not a fault: open DSH in a browser on the local machine. SSH itself still works, because the Host dials out from there.
 - Passwords / key passphrases are stored in plaintext in `dsh-remote.json` (0600) — same trust model as the existing SSH plugin.
 - Pushed artifacts are sha256-verified both ways (tarball in, binary out); the helper install dir is separate from workspaces; the sidecar's `version`, platform and tarball path are whitelist-validated (no unvalidated string is interpolated into a remote shell line), and a failed install keeps the previous version.
 - Host config writes are fsync'd and re-checked against a stamp (a concurrent Desktop/Web edit inside the read-modify-write window is replayed instead of silently overwritten).
@@ -512,11 +513,14 @@ tsc, to the bundler and to jsdom — this fixture is the only place they reprodu
 > exactly why "57 call sites" and "55 checks run" differ by 2).
 
 The live-host regression is still `npx tsc -p tsconfig.scratch.json && node .spike/build/.spike/p2-router.js`.
-Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 57 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
+Before touching anything for a new DSH release, read the local-only `docs/MAINTENANCE.md` (§2 coupling points, §3 checklist) — it is gitignored, so a clone will not have it. After any change (host half or client half) the mandatory steps are: `pnpm run build` → `node scripts/verify-lib.mjs` (entries present, committed and loadable) → restart `dsh web`; and before committing, run every local gate under `scripts/` (`node scripts/check-*.mjs`, 70 of them at the time of writing, plus `verify-lib.mjs` and the shared TS loader `_ts-hook.mjs`).
 
 ## License
 
 MIT © 2026 xiray-xia — see [LICENSE](./LICENSE).
+
+Third-party components bundled in or required by the published package are listed in
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
 
 The `vendor/` helper seed is built from DeepSeek Harness sources (MIT) at tag `dsh-v0.2.2-rc.4`
 with the stock build script; see "Self-built helper" above for the exact procedure and the two

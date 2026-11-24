@@ -328,6 +328,59 @@ export interface ExplorerValue {
 }
 /** Subscribe to the explorer store. */
 export declare function useExplorer(): ExplorerValue;
+/**
+ * Shallow equality for selector results — one level deep, `Object.is` per field.
+ *
+ * Selectors naturally build a fresh `{ repoRoot, head, … }` object out of the
+ * snapshot, and a plain `Object.is` would then see a new reference on every
+ * publish and repaint the panel anyway (defeating the whole point). Passing this
+ * as `equal` compares the FIELDS, so "the snapshot was rebuilt but none of the
+ * fields I read changed" answers `true` and the previous value (and render) is
+ * kept. Arrays are compared as objects, i.e. by index.
+ *
+ * Shallow is deliberate: every selected field is either a primitive or a
+ * REFERENCE the store already owns (`status`, `buckets`, `tabs`, `untrackedDirs`
+ * …). Comparing those by reference is a real value check — the store only
+ * replaces them when they actually change.
+ */
+export declare function shallowEqual(a: unknown, b: unknown): boolean;
+/**
+ * Subscribe to ONE slice of the explorer store.
+ *
+ * Why this exists: `useExplorer()` hands out the whole `ExplorerValue`, and
+ * every `publish()` builds a NEW snapshot object — so every subscriber repaints
+ * on every mutation, including mutations its panel does not read (a save bumps
+ * the tab array, a git refresh replaces `status`, a rail switch changes `view`).
+ * With the panels kept MOUNTED, one publish therefore repainted every panel,
+ * and the SCM panel's change list (up to 4000 rows) was rebuilt for a change in
+ * an unrelated field.
+ *
+ * This hook re-renders its component ONLY when the selected value changes:
+ *  - `publish()` still notifies every listener (that is how the store stays a
+ *    single source of truth), but React asks this hook for a fresh value and
+ *    `Object.is`-compares it with the last rendered one; equal means no render;
+ *  - the selector runs at most once per (snapshot, selector) pair, and its
+ *    result is kept in a per-hook cache, so an equal result keeps the PREVIOUS
+ *    reference (downstream `useMemo`s keyed on it stay valid).
+ *
+ * Constraints, all from `useSyncExternalStore`:
+ *  - the value returned for an UNCHANGED snapshot must be stable. This hook
+ *    guarantees it (cache keyed on the snapshot identity), which is also why a
+ *    selector may safely return a fresh object — with `shallowEqual` it is
+ *    compared and the old reference is kept, and without `equal` it is cached
+ *    and only recomputed when the snapshot itself changes;
+ *  - `selector` must be PURE and should read only the snapshot. It may be an
+ *    inline arrow (the hook tracks its identity, so a selector that closes over
+ *    props is recomputed when it changes), but a module-level selector is
+ *    cheaper: its identity is stable, so between publishes the cache answers
+ *    without running it at all;
+ *  - `selector` must not mutate the snapshot.
+ *
+ * @param selector - pure read of the fields this component needs.
+ * @param equal - comparison used to decide whether the new selection is the
+ *   same value; defaults to `Object.is`. Pass `shallowEqual` for object slices.
+ */
+export declare function useExplorerSelector<T>(selector: (snapshot: ExplorerValue) => T, equal?: (a: T, b: T) => boolean): T;
 /** The repo-relative path of an absolute remote path ('' when outside). */
 export declare function repoRelative(repoRoot: string | undefined, fullPath: string): string;
 /** Install the context and load hosts/workspaces once per page. */

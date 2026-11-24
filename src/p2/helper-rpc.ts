@@ -150,6 +150,21 @@ export class RpcConnection {
   private dead: Error | undefined
   private disposed = false
   /**
+   * Transport generation, bumped by every teardown.
+   *
+   * ssh2 does not close synchronously: `Channel.close()` is a PROTOCOL message
+   * and `Client.end()`'s socket 'close' arrives later. Those late
+   * 'close'/'error' events used to call `invalidate()` after `reconnect()` had
+   * already cleared `dead`, marking the BRAND-NEW dial dead: `open()` then
+   * released the fresh transport and the retry rejected with the OLD
+   * transport's error (probe T6 measured exactly this — a close 5 ms late, a
+   * new dial 20 ms). Every transport callback therefore captures the generation
+   * it was created under and compares it before acting; a teardown invalidates
+   * every callback of the transport it releases, without removing listeners
+   * (ssh2 offers no per-callback unsubscribe that would survive a destroy).
+   */
+  private generation = 0
+  /**
    * The helper's own error output, kept so its reason survives.
    *
    * Nothing read this stream before, so a helper that died on startup took its
@@ -185,6 +200,9 @@ export class RpcConnection {
     let attempt = 0
     for (;;) {
       const peer = await this.peerReady()
+      // The link this attempt is queued against: a timeout that fires after a
+      // concurrent caller already reconnected must not invalidate the NEW dial.
+      const generation = this.generation
       // Queue rather than let the shared connection reject the call: every agent
       // on this host funnels through here, and "pending request limit reached"
       // used to fail a turn for work that only needed to wait its turn.
@@ -194,6 +212,10 @@ export class RpcConnection {
       } catch (error) {
         // A caller abort is the caller's decision — never retry it.
         if (!(error instanceof HelperTimeoutError)) throw error
+        // The transport this request rode was already replaced while it was in
+        // flight: its timeout describes the OLD link, so leave the current one
+        // alone (the reconnect its owner is running will report its own outcome).
+        if (generation !== this.generation) throw error
         // Mark the connection dead so the cached fs view is dropped and the next
         // caller dials cleanly instead of queueing behind a stuck channel.
         this.invalidate(error)
@@ -231,6 +253,14 @@ export class RpcConnection {
     if (this.disposed) throw new Error('helper RPC was disposed')
     // One teardown for every field: the old transport is fully gone before a new
     // attempt starts (a half-closed one would keep the ssh session alive).
+    //
+    // The generation bump inside that teardown is also what makes the window
+    // below safe: `dead` is cleared while the OLD transport's asynchronous
+    // close/error events may still be in flight, and those callbacks are bound
+    // to the generation the teardown just invalidated (see `generation`) — they
+    // cannot re-set `dead` under the new dial. Without the guard this method
+    // would reject with the previous transport's error and the "fresh channel"
+    // retry would never get to run.
     this.teardownTransport()
     this.dead = undefined
     this.readyPromise = this.open()
@@ -249,6 +279,13 @@ export class RpcConnection {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    // A dial in flight has no peer/channel yet: the ssh2 `Client` belongs to the
+    // handshake, and ending it here would strand that promise — ssh2 clears its
+    // own ready timer on close and emits 'close' WITHOUT an 'error', so the
+    // awaiting `dialAndHello` would never settle (and a concurrent `dial()` that
+    // disposes a reconnect would hang the retry forever). `open()` sees
+    // `disposed` when the attempt settles and releases it there.
+    if (this.peer === undefined && this.channel === undefined && this.conn !== undefined) return
     this.teardownTransport()
   }
 
@@ -270,8 +307,13 @@ export class RpcConnection {
    * `stderrTail` is cleared too: it describes the connection being torn down, and
    * keeping it would attribute the NEXT failure to the previous transport's error
    * output.
+   *
+   * The generation bump comes FIRST: the close calls below can emit their events
+   * synchronously, and anything this transport has queued must already count as
+   * stale by then.
    */
   private teardownTransport(): void {
+    this.generation += 1
     if (this.heartbeat !== undefined) {
       clearTimeout(this.heartbeat)
       this.heartbeat = undefined
@@ -291,7 +333,19 @@ export class RpcConnection {
     const conn = new Client()
     this.conn = conn
     try {
-      return await this.dialAndHello(conn)
+      const hello = await this.dialAndHello(conn)
+      // `invalidate()` may have fired WHILE this attempt was dialing: a genuine
+      // error/close on THIS socket after 'ready' but before the hello answer sets
+      // `dead` without touching the dialing Client; a `dispose()` that arrived
+      // meanwhile set `disposed` and deliberately left the dial alone (ending it
+      // would strand the handshake). Either way the attempt has now succeeded, so
+      // the transport it produced is useless to everyone — release it here rather
+      // than leaving a live socket with no owner (the leak this path prevents).
+      if (this.dead !== undefined || this.disposed) {
+        this.teardownTransport()
+        throw this.dead ?? new Error('helper RPC was disposed')
+      }
+      return hello
     } catch (error) {
       // Anything that fails after the socket is up must not leave it behind: the
       // caller only sees the reject, and the next attempt would open a second
@@ -304,6 +358,10 @@ export class RpcConnection {
   /** The part of {@link open} that runs once the socket object exists. */
   private async dialAndHello(conn: Client): Promise<RpcHello> {
     const { entry } = this.opts
+    // The transport this attempt belongs to. Anything ssh2 reports after a
+    // teardown is about a link nobody owns any more; the callbacks below compare
+    // against the live value before touching `dead`/`stderrTail`.
+    const generation = this.generation
     await new Promise<void>((resolve, reject) => {
       let settled = false
       conn.on('ready', () => {
@@ -316,12 +374,20 @@ export class RpcConnection {
         if (!settled) {
           settled = true
           reject(error)
-        } else {
+        } else if (generation === this.generation) {
           this.invalidate(error)
         }
       })
       conn.on('close', () => {
-        this.invalidate(new Error('ssh connection closed'))
+        // Settle a handshake that never became ready: ssh2 reports a socket that
+        // closes before 'ready' as 'close' only (no 'error'), which used to leave
+        // `dialAndHello` pending forever.
+        if (!settled) {
+          settled = true
+          reject(new Error('ssh connection closed before it became ready'))
+        }
+        // A stale close describes the transport `reconnect()` already replaced.
+        if (generation === this.generation) this.invalidate(new Error('ssh connection closed'))
       })
       try {
         if (entry.auth.kind === 'key') {
@@ -359,13 +425,16 @@ export class RpcConnection {
     })
     this.channel = channel
     channel.stderr.on('data', (chunk: Buffer) => {
+      // A late chunk describes the previous transport's reason; attributing it
+      // to the new one would print the wrong helper error on the next failure.
+      if (generation !== this.generation) return
       this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_MAX)
     })
     channel.on('close', () => {
-      this.invalidate(new Error('helper channel closed'))
+      if (generation === this.generation) this.invalidate(new Error('helper channel closed'))
     })
     channel.on('error', (error: Error) => {
-      this.invalidate(error)
+      if (generation === this.generation) this.invalidate(error)
     })
     const leaseMs = this.opts.leaseMs ?? 30000
     const peer = new SshRpcPeer(channel, channel, MAX_FRAME, MAX_PENDING)
@@ -398,10 +467,15 @@ export class RpcConnection {
     // Arming the next beat only after the previous one settles makes overlap
     // impossible.
     const beat = (): void => {
-      if (this.disposed || this.dead !== undefined) return
+      // A stale generation means this transport is gone: its teardown cleared the
+      // timer, and a beat already in flight must not resurrect it.
+      if (this.disposed || generation !== this.generation || this.dead !== undefined) return
       this.heartbeat = setTimeout(() => {
         peer.request('heartbeat', {}, z.null(), AbortSignal.timeout(Math.floor(leaseMs / 2)))
           .catch((error: unknown) => {
+            // The teardown closes the peer, so a beat that was in flight rejects
+            // with the TEARDOWN's error. That is not a fact about the new link.
+            if (generation !== this.generation) return
             this.invalidate(error instanceof Error ? error : new Error(String(error)))
           })
           .finally(beat)
@@ -418,14 +492,46 @@ export class RpcConnection {
     }
   }
 
+  /**
+   * Mark the connection dead AND release its transport.
+   *
+   * Closing the peer alone was not enough: `SshRpcPeer.close()` destroys the
+   * exec streams, and ssh2's `Channel.destroy()` does not end the `Client` that
+   * carries them — so the session stayed open (30s keepalive and all) while its
+   * owner had already written it off as dead. One leaked socket per invalidation,
+   * until the process exits. `teardownTransport()` is the only path that ends the
+   * Client, so an invalidated connection goes through it too; that is safe to
+   * repeat because each field is cleared as it is closed and `closeQuietly`
+   * ignores a second close — a later `dispose()`, `reconnect()` or failed
+   * `open()` teardown therefore finds nothing left to release.
+   *
+   * Ordering is deliberate: the peer is closed FIRST so in-flight requests reject
+   * with THIS error (the teardown's own close would raise a generic
+   * "channel closed" instead), and `stderrTail` is captured BEFORE the teardown,
+   * which clears it — otherwise `diagnostics` in the dial path would always
+   * report "the helper wrote nothing to stderr".
+   *
+   * Only an ESTABLISHED transport is released here. While `open()` is still
+   * dialing, `conn` is alive and `channel`/`peer` are not, and ending that Client
+   * would strand the handshake: ssh2 clears its own ready timer when the socket
+   * closes and emits 'close' without an 'error', so the promise `open()` awaits
+   * would never settle. `open()` itself releases the attempt instead, once it has
+   * a definitive outcome.
+   */
   private invalidate(error: Error): void {
     if (this.dead !== undefined || this.disposed) return
     this.dead = error
-    if (this.heartbeat !== undefined) clearTimeout(this.heartbeat)
+    if (this.heartbeat !== undefined) {
+      clearTimeout(this.heartbeat)
+      this.heartbeat = undefined
+    }
+    const tail = this.stderrTail
     try {
       this.peer?.close(error)
     } catch {
       // Ignore.
     }
+    if (this.peer !== undefined || this.channel !== undefined) this.teardownTransport()
+    this.stderrTail = tail
   }
 }

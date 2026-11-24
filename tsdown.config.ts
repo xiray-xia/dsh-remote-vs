@@ -182,6 +182,12 @@ export default [
     dts: false,
     sourcemap: true,
     clean: false,
+    // The client half is one eager bundle: the loader injects it at plugin
+    // activation, so every byte ships on every page load. It used to be
+    // unminified (3.6 MB of readable code, ~975 KB gz), which is pure parse
+    // cost with no debugging benefit — the use of the bundle is the browser,
+    // and `.spike/client-load-check.mjs` evaluates the artifact itself.
+    minify: true,
     external: [...CLIENT_EXTERNALS],
     define: {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),

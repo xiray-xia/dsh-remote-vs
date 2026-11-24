@@ -354,6 +354,17 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const connection = useConnectionStatus()
   const offline = connection?.state === 'error'
 
+  /**
+   * The tab strip's roving focus stops, by tab id.
+   *
+   * The strip is ONE Tab stop (WAI-ARIA tabs): ←/→ and Home/End move the
+   * selection inside it, and only the active tab carries `tabIndex={0}`. A map
+   * (not refs on the elements) because the strip is rebuilt from the store on
+   * every render, and a keydown must be able to focus a SIBLING that is not the
+   * one it fired on.
+   */
+  const tabElements = useRef(new Map<string, HTMLDivElement>())
+
   // Image data URL cache, keyed by path (remote reads are not free). Bounded —
   // see `rememberRecent` / `dropOversized`.
   const [images, setImages] = useState<Record<string, string>>({})
@@ -465,10 +476,23 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     await store.reloadTab(tab.id)
   }
 
-  const htmlDoc = useMemo(() => {
-    if (activeTab === undefined || !activeTab.html) return ''
-    return activeTab.text
-  }, [activeTab])
+  /**
+   * The preview inputs as STABLE primitives, not the tab object.
+   *
+   * `patchTab` builds a fresh tab object for every change (`dirty`, `saving`,
+   * `activeHunk`, `reloadNonce`…) while leaving `text` and the render-mode flags
+   * alone. Keying the two preview memos below on the tab therefore re-parsed a
+   * whole Markdown/HTML document whenever the user saved, jumped to a change or
+   * toggled a dot — a parse per action, for text that had not moved. A string's
+   * identity is stable while its contents are, so `text` + the flags is the key
+   * that actually means "the preview source changed".
+   */
+  const previewText = activeTab?.text
+  const previewIsHtml = activeTab?.html === true
+  const previewIsMarkdown = activeTab?.markdown === true
+  const previewVisible = activeTab?.preview === true
+
+  const htmlDoc = useMemo(() => (previewIsHtml ? (previewText ?? '') : ''), [previewIsHtml, previewText])
 
   /**
    * The parsed Markdown preview.
@@ -477,16 +501,16 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    * re-parsed the whole document into a fresh element tree on EVERY store
    * publish: this component subscribes to the store, so opening another file,
    * saving, a git refresh or switching a panel all paid for a parse of text
-   * that had not changed. `renderMarkdown` is a pure function of the text, and
-   * a tab's identity changes when its text does (`updateTab`/`reloadTab` patch
-   * the tab), so the tab is what Memo compares — the same key the `htmlDoc`
-   * memo above uses. The markdown/preview guards keep the parse from happening
-   * at all for a file that is being read in source mode.
+   * that had not changed. `renderMarkdown` is a pure function of the text, so
+   * the memo key is the TEXT (a stable identity while the bytes are) plus the
+   * two mode flags — see `previewText` above for why the tab object is the wrong
+   * key. The guards keep the parse from happening at all for a file that is
+   * being read in source mode.
    */
   const markdownPreview = useMemo(() => {
-    if (activeTab === undefined || !activeTab.markdown || !activeTab.preview) return null
-    return renderMarkdown(activeTab.text)
-  }, [activeTab])
+    if (!previewIsMarkdown || !previewVisible || previewText === undefined) return null
+    return renderMarkdown(previewText)
+  }, [previewIsMarkdown, previewVisible, previewText])
 
   /**
    * The status bar's indent hint, derived from the loaded text.
@@ -806,15 +830,21 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
       {/* Tab strip: switch / close / dirty dot / diff glyph. Middle-click closes
           too — the muscle memory shared with VS Code and browsers. */}
       <div className="rvs-etabs" role="tablist" aria-label={t('editor.tabsLabel')}>
-        {tabs.map(tab => {
+        {tabs.map((tab, index) => {
           const active = tab.id === store.activeTabId
           const tabIsDiff = tab.kind === 'diff'
           return (
             <div
               key={tab.id}
               role="tab"
-              tabIndex={0}
+              // Roving tabindex (WAI-ARIA tabs): the strip is one Tab stop, so
+              // the panel's other controls are not separated by N tab stops.
+              tabIndex={active ? 0 : -1}
               aria-selected={active}
+              ref={(element) => {
+                if (element === null) tabElements.current.delete(tab.id)
+                else tabElements.current.set(tab.id, element)
+              }}
               className={`rvs-etab${active ? ' active' : ''}${tabIsDiff ? ' rvs-etab-diff' : ''}`}
               title={tabIsDiff ? `${tab.rel}${t('editor.diffSuffix')}` : tab.fullPath}
               onClick={() => store.activateTab(tab.id)}
@@ -829,7 +859,26 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
                   store.activateTab(tab.id)
+                  return
                 }
+                // WAI-ARIA tabs keyboard model (audit I-16): arrows walk the
+                // strip, Home/End jump to its edges, wrapping at both ends, and
+                // the selection follows focus — the tabs are the cheap file
+                // switcher, so requiring Enter afterwards would only add a step.
+                const step = event.key === 'ArrowRight'
+                  ? 1
+                  : event.key === 'ArrowLeft' ? -1 : undefined
+                if (step === undefined && event.key !== 'Home' && event.key !== 'End') return
+                event.preventDefault()
+                const next = event.key === 'Home'
+                  ? 0
+                  : event.key === 'End'
+                    ? tabs.length - 1
+                    : (index + (step ?? 0) + tabs.length) % tabs.length
+                const target = tabs[next]
+                if (target === undefined) return
+                store.activateTab(target.id)
+                tabElements.current.get(target.id)?.focus()
               }}
             >
               <span className="rvs-etab-glyph">{tabIcon(tab)}</span>

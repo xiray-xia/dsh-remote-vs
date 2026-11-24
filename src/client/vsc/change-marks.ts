@@ -43,6 +43,14 @@ import {
 export type ChangeKind = 'add' | 'mod' | 'del'
 
 /**
+ * 字典翻译函数，由调用方传入（`CodeEditor` 把页面语言解析好的那个 `t` 交下来）。
+ *
+ * 本模块自己不选语言：同样的 `t` 与同样的数据永远画出同样的 DOM，纯函数性得以
+ * 保持；语言变了由调用方重装扩展（`changeMarksExtension(t)`）。
+ */
+export type Translate = (key: string) => string
+
+/**
  * 新增/修改行里"真正变化的字符区间"：相对所属行的列偏移，**0-based、半开区间**。
  *
  * 行背景回答"哪几行变了"，这个回答"那一行的哪几个字变了" —— 只改一个词的编辑在
@@ -158,7 +166,6 @@ const KIND_PRIORITY: Record<ChangeKind, number> = { add: 0, mod: 1, del: 2 }
 
 /** Gutter 符号与说明（三种形态靠符号 + 颜色双重区分）。 */
 const GLYPH: Record<ChangeKind, string> = { add: '+', mod: '●', del: '−' }
-const LABEL: Record<ChangeKind, string> = { add: '新增行', mod: '修改行', del: '删除行' }
 
 /** 空标记集。构造一次，避免每次清空都新建一个 RangeSet。 */
 const NO_MARKERS = new RangeSetBuilder<GutterMarker>().finish()
@@ -184,12 +191,6 @@ function lineDecoration(kind: ChangeKind): Decoration {
  */
 const WORD_ADD = Decoration.mark({ class: 'rvs-change-word-add' })
 
-/** 删除 chip 的悬浮说明。与 gutter 的 `LABEL` 一样，是编辑器侧的固定文案。 */
-const CHIP_TITLE = '已删除的内容'
-
-/** 整块删除那种胶囊的悬浮说明（后面跟行数）。 */
-const BLOCK_CHIP_TITLE = '已删除的整块内容'
-
 /**
  * 被删内容的零宽 widget。
  *
@@ -201,12 +202,22 @@ class RemovedChipWidget extends WidgetType {
   private readonly text: string
   private readonly truncated: boolean
   private readonly count: number
+  /**
+   * 文案在构造时按调用方的 `t` 解析好，并参与 `eq`：语言变了而 DOM 被复用，
+   * tooltip 就会停在旧语言上。
+   */
+  private readonly chipTitle: string
+  private readonly blockTitle: string
+  private readonly removedLines: string
 
-  constructor(text: string, truncated: boolean, count = 0) {
+  constructor(text: string, truncated: boolean, count: number, t: Translate) {
     super()
     this.text = text
     this.truncated = truncated
     this.count = count
+    this.chipTitle = t('changes.deletedChip')
+    this.blockTitle = t('changes.deletedBlock')
+    this.removedLines = t('changes.deletedLines')
   }
 
   eq(other: WidgetType): boolean {
@@ -214,6 +225,9 @@ class RemovedChipWidget extends WidgetType {
       && other.text === this.text
       && other.truncated === this.truncated
       && other.count === this.count
+      && other.chipTitle === this.chipTitle
+      && other.blockTitle === this.blockTitle
+      && other.removedLines === this.removedLines
   }
 
   toDOM(): HTMLElement {
@@ -228,8 +242,12 @@ class RemovedChipWidget extends WidgetType {
      */
     const block = this.count > 1
     chip.className = block ? 'rvs-change-word-del rvs-change-block-del' : 'rvs-change-word-del'
-    chip.textContent = block ? `−${this.count} 行已删除` : (this.truncated ? `${this.text}…` : this.text)
-    chip.title = block ? `${BLOCK_CHIP_TITLE}（${this.count} 行）\n${this.text}` : CHIP_TITLE
+    chip.textContent = block
+      ? this.removedLines.replace('{count}', String(this.count))
+      : (this.truncated ? `${this.text}…` : this.text)
+    chip.title = block
+      ? `${this.blockTitle.replace('{count}', String(this.count))}\n${this.text}`
+      : this.chipTitle
     chip.setAttribute('aria-label', chip.title)
     return chip
   }
@@ -240,8 +258,8 @@ class RemovedChipWidget extends WidgetType {
  * 区间之前，`RangeSetBuilder` 只接受按 `from` + `startSide` 升序的输入（行装饰
  * `-2e8`、chip `-1e8`、字符区间 `-1`）。
  */
-function chipDecoration(chip: RemovedChip): Decoration {
-  return Decoration.widget({ widget: new RemovedChipWidget(chip.text, chip.truncated, chip.count ?? 0), side: -1 })
+function chipDecoration(chip: RemovedChip, t: Translate): Decoration {
+  return Decoration.widget({ widget: new RemovedChipWidget(chip.text, chip.truncated, chip.count ?? 0, t), side: -1 })
 }
 
 /** 一行的行内片段：新增字符区间 + 删除 chip。 */
@@ -312,11 +330,14 @@ function inlineIndexOf(set: ChangeSet | null, doc: Text): Map<number, LineInline
 class KindMarker extends GutterMarker {
   readonly kind: ChangeKind
   readonly elementClass: string
+  /** 已解析的说明（title 与 aria-label 共用），由工厂按 `t` 传进来。 */
+  private readonly label: string
 
-  constructor(kind: ChangeKind) {
+  constructor(kind: ChangeKind, label: string) {
     super()
     this.kind = kind
     this.elementClass = `rvs-change-gutter-${kind}`
+    this.label = label
   }
 
   eq(other: GutterMarker): boolean {
@@ -327,17 +348,23 @@ class KindMarker extends GutterMarker {
     const span = document.createElement('span')
     span.className = `rvs-change-mark rvs-change-mark-${this.kind}`
     span.textContent = GLYPH[this.kind]
-    span.title = LABEL[this.kind]
-    span.setAttribute('aria-label', LABEL[this.kind])
+    span.title = this.label
+    span.setAttribute('aria-label', this.label)
     return span
   }
 }
 
-/** 三种 kind 的共享实例（`eq` 让相邻同 kind 的行合并成一条 gutter 色条）。 */
-const MARKERS: Record<ChangeKind, GutterMarker> = {
-  add: new KindMarker('add'),
-  mod: new KindMarker('mod'),
-  del: new KindMarker('del'),
+/**
+ * 三种 kind 的 gutter 标记（`eq` 让相邻同 kind 的行合并成一条 gutter 色条）。
+ *
+ * 每次装扩展重建一份：文案按调用方的 `t` 解析，不能再做成模块级常量。
+ */
+function markersFor(t: Translate): Record<ChangeKind, GutterMarker> {
+  return {
+    add: new KindMarker('add', t('changes.markAdd')),
+    mod: new KindMarker('mod', t('changes.markMod')),
+    del: new KindMarker('del', t('changes.markDel')),
+  }
 }
 
 /**
@@ -485,9 +512,12 @@ function firstSpanFrom(spans: readonly Span[], line: number): number {
 class ChangeMarkHighlighter {
   decorations: DecorationSet = Decoration.none
   private readonly view: EditorView
+  /** 解析标记文案的翻译函数；由 `changeMarkPlugin(t)` 装进来。 */
+  private readonly t: Translate
 
-  constructor(view: EditorView) {
+  constructor(view: EditorView, t: Translate) {
     this.view = view
+    this.t = t
     this.rebuild()
   }
 
@@ -527,7 +557,7 @@ class ChangeMarkHighlighter {
           // chip 的 `at` 是列偏移，越过行尾的（基线变了）夹到行尾，绝不越界。
           for (const chip of detail.chips) {
             const at = line.from + Math.min(chip.at, line.length)
-            pieces.push({ from: at, to: at, decoration: chipDecoration(chip) })
+            pieces.push({ from: at, to: at, decoration: chipDecoration(chip, this.t) })
           }
           for (const word of detail.ranges) {
             const from = line.from + Math.min(word.from, line.length)
@@ -549,13 +579,20 @@ class ChangeMarkHighlighter {
 /**
  * 视口内行装饰的 ViewPlugin。
  *
- * 导出是为了让自检脚本能直接读 `view.plugin(changeMarkPlugin).decorations.size`
- * —— "只装饰视口内的行"这件事在 DOM 上看不出来（CodeMirror 本来就让 DOM 只保留
- * 可见行），只有读这份 RangeSet 的条数才有判别力。
+ * 用工厂而不是模块级常量：标记与 chip 的文案由调用方的 `t` 解析。仍然导出是为了
+ * 让自检脚本能直接读 `view.plugin(changeMarkPlugin(t)).decorations.size` ——
+ * "只装饰视口内的行"这件事在 DOM 上看不出来（CodeMirror 本来就让 DOM 只保留可见
+ * 行），只有读这份 RangeSet 的条数才有判别力。
  */
-export const changeMarkPlugin = ViewPlugin.fromClass(ChangeMarkHighlighter, {
-  decorations: value => value.decorations,
-})
+export function changeMarkPlugin(t: Translate): ViewPlugin<ChangeMarkHighlighter> {
+  return ViewPlugin.fromClass(class extends ChangeMarkHighlighter {
+    constructor(view: EditorView) {
+      super(view, t)
+    }
+  }, {
+    decorations: value => value.decorations,
+  })
+}
 
 /**
  * 视口内的 gutter 标记，带一条缓存。
@@ -563,15 +600,24 @@ export const changeMarkPlugin = ViewPlugin.fromClass(ChangeMarkHighlighter, {
  * gutter 的 `markers` 回调在**每一次**视图更新都会跑（选中、滚动、输入都算），
  * 而且它比较的是"视口内那一段"的 RangeSet。所以这里按"数据 + 视口"做单条缓存：
  * 没有新数据、没滚动时直接返回已有结果，滚动时只重建视口那几十行。
+ *
+ * 缓存键里带上标记实例集合（`owner`）：每个编辑器按自己的 `t` 建一份标记，语言
+ * 不同的两个编辑器同时挂载时不能互相复用。
  */
-let gutterCache: { state: MarksState; from: number; to: number; markers: RangeSet<GutterMarker> } | undefined
+let gutterCache: {
+  state: MarksState
+  from: number
+  to: number
+  owner: Record<ChangeKind, GutterMarker>
+  markers: RangeSet<GutterMarker>
+} | undefined
 
-function viewportMarkers(view: EditorView): RangeSet<GutterMarker> {
+function viewportMarkers(view: EditorView, owner: Record<ChangeKind, GutterMarker>): RangeSet<GutterMarker> {
   const marks = view.state.field(marksField, false) ?? EMPTY_STATE
   const from = view.viewport.from
   const to = view.viewport.to
   const cached = gutterCache
-  if (cached !== undefined && cached.state === marks && cached.from === from && cached.to === to) {
+  if (cached !== undefined && cached.state === marks && cached.from === from && cached.to === to && cached.owner === owner) {
     return cached.markers
   }
   let markers = NO_MARKERS
@@ -585,7 +631,7 @@ function viewportMarkers(view: EditorView): RangeSet<GutterMarker> {
       if (span.first > lastLine) break
       const start = Math.max(span.first, firstLine)
       const end = Math.min(span.last, lastLine)
-      const marker = MARKERS[span.kind]
+      const marker = owner[span.kind]
       // 每一行必须是**独立**的标记区间：gutter 只在 `marker.from === line.from`
       // 时才把该标记放进这一行（view 的 `advanceCursor`），一个跨多行的区间只会
       // 出现在第一行上。
@@ -596,7 +642,7 @@ function viewportMarkers(view: EditorView): RangeSet<GutterMarker> {
     }
     markers = builder.finish()
   }
-  gutterCache = { state: marks, from, to, markers }
+  gutterCache = { state: marks, from, to, owner, markers }
   return markers
 }
 
@@ -606,14 +652,17 @@ function viewportMarkers(view: EditorView): RangeSet<GutterMarker> {
  * `CodeEditor` 只在调用方真的传了 `changeSet` 时把它装进编辑器（Compartment），
  * 没传时不装 —— 这样"没有会话改动"的文件连一条 gutter 都不会多出来。
  */
-export const changeMarksExtension: Extension = [
-  marksField,
-  changeStaleField,
-  gutter({
-    class: 'rvs-change-gutter',
-    markers: view => viewportMarkers(view),
-    initialSpacer: () => SPACER,
-    lineMarkerChange: update => update.startState.field(marksField, false) !== update.state.field(marksField, false),
-  }),
-  changeMarkPlugin,
-]
+export function changeMarksExtension(t: Translate): Extension {
+  const markers = markersFor(t)
+  return [
+    marksField,
+    changeStaleField,
+    gutter({
+      class: 'rvs-change-gutter',
+      markers: view => viewportMarkers(view, markers),
+      initialSpacer: () => SPACER,
+      lineMarkerChange: update => update.startState.field(marksField, false) !== update.state.field(marksField, false),
+    }),
+    changeMarkPlugin(t),
+  ]
+}

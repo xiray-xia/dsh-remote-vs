@@ -22,7 +22,15 @@
 import type { EditorView, KeyBinding } from '@codemirror/view';
 /** The editor actions the key bindings dispatch into. */
 export interface EditorKeyHandlers {
-    /** Ctrl/Cmd+S → the pane's save path. */
+    /**
+     * Ctrl/Cmd+S → the pane's save path.
+     *
+     * MUST be a no-op while a modal layer is open: `CodeEditor` (the only caller)
+     * checks `isModalLayerOpen()` before saving. The binding itself stays pure —
+     * this module imports no DOM — but because CodeMirror handles the key first and
+     * prevents the default, the window listener in `save-shortcut.ts` never gets to
+     * apply its own gate to this path.
+     */
     save(): void;
     /** Ctrl/Cmd+F → seed our find widget from the selection and open it. */
     openFindForSelection(view: EditorView): void;

@@ -77,12 +77,48 @@ export class RemoteApiError extends Error {
    * happened (the Host successfully protected the file).
    */
   conflict?: RemoteWriteConflict
+  /**
+   * The Host's own words, kept when the message was rewritten for the user.
+   *
+   * Today only the loopback fence's `403 forbidden: loopback-only` takes this
+   * path (see `loopbackFenceMessage`): the readable sentence explains what to do,
+   * while this keeps the exact server string for diagnostics and logs.
+   */
+  detail?: string
   constructor(
     readonly status: number,
     message: string,
   ) {
     super(message)
   }
+}
+
+/**
+ * The readable form of the loopback fence's refusal (audit S-34).
+ *
+ * Every `/api/dsh-remote/*` route refuses a request that is not loopback +
+ * same-origin with `403 {error: 'forbidden: loopback-only'}`. That is the
+ * security model working, not a fault — but through a remote Web UI
+ * (`ds-harness-remote`, a tunnel) the whole plugin answers 403 and the raw
+ * phrase told the user nothing. The plugin cannot relax the fence (and must
+ * not), so it says what happened instead.
+ *
+ * Kept HERE rather than in `i18n.ts` only because that file was outside this
+ * round's write scope; the pair should move into the dictionaries the next time
+ * it is touched.
+ */
+const REMOTE_ACCESS_DENIED: Record<'zh' | 'en', string> = {
+  zh: '插件 API 仅限本机访问：通过远程 Web UI（中继 / 隧道）打开 DSH 时该功能不可用，请在本机浏览器中打开 DSH。',
+  en: 'The plugin API is only reachable from this machine: it is unavailable when DSH is opened through a remote Web UI (relay / tunnel). Open DSH locally instead.',
+}
+
+/**
+ * Localize `403 forbidden: loopback-only`, or answer undefined for everything
+ * else (the caller then keeps the server's own text).
+ */
+function loopbackFenceMessage(status: number, rawError: string | undefined): string | undefined {
+  if (status !== 403 || rawError !== 'forbidden: loopback-only') return undefined
+  return REMOTE_ACCESS_DENIED[detectLang()]
 }
 
 /**
@@ -114,8 +150,15 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const body = typeof data === 'object' && data !== null
       ? data as { error?: unknown; code?: unknown; conflict?: unknown }
       : undefined
-    const message = typeof body?.error === 'string' ? body.error : `request failed: HTTP ${res.status}`
+    const rawMessage = typeof body?.error === 'string' ? body.error : `request failed: HTTP ${res.status}`
+    // S-34: the one refusal that is the security fence, not a failure.
+    const fenced = loopbackFenceMessage(res.status, typeof body?.error === 'string' ? body.error : undefined)
+    const message = fenced ?? rawMessage
     const failure = new RemoteApiError(res.status, message)
+    if (fenced !== undefined) {
+      failure.detail = rawMessage
+      console.debug('[dsh-remote-vs] remote access refused by the loopback fence:', rawMessage)
+    }
     if (body?.code === 'deadline') failure.deadline = true
     // A refused save is not a link failure: keep its payload so the caller can
     // ask the user what to do with the current version.
@@ -298,10 +341,17 @@ export function uploadFile(options: {
         resolve({ size })
         return
       }
-      const message = typeof body === 'object' && body !== null && typeof (body as { error?: unknown }).error === 'string'
+      const rawError = typeof body === 'object' && body !== null && typeof (body as { error?: unknown }).error === 'string'
         ? (body as { error: string }).error
-        : `upload failed: HTTP ${xhr.status}`
-      reject(new RemoteApiError(xhr.status, message))
+        : undefined
+      // Same fence, same readable answer as the JSON path above (S-34).
+      const fenced = loopbackFenceMessage(xhr.status, rawError)
+      const failure = new RemoteApiError(xhr.status, fenced ?? (rawError ?? `upload failed: HTTP ${xhr.status}`))
+      if (fenced !== undefined) {
+        failure.detail = rawError
+        console.debug('[dsh-remote-vs] remote access refused by the loopback fence:', rawError)
+      }
+      reject(failure)
     }
     xhr.onerror = () => reject(new RemoteApiError(0, 'upload failed: connection error'))
     xhr.onabort = () => reject(new RemoteApiError(0, 'upload cancelled'))

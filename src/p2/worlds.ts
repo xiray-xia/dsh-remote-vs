@@ -658,9 +658,22 @@ export class RemoteWorlds {
       // cooldown engage, which is what keeps a PERMANENT condition from
       // storming — the guard belongs on the persistent case, not the first
       // hiccup.
+      //
+      // Discarding the connection must RELEASE its transport first. `alive` goes
+      // false as soon as the helper channel dies, but the ssh2 `Client` under it
+      // is still an open socket: an invalidated connection closes only its RPC
+      // peer, and `Channel.destroy()` does not end the session — so dropping the
+      // cache entry alone left one Client (with its 30s keepalive) alive per
+      // failed dial, accumulating until the plugin unloaded. `dispose()` is the
+      // one path that reaches `teardownTransport()` (peer → channel → Client).
+      // `diagnostics` is read first because that teardown clears `stderrTail`,
+      // and the failure message below must keep the helper's own words. The
+      // dispose is not awaited — it completes synchronously (no transport I/O)
+      // and retry pacing must not change.
+      const detail = conn.diagnostics
+      void conn.dispose().catch(() => undefined)
       this.rpcs.delete(alias)
       if (attempt < DIAL_IMMEDIATE_RETRIES) return this.dial(alias, attempt + 1)
-      const detail = conn.diagnostics
       const reason = 'helper connection closed right after dialing'
         + (detail === '' ? ' (the helper wrote nothing to stderr)' : ` — helper stderr: ${detail}`)
       // Recorded so the NEXT call backs off, and thrown here rather than
