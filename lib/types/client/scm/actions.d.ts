@@ -15,6 +15,25 @@ export declare class GitOpError extends Error {
 }
 /** Join a remote directory with a repo-relative path. */
 export declare function joinRemote(dir: string, rel: string): string;
+/**
+ * Per-command options for {@link run} / {@link tryRun}.
+ *
+ * `background` puts the command on the request gate's git channel: it waits
+ * while a foreground request is in flight and only one such command runs at a
+ * time. ONLY the repository-wide READ paths use it (`probeRepoRoot`,
+ * `loadStatusDetail`, `loadHead`), because those are the walks a workspace
+ * switch starts and the ones that must never make the directory listing queue
+ * behind them. Every verb the user is waiting on (stage, commit, push, the
+ * bounded probes, the search) stays foreground and is unaffected.
+ *
+ * `signal` cancels the command: the HTTP request is aborted (and, while still
+ * queued, is taken out of the queue) — the store's `readGit` uses it to release
+ * the connections of a workspace the user just left.
+ */
+export interface RunOptions {
+    background?: boolean;
+    signal?: AbortSignal;
+}
 /** The repository that encloses a workspace directory (undefined when none). */
 export declare function resolveRepoRoot(alias: string, workspaceRoot: string): Promise<string | undefined>;
 /**
@@ -41,11 +60,11 @@ export type RepoRootProbe = {
     error: string;
 };
 /** The repository root, or WHY the probe could not answer. */
-export declare function probeRepoRoot(alias: string, workspaceRoot: string): Promise<RepoRootProbe>;
+export declare function probeRepoRoot(alias: string, workspaceRoot: string, signal?: AbortSignal): Promise<RepoRootProbe>;
 /** Repositories under a workspace root (the workspace itself sorts first). */
 export declare function findRepos(alias: string, workspaceRoot: string): Promise<string[]>;
 /** Every changed path plus the ignored half. */
-export declare function loadStatusDetail(alias: string, root: string): Promise<GitStatusDetail>;
+export declare function loadStatusDetail(alias: string, root: string, signal?: AbortSignal): Promise<GitStatusDetail>;
 /**
  * Pathspec-limited status probe: the raw `-z` stdout for JUST these paths.
  *
@@ -73,7 +92,7 @@ export declare function probeStatusPaths(alias: string, root: string, paths: rea
  */
 export declare function probeStatusDir(alias: string, root: string, dir: string): Promise<string>;
 /** Current branch with its ahead/behind counters (detached HEAD tolerated). */
-export declare function loadHead(alias: string, root: string): Promise<{
+export declare function loadHead(alias: string, root: string, signal?: AbortSignal): Promise<{
     branch: string;
     detached: boolean;
     ahead: number;

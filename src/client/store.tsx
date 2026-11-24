@@ -51,7 +51,8 @@ import { captureLiveEditorPosition, captureLiveEditorText, isLiveEditorDirty, is
 import { editorSeatCount } from './editor-capability.ts'
 import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDecision } from './remote-file-open-target.ts'
 import { revealViewTab } from './reveal.ts'
-import { connectionStateOf, isConnectionFailure } from './connection.ts'
+import { applyConnectionStatuses, connectionStateOf, isConnectionFailure, markConnectionProbeOk } from './connection.ts'
+import { isRequestAbort } from './request-gate.ts'
 import { confirmDialog, isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
 import {
   isWithinRoot,
@@ -1009,6 +1010,23 @@ const gitReads = new ReadQueue(refreshGitBusy)
 const latestGitRead = new Map<string, number>()
 let gitReadTicket = 0
 
+/**
+ * Cancellation handle for the git read in flight per binding.
+ *
+ * A workspace switch must take the OLD workspace's repository walk out of the
+ * browser's connection pool. The browser gives one origin six connections and
+ * the walk (probe + status + branch header) is the largest thing the plugin
+ * sends; measured on the reported P710/Z700 trees, the walk took 8–9 s and a
+ * purely in-memory `/status` route took 2.7–4.6 s during it — that is queueing,
+ * not a slow host. Aborting the HTTP request frees the connection immediately;
+ * the answer of an aborted read is dropped on purpose (a newer read of that
+ * binding, or of the workspace now on screen, is the one that matters).
+ *
+ * One controller per binding, so a repo-picker move (same binding, another
+ * directory) also retires the read it supersedes.
+ */
+const gitReadAborts = new Map<string, AbortController>()
+
 /** True when `bindingId`'s read `ticket` may paint the on-screen slice. */
 function gitReadIsCurrent(bindingId: string, ticket: number): boolean {
   return latestGitRead.get(bindingId) === ticket && activeBinding().key === bindingId
@@ -1522,10 +1540,77 @@ function confirmDiscardOnWorkspaceSwitch(dirty: readonly EditorTab[]): Promise<b
   })
 }
 
+/**
+ * The in-flight switch probe, so a newer switch cancels an older dial.
+ *
+ * A test dial is a real SSH connection attempt: against a host that is down it
+ * runs for the connection timeout (tens of seconds), and it is a FOREGROUND
+ * request (the tree is waiting on its answer), so it would hold the background
+ * git channel shut behind it. Switching again makes that dial pointless, hence
+ * the abort.
+ */
+let switchProbe: { alias: string; controller: AbortController } | undefined
+
+/**
+ * Re-prove one alias' link when the user selects a workspace on it.
+ *
+ * The connection chip polls (and an explicit retry is exactly this pair of
+ * calls), but the tree gates on the same evidence: `loadDir`/`prefetchDir`
+ * refuse an alias known down. A switch made inside the poll interval therefore
+ * used to leave the tree empty until the next tick — the user had to retry by
+ * hand. One dial here answers the question the switch just raised; a failed
+ * probe changes nothing (the chip owns the failure, and the alias stays down).
+ */
+function probeConnectionOnSwitch(alias: string): void {
+  if (alias === '') return
+  switchProbe?.controller.abort()
+  const controller = new AbortController()
+  switchProbe = { alias, controller }
+  void (async () => {
+    try {
+      // Background on purpose: a dead host's dial runs for the connection
+      // timeout (45 s + guard). As a FOREGROUND request it would hold the
+      // foreground counter up for that whole window and starve every background
+      // git read; as a background one it only contends with the git channel,
+      // while the tree keeps showing its cached/empty state.
+      const answer = await api.testHost(alias, { background: true, signal: controller.signal })
+      if (controller.signal.aborted || !answer.ok) return
+      // The same two steps as the chip's retry: record the success (so a stale
+      // poll cannot paint it red again) and refresh the pooled status.
+      markConnectionProbeOk(alias)
+      const statuses = await api.connectionStatus()
+      if (controller.signal.aborted) return
+      applyConnectionStatuses(statuses)
+    } catch {
+      // A failed probe is not news: the alias keeps the state the chip shows.
+    } finally {
+      if (switchProbe?.controller === controller) switchProbe = undefined
+    }
+  })()
+}
+
 /** Move the selection; `byUser` decides whether it is remembered as a choice. */
 function applyWorkspaceSelection(id: string, byUser: boolean): void {
   if (state.workspaceId === id) return
   if (byUser) noteManualPick()
+  const target = state.workspaces.find(item => item.id === id)
+  // A connection probe started for the workspace being left is a real SSH dial
+  // (up to the connection timeout on a dead host) and it is a FOREGROUND
+  // request: left running, it would keep the background git channel of the NEW
+  // workspace shut. Cancel it whether or not the new alias needs its own probe.
+  if (switchProbe !== undefined && switchProbe.alias !== target?.alias) {
+    switchProbe.controller.abort()
+    switchProbe = undefined
+  }
+  // The workspace being left may have a full `git status` walk in flight. It is
+  // no longer what the screen shows, and its connections are exactly what the
+  // new workspace's directory list needs — cancel it here (the read drops its
+  // answer; the cache it may already have written stays).
+  for (const [readId, controller] of [...gitReadAborts]) {
+    if (readId === id) continue
+    controller.abort()
+    gitReadAborts.delete(readId)
+  }
   // Local stage results are repository-relative: another binding's paths must
   // never be re-applied to this one. The expanded untracked directories are
   // repository-relative too.
@@ -1552,6 +1637,9 @@ function applyWorkspaceSelection(id: string, byUser: boolean): void {
   // flag must reflect that before anything is published again.
   refreshGitBusy()
   if (stale) void refreshGit('join')
+  // Selected onto an alias whose last known state was `error`: ask once, so the
+  // tree is not gated offline by evidence from before the switch.
+  if (target !== undefined && connectionStateOf(target.alias) === 'error') probeConnectionOnSwitch(target.alias)
 }
 
 let searchSeq = 0
@@ -1601,6 +1689,9 @@ let manualPickSession: string | undefined
  */
 function noteManualPick(): void {
   if (followSessionId !== undefined) manualPickSession = followSessionId
+  // An explicit choice settles the follow for good: no fast retry may move the
+  // selection out from under it afterwards.
+  clearFollowRetry()
 }
 
 /**
@@ -1628,10 +1719,117 @@ export function setFollowSession(sessionId: string | undefined): void {
   // A new seat re-follows: the previous session's manual pick was about that
   // session's workspace, not this one's.
   manualPickSession = undefined
+  // …and its pending retry was about the previous session too.
+  clearFollowRetry()
+  // A different seat gets its own fast-retry budget.
+  followFastRetrySpent = undefined
 }
 
 /** One resolution in flight, so the same session is never probed twice at once. */
 let followFlight: { sessionId: string; promise: Promise<string | undefined> } | undefined
+
+/**
+ * Fast retries for a session whose workspace has not resolved yet.
+ *
+ * Opening a conversation right after a page load (or before the change panel's
+ * first scan) used to leave the selector on the previous workspace until the
+ * panel's slow fallback came around: the workspace visibly switched by itself a
+ * quarter of a minute later, which reads as a slow/glitchy app. Three quick
+ * attempts cover that window; the SLOW fallback stays in the panel, so this is a
+ * latency fix, not a second poll. Only an UNRESOLVED follow retries: an answer
+ * that landed, a manual pick and a session change all stop the chain.
+ *
+ * Module-level state for the same reason the follow itself is: it must outlive
+ * any one surface's render, and there is exactly one follow per page.
+ */
+const FOLLOW_FAST_RETRY_MS = [300, 1_000, 3_000] as const
+
+/** The pending fast-retry chain (one session at a time). */
+let followRetry: { sessionId: string; attempt: number; timer: ReturnType<typeof setTimeout> } | undefined
+
+/**
+ * Session whose fast-retry budget has been spent.
+ *
+ * The slow panel tick keeps calling the follow every 15 s; without this, each
+ * unresolved answer would arm a NEW three-attempt chain and a session with no
+ * resolvable workspace would cost four cwd probes per tick instead of one.
+ * Cleared when the session changes (a new seat gets its own budget).
+ */
+let followFastRetrySpent: string | undefined
+
+/** > 0 while a retry-driven `followSessionWorkspace` call is in flight. */
+let followRetryDrive = 0
+
+/** Drop the pending retry (a resolution landed, the session changed, or the user picked). */
+function clearFollowRetry(): void {
+  if (followRetry === undefined) return
+  clearTimeout(followRetry.timer)
+  followRetry = undefined
+}
+
+/** Is the retry chain still about the session on screen, and still wanted? */
+function followRetryWanted(sessionId: string): boolean {
+  return followSessionId === sessionId
+    && followedSession !== sessionId
+    && manualPickSession !== sessionId
+}
+
+/**
+ * Arm one attempt of the chain.
+ *
+ * The timer calls the follow again; a resolution that still has not landed
+ * schedules the next attempt, and the chain stops after
+ * {@link FOLLOW_FAST_RETRY_MS}'s last entry. "Still not landed" includes a cwd
+ * probe that failed (resolved as "nothing resolved", not thrown); only a
+ * rejection of the whole follow call — a bug, not a host answer — stops the
+ * chain outright.
+ */
+function startFollowRetry(sessionId: string, attempt: number): void {
+  clearFollowRetry()
+  if (!followRetryWanted(sessionId)) return
+  if (attempt >= FOLLOW_FAST_RETRY_MS.length) {
+    followFastRetrySpent = sessionId
+    return
+  }
+  const timer = setTimeout(() => {
+    followRetry = undefined
+    if (!followRetryWanted(sessionId)) return
+    followRetryDrive += 1
+    void followSessionWorkspace({}).then(
+      (resolved) => {
+        followRetryDrive -= 1
+        if (resolved !== undefined || !followRetryWanted(sessionId)) {
+          clearFollowRetry()
+          return
+        }
+        startFollowRetry(sessionId, attempt + 1)
+      },
+      () => {
+        followRetryDrive -= 1
+        clearFollowRetry()
+      },
+    )
+  }, FOLLOW_FAST_RETRY_MS[attempt] as number)
+  // Never keep a Node gate (or a closing page) alive just for a retry.
+  timer.unref?.()
+  followRetry = { sessionId, attempt, timer }
+}
+
+/**
+ * Note that one resolution came back unresolved and arm the fast retry.
+ *
+ * A no-op while the chain already runs for this session (the chain owns its next
+ * attempt — scheduling from here would restart the delays) and while a
+ * retry-driven call is in flight. A chain belonging to ANOTHER session is stale
+ * and is replaced.
+ */
+function noteFollowUnresolved(sessionId: string): void {
+  // The fast budget is once per session: the slow tick must not refill it.
+  if (followFastRetrySpent === sessionId) return
+  if (followRetry !== undefined && followRetry.sessionId !== sessionId) clearFollowRetry()
+  if (followRetryDrive > 0 || followRetry !== undefined) return
+  startFollowRetry(sessionId, 0)
+}
 
 /**
  * Point the workspace selector (and with it the tree, the editor's dropdown and
@@ -1691,8 +1889,14 @@ export function followSessionWorkspace(options: {
   // re-deciding what was already decided. A manual pick made BEFORE anything
   // resolved (see `manualPickSession`) is the same promise, kept even though
   // there is no follow to remember.
-  if (followedSession === sessionId) return Promise.resolve(followedBindingId)
-  if (manualPickSession === sessionId) return Promise.resolve(undefined)
+  if (followedSession === sessionId) {
+    clearFollowRetry()
+    return Promise.resolve(followedBindingId)
+  }
+  if (manualPickSession === sessionId) {
+    clearFollowRetry()
+    return Promise.resolve(undefined)
+  }
   const inFlight = followFlight
   if (inFlight !== undefined && inFlight.sessionId === sessionId) return inFlight.promise
   const promise = resolveSessionWorkspace(sessionId, options).finally(() => {
@@ -1733,6 +1937,9 @@ async function resolveSessionWorkspace(
       cwd = answer.cwd
     } catch {
       // A failed probe resolves nothing: the selection stands, nothing is sent.
+      // Still unresolved, so the fast retry gets its chance (the panel's slow
+      // fallback would otherwise be the only way out).
+      noteFollowUnresolved(sessionId)
       return undefined
     }
     // The session may have changed while the host was answering; its evidence
@@ -1740,12 +1947,23 @@ async function resolveSessionWorkspace(
     if (followSessionId !== sessionId) return undefined
     if (cwd !== undefined && cwd !== '') decision = plan(cwd)
   }
-  if (decision.action === 'keep') return undefined
+  if (decision.action === 'keep') {
+    // Nothing resolved (the host knows no usable cwd for this session, or the
+    // evidence names no binding): arm the fast retry instead of waiting for the
+    // panel's slow one.
+    noteFollowUnresolved(sessionId)
+    return undefined
+  }
   // The user may have chosen a workspace WHILE this resolution was in flight:
   // a choice beats a late answer.
-  if (followSessionId !== sessionId || manualPickSession === sessionId) return undefined
+  if (followSessionId !== sessionId || manualPickSession === sessionId) {
+    clearFollowRetry()
+    return undefined
+  }
   followedSession = decision.followedSession
   followedBindingId = decision.bindingId
+  // An answer landed: the chain has nothing left to do.
+  clearFollowRetry()
   if (state.workspaceId !== decision.bindingId) selectWorkspaceAuto(decision.bindingId)
   return decision.bindingId
 }
@@ -1889,6 +2107,9 @@ export async function refreshGit(mode: 'join' | 'fresh' = 'fresh'): Promise<void
   try {
     await gitReads.run(cacheKey, () => readGit(key, subdir, cacheKey), mode, settleMs)
   } catch (error) {
+    // A cancelled read (a workspace switch retired it) is not a failure: the
+    // selection moved on and there is nothing to report for the old key.
+    if (isRequestAbort(error)) return
     // Only the settle deadline (or a throw before the read's own try) lands
     // here: `readGit` handles read failures itself. The failure belongs to the
     // key this read STARTED with — the repo picker may have moved the panel to
@@ -1911,6 +2132,14 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
   // The binding can disappear from the table while this read waits in the queue.
   const workspace = state.workspaces.find(item => item.id === bindingId)
   if (workspace === undefined) return
+  // A read of the SAME binding is starting: the one already running describes a
+  // slice that is about to be replaced (another repository directory, or a
+  // refresh that started later), so it must release its connection instead of
+  // walking the tree to an answer nobody will use.
+  gitReadAborts.get(bindingId)?.abort()
+  const controller = new AbortController()
+  gitReadAborts.set(bindingId, controller)
+  const signal = controller.signal
   const ticket = ++gitReadTicket
   latestGitRead.set(bindingId, ticket)
   // A local stage/unstage that happens while this read is in flight cannot be in
@@ -1924,7 +2153,7 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
     // hint, which is the very blank state the cache exists to prevent.
     // `withDeadline` covers the host that never answers at all; the probe itself
     // reports transport failures.
-    const probe = await withDeadline(probeRepoRoot(workspace.alias, workdir), gitDeadlineMs(), t('editor.readTimeout'))
+    const probe = await withDeadline(probeRepoRoot(workspace.alias, workdir, signal), gitDeadlineMs(), t('editor.readTimeout'))
     if (probe.kind === 'failed') throw new Error(probe.error)
     if (probe.kind === 'none') {
       const snapshot: GitSnapshot = {
@@ -1942,9 +2171,12 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
     }
     const root = probe.root
     const [detail, head] = await Promise.all([
-      withDeadline(loadStatusDetail(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
-      withDeadline(loadHead(workspace.alias, root), gitDeadlineMs(), t('editor.readTimeout')),
+      withDeadline(loadStatusDetail(workspace.alias, root, signal), gitDeadlineMs(), t('editor.readTimeout')),
+      withDeadline(loadHead(workspace.alias, root, signal), gitDeadlineMs(), t('editor.readTimeout')),
     ])
+    // One half may have been aborted while the other answered; a half-finished
+    // pair must never be cached (an aborted HEAD once landed as "detached").
+    if (signal.aborted) return
     // A directory INSIDE a repository settles on that repository's root, so the
     // stored choice is what git actually uses (and what the picker shows). Only
     // the binding's LATEST read may rewrite that persisted choice: a read
@@ -1988,6 +2220,11 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
     if (settled !== subdir) writeGitSnapshot(gitCacheKey(bindingId, settled), snapshot)
     paintGit(bindingId, ticket, snapshot)
   } catch (error) {
+    // An ABORTED read is not a failure. The switch (or the newer read that
+    // superseded this one) cancelled it on purpose, so there is nothing to
+    // report: `gitError` would blame the user's new workspace for a walk they
+    // left, and the cached slice they already have stays the truth.
+    if (signal.aborted || isRequestAbort(error)) return
     if (!gitReadIsCurrent(bindingId, ticket)) return
     // A failed read discards nothing that was already known: the panel keeps the
     // last good (or cached) slice and prints the message above it, so a transient
@@ -1997,6 +2234,10 @@ async function readGit(bindingId: string, subdir: string, cacheKey: string): Pro
       gitError: error instanceof Error ? error.message : String(error),
       gitCached: state.repoRoot !== undefined,
     })
+  } finally {
+    // Only the read that still owns the slot may clear it: a newer read has
+    // already replaced the map entry and must stay abortable.
+    if (gitReadAborts.get(bindingId) === controller) gitReadAborts.delete(bindingId)
   }
 }
 

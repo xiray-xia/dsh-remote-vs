@@ -36,6 +36,7 @@ import { activeConnectionAlias, currentConnection, isConnectionFailure, noteConn
 import { detectLang, makeT } from './i18n.ts'
 import { dispatchHostNotices } from './notices.ts'
 import { parseSseFrame, takeSseFrames } from './exec-output.ts'
+import { requestGate } from './request-gate.ts'
 import {
   branchesCommand,
   gitFailed,
@@ -135,11 +136,42 @@ function isWriteConflict(value: unknown): value is RemoteWriteConflict {
   return measured(shape.mtime) && measured(shape.size)
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+/**
+ * Per-request scheduling options (the channel lives in `request-gate.ts`).
+ *
+ * Every call site that does NOT pass them keeps the pre-gate behaviour: a
+ * foreground request that starts immediately and never waits.
+ */
+export interface RequestOptions {
+  /**
+   * Run this request on the BACKGROUND channel.
+   *
+   * Only repository-wide git walks use it (see `scm/actions.ts`): they can take
+   * minutes on a large tree, and a workspace switch must not make the directory
+   * listing queue behind them for a connection. Background requests start only
+   * while no foreground request is in flight, one at a time.
+   */
+  background?: boolean
+  /**
+   * Cancels the request: a queued background entry leaves the queue, and a
+   * request that already started is aborted at the fetch.
+   */
+  signal?: AbortSignal
+}
+
+async function call<T>(path: string, init?: RequestInit, opts?: RequestOptions): Promise<T> {
+  // The signal both takes a queued background request out and cancels the fetch
+  // itself; an `init.signal` from the caller counts the same way when no
+  // explicit one is given.
+  const signal = opts?.signal ?? init?.signal ?? undefined
+  const send = (): Promise<Response> => fetch(path, {
     ...init,
+    ...(signal === undefined ? {} : { signal }),
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
   })
+  const res = opts?.background === true
+    ? await requestGate.runBackground(send, signal)
+    : await requestGate.runForeground(send)
   let data: unknown = null
   try {
     data = await res.json()
@@ -193,8 +225,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
-function post<T>(path: string, body: unknown): Promise<T> {
-  return call<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+function post<T>(path: string, body: unknown, opts?: RequestOptions): Promise<T> {
+  return call<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) }, opts)
 }
 
 /** Raise a friendly git error for a failed exec result. */
@@ -467,7 +499,8 @@ export const api = {
     }).then(r => r.host),
   deleteHost: (alias: string) =>
     call<{ ok: boolean }>(`${REMOTE_API.hosts}?alias=${encodeURIComponent(alias)}`, { method: 'DELETE' }),
-  testHost: (alias: string) => post<{ ok: boolean; error?: string; durationMs: number }>(REMOTE_API.test, { alias }),
+  testHost: (alias: string, opts?: RequestOptions) =>
+    post<{ ok: boolean; error?: string; durationMs: number }>(REMOTE_API.test, { alias }, opts),
   /** Per-alias SSH connection health (Host pool's view; this is a local poll). */
   connectionStatus: () => call<{ connections: RemoteConnectionStatus[] }>(REMOTE_API.status).then(r => r.connections),
   bootstrap: (alias: string) => post<{ alias: string; keyPath: string; flipped: boolean; detail: string }>(REMOTE_API.keygen, { alias }),
@@ -503,8 +536,13 @@ export const api = {
       post<{ ok: boolean }>(REMOTE_API.files, { op: 'rename', alias, from, to }).then(afterRemoteWrite),
   },
   // -- exec
-  exec: (alias: string, command: string, timeoutMs?: number) =>
-    post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs })
+  /**
+   * One remote command (`/exec`), foreground unless `opts.background` asks for
+   * the git channel. Reads the SCM panel builds stay foreground; the
+   * repository-wide walks pass `{ background: true }` (see `scm/actions.ts`).
+   */
+  exec: (alias: string, command: string, timeoutMs?: number, opts?: RequestOptions) =>
+    post<RemoteExecResult>(REMOTE_API.exec, timeoutMs === undefined ? { alias, command } : { alias, command, timeoutMs }, opts)
       .then((result) => {
         // A worktree-changing git verb (discard / checkout / stash apply …) runs
         // through here rather than `fileOp`, so it is the one place an index
@@ -526,12 +564,17 @@ export const api = {
     timeoutMs: number,
     handlers: { onData?: (stream: 'out' | 'err', text: string) => void; signal?: AbortSignal },
   ): Promise<RemoteExecResult> => {
-    const response = await fetch(REMOTE_API.execStream, {
+    // A USER-initiated verb (fetch/pull/push, its own live panel), so it is
+    // foreground — but only the RESPONSE ESTABLISHMENT is claimed: the SSE body
+    // streams for minutes, and holding the foreground counter for that long
+    // would starve every background git read (and make the panel's own refresh
+    // wait for itself).
+    const response = await requestGate.runForeground(() => fetch(REMOTE_API.execStream, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ alias, command, timeoutMs }),
       ...(handlers.signal === undefined ? {} : { signal: handlers.signal }),
-    })
+    }))
     if (!response.ok || response.body === null) {
       let message = `request failed: HTTP ${response.status}`
       try {

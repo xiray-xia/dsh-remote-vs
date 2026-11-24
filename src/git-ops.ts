@@ -29,6 +29,19 @@ export const GIT_CAP = 2_000_000
 /** Env prefix: never block on a prompt, never page, never open an editor. */
 const GIT_ENV = 'GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat GIT_EDITOR=true'
 
+/**
+ * Extra env for the read-only walks the client may ABORT on a workspace switch.
+ *
+ * `git status` opportunistically refreshes and rewrites the index, which takes
+ * `.git/index.lock`; a status killed mid-flight (SIGTERM→SIGKILL after the
+ * group-grace) could otherwise leave that lock — or a refreshed index — behind.
+ * `GIT_OPTIONAL_LOCKS=0` turns those optional lock-taking steps off, so
+ * `rev-parse` / `status` / the branch header stay pure reads and an aborted
+ * walk cannot change the repository at all. Required locks of mutating verbs are
+ * unaffected (they do not use this constant).
+ */
+const GIT_READ_ENV = 'GIT_OPTIONAL_LOCKS=0'
+
 /** `git` pinned to a work dir: no pager, no path quoting, no prompts. */
 function git(workdir: string): string {
   return `${GIT_ENV} git --no-pager -C ${shQuote(assertRemoteDir(workdir))} -c core.quotepath=false`
@@ -167,7 +180,7 @@ export function repoProbeDetailCommand(workdir: string): string {
   // `printf` is last in the pipeline, so the exec route sees success and the
   // caller can read the REAL git exit code out of the first line.
   return capped(
-    `out=$(LC_ALL=C LANG=C ${git(workdir)} rev-parse --show-toplevel 2>&1); rc=$?; printf 'RVS_RC=%s\\n%s\\n' "$rc" "$out"`,
+    `out=$(LC_ALL=C LANG=C ${GIT_READ_ENV} ${git(workdir)} rev-parse --show-toplevel 2>&1); rc=$?; printf 'RVS_RC=%s\\n%s\\n' "$rc" "$out"`,
   )
 }
 
@@ -187,7 +200,7 @@ export function repoDiscoveryCommand(root: string): string {
  * ignored paths one level deep for the tree's greying, under the same bound.
  */
 export function statusDetailCommand(workdir: string): string {
-  return capped(`${git(workdir)} status --porcelain=v1 -z --untracked-files=normal --ignored=matching`)
+  return capped(`${GIT_READ_ENV} ${git(workdir)} status --porcelain=v1 -z --untracked-files=normal --ignored=matching`)
 }
 
 /**
@@ -233,7 +246,7 @@ export function statusDirCommand(workdir: string, dir: string): string {
 
 /** Branch header only (`## branch...upstream [ahead N, behind M]`), NUL safe. */
 export function branchHeaderCommand(workdir: string): string {
-  return capped(`${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
+  return capped(`${GIT_READ_ENV} ${git(workdir)} status --porcelain=v1 -b -z --untracked-files=no`, 64_000)
 }
 
 /** Full message of the current HEAD commit. */

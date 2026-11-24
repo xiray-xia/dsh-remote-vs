@@ -41,6 +41,28 @@ export declare class RemoteApiError extends Error {
     detail?: string;
     constructor(status: number, message: string);
 }
+/**
+ * Per-request scheduling options (the channel lives in `request-gate.ts`).
+ *
+ * Every call site that does NOT pass them keeps the pre-gate behaviour: a
+ * foreground request that starts immediately and never waits.
+ */
+export interface RequestOptions {
+    /**
+     * Run this request on the BACKGROUND channel.
+     *
+     * Only repository-wide git walks use it (see `scm/actions.ts`): they can take
+     * minutes on a large tree, and a workspace switch must not make the directory
+     * listing queue behind them for a connection. Background requests start only
+     * while no foreground request is in flight, one at a time.
+     */
+    background?: boolean;
+    /**
+     * Cancels the request: a queued background entry leaves the queue, and a
+     * request that already started is aborted at the fetch.
+     */
+    signal?: AbortSignal;
+}
 /** Query for one remote terminal socket. */
 export interface TerminalSocketQuery {
     alias?: string;
@@ -138,7 +160,7 @@ export declare const api: {
     deleteHost: (alias: string) => Promise<{
         ok: boolean;
     }>;
-    testHost: (alias: string) => Promise<{
+    testHost: (alias: string, opts?: RequestOptions) => Promise<{
         ok: boolean;
         error?: string;
         durationMs: number;
@@ -177,7 +199,12 @@ export declare const api: {
             ok: boolean;
         }>;
     };
-    exec: (alias: string, command: string, timeoutMs?: number) => Promise<RemoteExecResult>;
+    /**
+     * One remote command (`/exec`), foreground unless `opts.background` asks for
+     * the git channel. Reads the SCM panel builds stay foreground; the
+     * repository-wide walks pass `{ background: true }` (see `scm/actions.ts`).
+     */
+    exec: (alias: string, command: string, timeoutMs?: number, opts?: RequestOptions) => Promise<RemoteExecResult>;
     /**
      * Streaming exec: the network verbs' live log.
      *

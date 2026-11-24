@@ -61,7 +61,8 @@ import {
   statusPathsCommand,
   unstageCommand,
 } from '../../git-ops.ts'
-import { api, gitTimeoutMs } from '../api.ts'
+import { api, gitTimeoutMs, type RequestOptions } from '../api.ts'
+import { isRequestAbort } from '../request-gate.ts'
 import { appendExecOutput, networkBudgetMs, networkCommands, type PushTarget } from '../exec-output.ts'
 import { timeoutSeconds } from '../../timeouts.ts'
 
@@ -101,19 +102,61 @@ function failureOf(result: RemoteExecResult, timeoutMs: number): GitOpError {
   return new GitOpError(hint ?? detail ?? result.error ?? `git failed [exit code: ${result.exitCode ?? '?'}]`)
 }
 
+/**
+ * Per-command options for {@link run} / {@link tryRun}.
+ *
+ * `background` puts the command on the request gate's git channel: it waits
+ * while a foreground request is in flight and only one such command runs at a
+ * time. ONLY the repository-wide READ paths use it (`probeRepoRoot`,
+ * `loadStatusDetail`, `loadHead`), because those are the walks a workspace
+ * switch starts and the ones that must never make the directory listing queue
+ * behind them. Every verb the user is waiting on (stage, commit, push, the
+ * bounded probes, the search) stays foreground and is unaffected.
+ *
+ * `signal` cancels the command: the HTTP request is aborted (and, while still
+ * queued, is taken out of the queue) — the store's `readGit` uses it to release
+ * the connections of a workspace the user just left.
+ */
+export interface RunOptions {
+  background?: boolean
+  signal?: AbortSignal
+}
+
+/** Map {@link RunOptions} onto the HTTP layer's {@link RequestOptions}. */
+function requestOptionsOf(options: RunOptions): RequestOptions {
+  return {
+    ...(options.background === true ? { background: true } : {}),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  }
+}
+
 /** Run one command, raising a readable error on a non-zero exit. */
-async function run(alias: string, command: string, timeoutMs = normalTimeoutMs()): Promise<RemoteExecResult> {
-  const result = await api.exec(alias, command, timeoutMs)
+async function run(
+  alias: string,
+  command: string,
+  timeoutMs = normalTimeoutMs(),
+  options: RunOptions = {},
+): Promise<RemoteExecResult> {
+  const result = await api.exec(alias, command, timeoutMs, requestOptionsOf(options))
   if (result.success) return result
   throw failureOf(result, timeoutMs)
 }
 
 /** Run one command tolerating failure (returns '' instead). */
-async function tryRun(alias: string, command: string, timeoutMs = normalTimeoutMs()): Promise<string> {
+async function tryRun(
+  alias: string,
+  command: string,
+  timeoutMs = normalTimeoutMs(),
+  options: RunOptions = {},
+): Promise<string> {
   try {
-    const result = await api.exec(alias, command, timeoutMs)
+    const result = await api.exec(alias, command, timeoutMs, requestOptionsOf(options))
     return result.success ? result.stdout : ''
-  } catch {
+  } catch (error) {
+    // A cancelled command is not "no answer": swallowing it would let the
+    // sibling half of a `Promise.all` land with a placeholder value (an aborted
+    // HEAD write once cached `detached: true`).
+    if (isRequestAbort(error)) throw error
     return ''
   }
 }
@@ -146,11 +189,22 @@ export type RepoRootProbe =
   | { kind: 'failed'; error: string }
 
 /** The repository root, or WHY the probe could not answer. */
-export async function probeRepoRoot(alias: string, workspaceRoot: string): Promise<RepoRootProbe> {
+export async function probeRepoRoot(
+  alias: string,
+  workspaceRoot: string,
+  signal?: AbortSignal,
+): Promise<RepoRootProbe> {
   let result: RemoteExecResult
   try {
-    result = await api.exec(alias, repoProbeDetailCommand(workspaceRoot), normalTimeoutMs())
+    result = await api.exec(alias, repoProbeDetailCommand(workspaceRoot), normalTimeoutMs(), {
+      // The probe is the FIRST step of a workspace switch's background walk: on
+      // a large tree it is a full `rev-parse` + `cd` over SSH, and it must yield
+      // to the listing the user is waiting on.
+      background: true,
+      ...(signal === undefined ? {} : { signal }),
+    })
   } catch (error) {
+    if (isRequestAbort(error)) throw error
     // The transport/route failed before any git exit code existed.
     return { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
   }
@@ -171,8 +225,13 @@ export async function findRepos(alias: string, workspaceRoot: string): Promise<s
 }
 
 /** Every changed path plus the ignored half. */
-export async function loadStatusDetail(alias: string, root: string): Promise<GitStatusDetail> {
-  const out = await run(alias, statusDetailCommand(root))
+export async function loadStatusDetail(alias: string, root: string, signal?: AbortSignal): Promise<GitStatusDetail> {
+  // The walk itself: the expensive half of a switch (8–9 s on the reported AOSP
+  // trees), so it runs on the git channel and yields to every foreground read.
+  const out = await run(alias, statusDetailCommand(root), normalTimeoutMs(), {
+    background: true,
+    ...(signal === undefined ? {} : { signal }),
+  })
   return parseStatusDetail(out.stdout)
 }
 
@@ -212,8 +271,15 @@ export async function probeStatusDir(alias: string, root: string, dir: string): 
 }
 
 /** Current branch with its ahead/behind counters (detached HEAD tolerated). */
-export async function loadHead(alias: string, root: string): Promise<{ branch: string; detached: boolean; ahead: number; behind: number }> {
-  const out = await tryRun(alias, branchHeaderCommand(root), 60_000)
+export async function loadHead(
+  alias: string,
+  root: string,
+  signal?: AbortSignal,
+): Promise<{ branch: string; detached: boolean; ahead: number; behind: number }> {
+  const out = await tryRun(alias, branchHeaderCommand(root), 60_000, {
+    background: true,
+    ...(signal === undefined ? {} : { signal }),
+  })
   const first = (out.split('\0')[0] ?? out.split('\n')[0] ?? '').replace(/^## /, '').trim()
   if (first === '' || first.startsWith('HEAD (no branch')) return { branch: 'HEAD', detached: true, ahead: 0, behind: 0 }
   const match = /^([^\s.]+(?:\.\.\.[^\s[]+)?)(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(first)
