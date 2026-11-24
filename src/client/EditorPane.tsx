@@ -35,7 +35,9 @@ import { isCommittedBlame, planBlameWindow, type BlameLine, type FileHistoryComm
 import { Btn } from './ui.tsx'
 import { renderMarkdown } from './vsc/markdown.tsx'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
-import { installSaveShortcut } from './vsc/save-shortcut.ts'
+import { FOREIGN_TARGET, installSaveShortcut, isModalLayerOpen } from './vsc/save-shortcut.ts'
+import { OutlinePanel } from './OutlinePanel.tsx'
+import type { OutlineEntry } from './outline-model.ts'
 import { Breadcrumb } from './vsc/breadcrumb.tsx'
 import { ImagePreview } from './vsc/image-preview.tsx'
 import {
@@ -67,6 +69,18 @@ import {
 
 /** How many hunks of a conflict diff are rendered before the rest is summarised. */
 const CONFLICT_DIFF_HUNKS = 20
+
+/**
+ * 「大纲」是否可用：一个真正的文本文件 tab，读完且没读错，不是二进制/图片。
+ *
+ * 预览模式（markdown/HTML）也排除：那时 CodeMirror 被 CSS 隐藏，跳过去虽然改了
+ * 选区，屏幕上却什么也看不到 —— 一个看起来没反应的按钮比没有按钮更糟。
+ */
+function outlineAvailable(tab: EditorTab | undefined): tab is EditorTab {
+  if (tab === undefined || tab.kind !== 'file') return false
+  if (tab.image || tab.binary || tab.loading || tab.error !== undefined) return false
+  return !(tab.preview && (tab.markdown || tab.html))
+}
 
 const BLAME_PREF_KEY = 'dsh-remote-vs.editor.blame'
 const EMPTY_BLAME: ReadonlyMap<number, BlameLine> = new Map()
@@ -965,6 +979,98 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
     })
   }, [props.visible])
 
+  // --- 符号大纲（Ctrl+Shift+O）---------------------------------------------
+  /**
+   * 打开中的大纲。
+   *
+   * 存的是「打开那一刻的实时缓冲区全文」，而不是 `tabId` + 每次渲染再去读 ——
+   * 面板打开期间焦点在筛选框里，缓冲区不可能再变，所以一份快照足够；把全文放进
+   * state 也让 `OutlinePanel` 的 `useMemo` 有稳定输入（不会每帧重扫文件）。
+   *
+   * `tabId` 留在里面是为了自检：换 tab 时旧大纲不能继续挂在屏幕上的新文件上。
+   */
+  const [outline, setOutline] = useState<{ tabId: string; path: string; text: string } | undefined>(undefined)
+
+  // 换 tab / 重载后旧大纲的行号已经不属于屏幕上的文件了：直接关掉，绝不猜。
+  useEffect(() => {
+    setOutline(undefined)
+  }, [activeTab?.id, activeTab?.reloadNonce])
+
+  const openOutline = useCallback(() => {
+    const tab = saveShortcutTabRef.current
+    if (!outlineAvailable(tab)) return
+    // 实时 buffer 优先：`tab.text` 是加载时的字节，输入从来没有回写进去
+    // （见下方 editor host 的注释）。dirty 文件只有这里能拿到正确内容。
+    setOutline({ tabId: tab.id, path: tab.fullPath, text: editorRef.current?.getContent() ?? tab.text })
+  }, [])
+  const closeOutline = useCallback(() => { setOutline(undefined) }, [])
+
+  /**
+   * 跳转：复用现有的「选中行区间 + 滚到中央 + 点灯」，1-based 行号。
+   *
+   * 跳转放到下一个 task：浮层卸载时会把焦点还给打开它的按钮（portal 的常规
+   * 做法，见 QuickOpen），先 `revealRange` 再卸载的话，焦点会被那一步抢回去，
+   * 用户接着敲的字就落空了。等卸载稳定后再把焦点交给编辑器。
+   */
+  const jumpToOutline = useCallback((entry: OutlineEntry) => {
+    setOutline(undefined)
+    window.setTimeout(() => { editorRef.current?.revealRange(entry.line, entry.line) }, 0)
+  }, [])
+
+  // window 监听用 ref 取最新值：effect 只为可见性重装，不随每次渲染重装。
+  const openOutlineRef = useRef(openOutline)
+  openOutlineRef.current = openOutline
+  const closeOutlineRef = useRef(closeOutline)
+  closeOutlineRef.current = closeOutline
+  const outlineOpenRef = useRef(false)
+  outlineOpenRef.current = outline !== undefined
+
+  /**
+   * Ctrl/Cmd+Shift+O：转到符号。
+   *
+   * 用 window 冒泡监听而不是 CodeMirror keymap：和 Ctrl+S 同理 —— 点过 tab 条、
+   * 信息栏或侧栏之后光标已经不在编辑器里，keymap 根本不会触发。只在这个座位可见
+   * 时安装（多个 EditorPane 可能同时挂载，隐藏的那个不该抢键）。
+   *
+   * 不抢别人的键：
+   *  - 终端：xterm 已经把 ^O 发给远端 shell（readline 的 operate-and-get-next），
+   *    再开浮层就是一次按键两个动作；
+   *  - 其他输入框（聊天输入、对话框输入）与任何模态层（宿主审批、右键菜单）都保留
+   *    这个键；
+   *  - 不满足条件时**不** preventDefault：浏览器自己的 Ctrl+Shift+O 在别处仍是它
+   *    的（我们只接管自己确实要处理的那一次按键）。
+   */
+  useEffect(() => {
+    if (!props.visible) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey) return
+      if (event.key.toLowerCase() !== 'o') return
+      // 按住不放不该让浮层闪；输入法组字期间这也不是一个命令。
+      if (event.repeat || event.isComposing === true) return
+      // 自己开着：再按一次关闭（与 Ctrl+P 的「再按一次退出」同一习惯）。
+      if (outlineOpenRef.current) {
+        event.preventDefault()
+        closeOutlineRef.current()
+        return
+      }
+      if (isModalLayerOpen()) return
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && focused.closest('.xterm') !== null) return
+      // CodeMirror 的 `.cm-content` 是 contenteditable，天然在 FOREIGN_TARGET 里：
+      // 只放过**本插件编辑器**里那一份（`.rvs-editor-host` 的子树），宿主自己的
+      // 聊天输入同样是 CodeMirror —— 在别人的编辑器里抢键和在别人的输入框里抢键
+      // 是同一件事。
+      if (focused instanceof HTMLElement
+        && focused.closest(FOREIGN_TARGET) !== null
+        && focused.closest('.rvs-editor-host') === null) return
+      if (!outlineAvailable(saveShortcutTabRef.current)) return
+      event.preventDefault()
+      openOutlineRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [props.visible])
+
   if (tabs.length === 0) {
     if (center) {
       return (
@@ -1156,6 +1262,17 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   >
                     <IconSave size={13} />
                   </IconButton>
+                  {/* 大纲：只对文本文件出现。`≡` 是行内字形（与 blame 的 `B`、
+                      浮窗的图标同一套做法），不额外引一个图标组件。 */}
+                  {!activeTab.image && !activeTab.binary && (
+                    <IconButton
+                      title={`${t('editor.outline')} (Ctrl+Shift+O)`}
+                      onClick={openOutline}
+                      disabled={!outlineAvailable(activeTab)}
+                    >
+                      <span className="rvs-glyph-text">≡</span>
+                    </IconButton>
+                  )}
                 </>
               )}
               {activeTab.kind === 'diff' && (
@@ -1299,6 +1416,19 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 </div>
               )}
             </div>
+          )}
+
+          {/* 大纲浮层：portal 到 <body>，所以放在 JSX 的哪一层都不影响定位；
+              放在信息栏旁边只是让它和触发它的按钮读在一起。`tabId` 判定是最后
+              一道闸：换 tab 之后旧大纲绝不挂在新文件上。 */}
+          {outline !== undefined && outline.tabId === activeTab.id && (
+            <OutlinePanel
+              t={t}
+              path={outline.path}
+              text={outline.text}
+              onPick={jumpToOutline}
+              onClose={closeOutline}
+            />
           )}
 
           <div className="rvs-body" ref={bodyRef}>

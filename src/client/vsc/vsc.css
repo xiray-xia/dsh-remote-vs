@@ -5715,6 +5715,196 @@ body[data-ds-dark-theme] .rvs-doctor {
 .rvs-file-history-note.error {
   color: var(--rvs-danger-text);
 }
+
+/* === 编辑器符号大纲（Ctrl+Shift+O） ======================================= */
+
+/*
+ * 浮层 portal 到 <body>，token 由 `.rvs-portal` 提供（见上方的 portal 变量块）。
+ * 位置刻意「上方弹」而不是居中：它覆盖的是编辑器信息栏一带，背后的文件仍可辨认。
+ */
+.rvs-outline-mask {
+  position: fixed;
+  inset: 0;
+  /* 与其它模态层同一层；toast（100001）仍然压在它上面。 */
+  z-index: 100000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  background: rgba(0, 0, 0, .38);
+  backdrop-filter: blur(2px);
+  animation: rvsFade .12s ease;
+}
+
+/* 不透明底 + 皮肤 overlay：半透明 overlay 单独用会让下面的代码透上来。 */
+.rvs-outline {
+  width: min(720px, calc(100vw - 40px));
+  max-height: min(66vh, 620px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rvs-border2);
+  border-radius: 10px;
+  background-color: Canvas;
+  background-image: linear-gradient(var(--dsw-alias-bg-overlay, transparent), var(--dsw-alias-bg-overlay, transparent));
+  color: var(--rvs-fg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .42);
+  font-size: 12.5px;
+  overflow: hidden;
+  animation: rvsPop .12s ease;
+}
+
+.rvs-outline-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-outline-title {
+  font-weight: 600;
+}
+
+.rvs-outline-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rvs-fg3);
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+}
+
+.rvs-outline-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--rvs-fg2);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.rvs-outline-close:hover {
+  background: var(--rvs-hover);
+  color: var(--rvs-fg);
+}
+
+.rvs-outline-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rvs-border);
+}
+
+.rvs-outline-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 6px;
+  background: var(--rvs-input);
+  color: var(--rvs-fg);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.rvs-outline-input:focus {
+  border-color: var(--rvs-brand);
+}
+
+.rvs-outline-hint {
+  flex: none;
+  color: var(--rvs-fg3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rvs-outline-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.rvs-outline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.rvs-outline-row:hover {
+  background: var(--rvs-hover);
+}
+
+.rvs-outline-row.active {
+  background: var(--rvs-active);
+}
+
+.rvs-outline-kind {
+  flex: none;
+  width: 58px;
+  color: var(--rvs-fg3);
+  font-size: 10.5px;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.rvs-outline-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--rvs-mono);
+}
+
+/* `mark` 的浏览器默认底色（黄）在明暗两套主题里都与代码底色冲突：只保留品牌色
+   文字 + 下划线，让高亮可读又不制造第三种底色。 */
+.rvs-outline-hit {
+  background: transparent;
+  color: var(--rvs-brand);
+  text-decoration: underline;
+}
+
+.rvs-outline-line {
+  flex: none;
+  color: var(--rvs-fg3);
+  font-family: var(--rvs-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rvs-outline-foot {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--rvs-border);
+}
+
+.rvs-outline-note {
+  color: var(--rvs-fg3);
+  font-size: 11px;
+}
+
+/* 「猜的」「截断」是常驻警告：没有 warning 色 token（`--rvs-git-m` 只在 quick
+   open 的 portal 子集里声明），改用更亮的前景 + 加粗，明暗两套都成立。 */
+.rvs-outline-note.warn {
+  color: var(--rvs-fg2);
+  font-weight: 600;
+}
+
 /* ------------------------------------------------------ Ctrl+P quick open */
 
 .rvs-qo-mask {
