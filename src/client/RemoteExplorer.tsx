@@ -11,15 +11,23 @@
  * on-screen session's composer draft.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
-import { copyIntoCommand, joinAbs, moveToCommand } from '../fs-ops.ts'
+import {
+  assertRemovablePath,
+  batchRemoveScript,
+  copyIntoCommand,
+  joinAbs,
+  moveToCommand,
+  parseDeleteMarker,
+  splitBatchRemovePaths,
+} from '../fs-ops.ts'
 import { MAX_SELECTION_DOWNLOAD, type RemoteFileEntry } from '../protocol.ts'
-import { api, uploadFile } from './api.ts'
+import { api, noteRemoteWrite, uploadFile } from './api.ts'
 import { startDownload, startSelectionDownload } from './downloads.ts'
 import { useConnectionStatus, isConnectionFailure, pruneConnections } from './connection.ts'
 import { createDragExpander, type DragExpander } from './drag-expand.ts'
 import { insertRemoteReference, sameLocalDir } from './composer.ts'
 import { ListingRequests } from './listing-requests.ts'
-import { repoRelative, useExplorer } from './store.tsx'
+import { refreshGit, repoRelative, useExplorer } from './store.tsx'
 import { planUpload, withDroppedDirs, type DroppedFile } from './upload-plan.ts'
 import { collectDroppedFiles, type EntryLike } from './upload-source.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
@@ -66,6 +74,16 @@ interface CreateState {
  */
 const PROBE_DEADLINE_MS = 8_000
 
+/**
+ * Deadline for one streamed delete batch.
+ *
+ * The batch replaces the per-entry SFTP route precisely because a tree removal
+ * is slow (every child is walked server-side) and that route caps each request
+ * at 60 s. The batch therefore gets its own minutes-scale deadline; the markers
+ * still report per-path progress and the script always exits 0.
+ */
+const DELETE_BATCH_TIMEOUT_MS = 300_000
+
 /** Resolve `promise` or `undefined` after `ms` (never rejects). */
 function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T | undefined> {
   return new Promise<T | undefined>((resolve) => {
@@ -85,6 +103,11 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
       },
     )
   })
+}
+
+/** Whether a rejection is the stream abort (the user pressed ✕), not a failure. */
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
 }
 
 function dirKey(alias: string, dir: string): string {
@@ -297,6 +320,53 @@ function formatUploadLabel(
   if (upload.size <= 0) return `${t('files.uploading')} ${counter} · ${upload.name}`
   const percent = Math.min(100, Math.floor((upload.loaded / upload.size) * 100))
   return `${t('files.uploading')} ${counter} · ${percent}% · ${shortSize(upload.loaded)}/${shortSize(upload.size)} · ${upload.name}`
+}
+
+/**
+ * The delete bar text: how many of the selection are settled, and which path is
+ * on the wire right now.
+ *
+ * A `rm -rf` batch can run for minutes; without the counter and the path the
+ * pane is indistinguishable from a hung one, which is the same 2026-10-20
+ * complaint the upload bar was built for.
+ */
+function formatDeleteLabel(
+  t: (key: string) => string,
+  progress: { done: number; total: number; name: string },
+): string {
+  return t('files.deleting')
+    .replace('{done}', String(progress.done))
+    .replace('{total}', String(progress.total))
+    .replace('{name}', progress.name)
+}
+
+/**
+ * Feed one streamed stdout chunk through a line buffer and hand out every
+ * COMPLETE marker line.
+ *
+ * The stream splits wherever the transport felt like it: a marker can arrive as
+ * `RV_DEL_`, then `OK 3\n` in the next chunk. Only complete lines are parsed,
+ * and the unfinished tail is returned so the next chunk can continue it; the
+ * caller flushes it with a final `'\n'` when the command ends.
+ *
+ * Exported because it is the one place where a cross-chunk parse bug would
+ * silently mis-count deletions; the local probe drives it directly.
+ */
+export function drainDeleteMarkers(
+  buffer: string,
+  text: string,
+  onMarker: (marker: { kind: 'item' | 'ok' | 'fail'; index: number }) => void,
+): string {
+  let pending = buffer + text
+  for (;;) {
+    const newline = pending.indexOf('\n')
+    if (newline < 0) break
+    const line = pending.slice(0, newline)
+    pending = pending.slice(newline + 1)
+    const marker = parseDeleteMarker(line)
+    if (marker !== undefined) onMarker(marker)
+  }
+  return pending
 }
 
 /** How many directory listings stay cached; each one is a whole directory. */
@@ -872,6 +942,12 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     loaded: number
     size: number
   } | undefined>(undefined)
+  /**
+   * Live delete batch. `done`/`total` count the selection, `name` is the path
+   * currently being removed; a multi-minute `rm -rf` used to be a silent,
+   * uncancellable wait with no progress at all.
+   */
+  const [deleteProgress, setDeleteProgress] = useState<{ done: number; total: number; name: string } | undefined>(undefined)
   const dragPaths = useRef<string[]>([])
   /** Directory the pending hidden-input pick uploads into. */
   const uploadInto = useRef<string>('')
@@ -974,6 +1050,8 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
   }, [measureTreeRows])
   /** Abort handle for the batch on the wire (the upload bar's ✕). */
   const uploadAbort = useRef<AbortController | undefined>(undefined)
+  /** Abort handle for the delete batch on the wire (the delete bar's ✕). */
+  const deleteAbort = useRef<AbortController | undefined>(undefined)
   /** True while a remote WRITE batch is in flight (upload/paste/delete serialization). */
   const transferRef = useRef(false)
   /**
@@ -1610,27 +1688,267 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
       okText: t('files.delete'),
     })
     if (!ok) return
-    setBusy(true)
-    const failed: string[] = []
-    /** Entries that really disappeared on the remote — their subtree is pruned. */
-    const removed: string[] = []
+    // Validate what the batch command can quote BEFORE any remote write starts,
+    // and keep the rest for the old per-entry route. A name git can store but the
+    // sh script grammar cannot represent (a control character) used to be
+    // deletable through SFTP; it must not turn the whole selection into an error.
+    const batchable: RemoteFileEntry[] = []
+    const unsupported: RemoteFileEntry[] = []
     for (const entry of entries) {
       try {
-        await api.fileOp.rm(alias, entry.path, entry.isDir)
-        removed.push(entry.path)
-      } catch (error) {
-        failed.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
+        splitBatchRemovePaths([entry.path])
+        batchable.push(entry)
+      } catch {
+        unsupported.push(entry)
       }
     }
-    setBusy(false)
-    // Drop the removed subtrees from `expanded`/`selected`/`listings` BEFORE any
-    // refresh: `store.afterWrite()` bumps the revision, and the root effect
-    // re-lists every expanded directory — the deleted ones would each answer
-    // with a business error and a toast, on every write for the rest of the
-    // session.
+    if (batchable.length === 0 && unsupported.length === 0) return
+    const chunks = batchable.length === 0 ? [] : splitBatchRemovePaths(batchable.map(entry => entry.path))
+    if (chunks.length === 0 && unsupported.length === 0) return
+    const targets = chunks.flat()
+    const total = targets.length + unsupported.length
+    /** The selected rows as they were BEFORE the delete: name, `isDir`, and the git marks all describe that state. */
+    const entryByPath = new Map<string, RemoteFileEntry>()
+    for (const entry of batchable) entryByPath.set(assertRemovablePath(entry.path), entry)
+    const entryFor = (path: string): RemoteFileEntry | undefined => entryByPath.get(assertRemovablePath(path))
+    /** Entries confirmed gone; their subtrees are pruned and their parents refreshed. */
+    const removed: string[] = []
+    /** The same paths normalized, so a covered child is an ancestor walk, not a scan. */
+    const removedSet = new Set<string>()
+    /** Entries whose outcome is known (deleted, or failed with a precise error). */
+    let settled = 0
+    /**
+     * Raw paths already counted in `settled`.
+     *
+     * A parent and a child of it can both be selected: the child's marker is a
+     * FAIL (the parent already took it), so counting only confirmed removals
+     * left `done` short of `total` forever and made a canceled batch overstate
+     * the unfinished count.
+     */
+    const settledPaths = new Set<string>()
+    /** One line per entry that could not be removed, with the precise error. */
+    const failed: string[] = []
+    /** Raw paths behind `failed`, so their parents are re-listed too. */
+    const failedPaths: string[] = []
+    let cancelled = false
+
+    /** A path is gone when it was removed itself or lives under a removed one. */
+    const gone = (path: string): boolean => {
+      let cursor = assertRemovablePath(path)
+      for (;;) {
+        if (removedSet.has(cursor)) return true
+        const cut = cursor.lastIndexOf('/')
+        if (cut <= 0) return false
+        cursor = cursor.slice(0, cut)
+      }
+    }
+
+    /**
+     * Covered-by-a-removed-ancestor check for paths the batch grammar cannot
+     * normalize (a control character in the name). Plain string prefixes; no
+     * validation, because validating is exactly what rejects these names.
+     */
+    const coveredRaw = (path: string): boolean =>
+      removed.some(root => path === root || path.startsWith(`${root}/`))
+
+    const showProgress = (name: string): void => {
+      setDeleteProgress({ done: settled, total, name })
+    }
+
+    const countSettled = (path: string, name: string): void => {
+      if (settledPaths.has(path)) return
+      settledPaths.add(path)
+      settled += 1
+      showProgress(name)
+    }
+
+    /**
+     * Record one confirmed removal.
+     *
+     * A parent and a child of it can both be selected: the batch removes the
+     * parent first, then the child's `rm` finds nothing left — its FAIL marker
+     * (or its missing marker) counts as removed, not as an error.
+     */
+    const noteRemoved = (entry: RemoteFileEntry): void => {
+      const path = assertRemovablePath(entry.path)
+      countSettled(path, entry.name)
+      if (gone(path)) return
+      removed.push(entry.path)
+      removedSet.add(path)
+    }
+
+    /**
+     * Record a removal of a path the batch grammar cannot quote.
+     *
+     * Those entries never enter `removedSet` (the ancestor walk assumes a
+     * normalized path), so the simple duplicate check is enough.
+     */
+    const noteRemovedRaw = (entry: RemoteFileEntry): void => {
+      countSettled(entry.path, entry.name)
+      if (removed.includes(entry.path)) return
+      removed.push(entry.path)
+    }
+
+    const noteFailed = (entry: RemoteFileEntry, message: string): void => {
+      countSettled(entry.path, entry.name)
+      failed.push(`${entry.name}: ${message}`)
+      failedPaths.push(entry.path)
+    }
+
+    /** Apply one streamed marker to the batch bookkeeping. */
+    const applyMarker = (path: string, kind: 'item' | 'ok' | 'fail'): void => {
+      if (kind === 'item') {
+        const entry = entryFor(path)
+        showProgress(entry?.name ?? baseName(path))
+        return
+      }
+      // FAIL stays unconfirmed: the per-entry fallback below either removes the
+      // path (recording it as removed) or reports its exact error. A path a
+      // removed parent already covers is skipped there, so it is never a failure.
+      if (kind !== 'ok') return
+      const entry = entryFor(path)
+      if (entry !== undefined) noteRemoved(entry)
+    }
+
+    /**
+     * Remove one batch through the streamed exec route.
+     *
+     * The script prints `RV_DEL_ITEM`/`RV_DEL_OK`/`RV_DEL_FAIL <index>` lines;
+     * stdout is fed through a line buffer because one marker can arrive split
+     * across two stream chunks. A path the batch did not settle (a FAIL marker,
+     * or a whole batch that failed on the wire) is retried through the old
+     * per-entry route: the FALLBACK answers with that path's exact error, and a
+     * success there is a real removal.
+     */
+    const runBatch = async (chunk: string[]): Promise<void> => {
+      const pathByIndex = new Map<number, string>()
+      chunk.forEach((path, index) => pathByIndex.set(index, path))
+      let pending = ''
+      const feed = (text: string): void => {
+        pending = drainDeleteMarkers(pending, text, (marker) => {
+          const path = pathByIndex.get(marker.index)
+          if (path !== undefined) applyMarker(path, marker.kind)
+        })
+      }
+      try {
+        await api.execStream(alias, batchRemoveScript(chunk), DELETE_BATCH_TIMEOUT_MS, {
+          signal: controller.signal,
+          onData: (stream, text) => {
+            // stderr carries the per-path `rm` diagnostics; markers only ride stdout.
+            if (stream === 'out') feed(text)
+          },
+        })
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error)) {
+          cancelled = true
+          return
+        }
+        // The whole batch failed on the wire (link drop, timeout, route error):
+        // every path is unconfirmed, so the FALLBACK below retries them all.
+      }
+      // A final marker without its trailing newline still has to be seen.
+      if (pending !== '') feed('\n')
+      const retry: RemoteFileEntry[] = []
+      for (const path of chunk) {
+        if (gone(path)) {
+          countSettled(path, entryFor(path)?.name ?? baseName(path))
+          continue
+        }
+        const entry = entryFor(path)
+        if (entry !== undefined) retry.push(entry)
+      }
+      for (const entry of retry) {
+        if (controller.signal.aborted) {
+          cancelled = true
+          return
+        }
+        // A parent retried just before this entry may have taken it with it.
+        if (gone(entry.path)) {
+          countSettled(entry.path, entry.name)
+          continue
+        }
+        try {
+          await api.fileOp.rm(alias, entry.path, entry.isDir)
+          noteRemoved(entry)
+        } catch (error) {
+          noteFailed(entry, error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
+
+    setBusy(true)
+    // Own the single write slot for the whole batch: an upload/paste started
+    // mid-delete would interleave writes with the removals.
+    transferRef.current = true
+    const controller = new AbortController()
+    deleteAbort.current = controller
+    showProgress(baseName(targets[0] ?? ''))
+    try {
+      for (const chunk of chunks) {
+        if (controller.signal.aborted) {
+          cancelled = true
+          break
+        }
+        await runBatch(chunk)
+        if (cancelled) break
+      }
+      // Paths the batch grammar cannot carry (a control character in the name)
+      // keep the old per-entry route instead of failing the whole selection.
+      for (const entry of unsupported) {
+        if (controller.signal.aborted) {
+          cancelled = true
+          break
+        }
+        if (coveredRaw(entry.path)) {
+          countSettled(entry.path, entry.name)
+          continue
+        }
+        showProgress(entry.name)
+        try {
+          await api.fileOp.rm(alias, entry.path, entry.isDir)
+          noteRemovedRaw(entry)
+        } catch (error) {
+          noteFailed(entry, error instanceof Error ? error.message : String(error))
+        }
+      }
+    } catch (error) {
+      // Anything the batch runner did not classify still ends the delete as a
+      // reported failure instead of an unhandled rejection.
+      failed.push(error instanceof Error ? error.message : String(error))
+    } finally {
+      // Clear the bar before any refresh: the tail below must not look stuck.
+      deleteAbort.current = undefined
+      setDeleteProgress(undefined)
+      setBusy(false)
+      transferRef.current = false
+    }
+    // Drop the removed subtrees from `expanded`/`selected`/`listings` BEFORE the
+    // refresh, so no later root re-list asks for a directory that no longer
+    // exists (each such request is a business error and a toast).
     forgetPaths(removed)
-    await refreshDirs([...new Set(entries.map(entry => entry.path.split('/').slice(0, -1).join('/') || '/'))])
-    await store.afterWrite()
+    // Only the directories a removal actually touched are re-listed — the global
+    // write tail (git status + revision bump re-listing every expanded directory)
+    // is deliberately not run for a delete.
+    const parents = [...new Set(
+      [...removed, ...failedPaths].map(path => path.split('/').slice(0, -1).join('/') || '/'),
+    )]
+    await Promise.all(parents.map(dir => loadDir(dir, true)))
+    if (removed.length > 0) {
+      // Tell the quick-open index cache that paths on the remote changed.
+      noteRemoteWrite()
+    }
+    // Deleting only ignored paths leaves git status identical, so the read
+    // (seconds on a big tree) is skipped; otherwise it is started in the
+    // background and the toast does not wait for it.
+    const allIgnored = removed.every(path => ignoredByTree(path))
+    if (!allIgnored) void refreshGit().catch(() => undefined)
+    if (cancelled) {
+      const copy = t('files.deleteCancelled')
+        .replace('{removed}', String(removed.length))
+        .replace('{left}', String(Math.max(0, total - settled)))
+      toast(failed.length === 0 ? copy : `${copy}\n${failed.join('\n')}`, failed.length > 0)
+      return
+    }
     if (failed.length > 0) toast(failed.join('\n'), true)
     else toast(t('files.deleted'))
   }
@@ -2346,6 +2664,27 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
     return entry.isDir ? marks.ignoredDirs.has(rel) : marks.ignored.has(rel)
   }, [repoRoot, marks])
 
+  /**
+   * Whether deleting `path` can leave `git status` byte-identical.
+   *
+   * `git status --ignored` reports an ignored DIRECTORY once, unexpanded, so a
+   * file inside it is not in `marks.ignored` — but deleting that file is still
+   * invisible to git. Walk the ancestors through `ignoredDirs` so an
+   * ignored-only batch really skips the (potentially minutes-long) git read.
+   */
+  const ignoredByTree = useCallback((path: string): boolean => {
+    const rel = repoRelative(repoRoot, path)
+    if (rel === '') return false
+    if (marks.ignored.has(rel) || marks.ignoredDirs.has(rel)) return true
+    const segments = rel.split('/')
+    let acc = ''
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      acc = acc === '' ? (segments[i] as string) : `${acc}/${segments[i]}`
+      if (marks.ignoredDirs.has(acc)) return true
+    }
+    return false
+  }, [repoRoot, marks])
+
   /** The right-click menu's `contextmenu` fallback (touch long-press only). */
   const onRowContextMenu = (e: React.MouseEvent, entry: RemoteFileEntry): void => {
     e.preventDefault()
@@ -2825,6 +3164,22 @@ export function RemoteExplorer(props: { showHidden: boolean; onToggleHidden: () 
             className="rvs-hbtn"
             title={t('files.uploadAbort')}
             onClick={() => uploadAbort.current?.abort()}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {deleteProgress !== undefined && (
+        <div className="rvs-upload-bar">
+          <MiniSpinner />
+          <span className="rvs-upload-text" title={deleteProgress.name}>
+            {formatDeleteLabel(t, deleteProgress)}
+          </span>
+          <button
+            type="button"
+            className="rvs-hbtn"
+            title={t('files.deleteCancel')}
+            onClick={() => deleteAbort.current?.abort()}
           >
             ✕
           </button>

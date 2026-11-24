@@ -78,6 +78,22 @@ export declare function rekeyPaths(set: Set<string>, from: string, to: string): 
 export declare function withoutListingPaths(listings: Record<string, RemoteFileEntry[]>, alias: string, removed: readonly string[]): Record<string, RemoteFileEntry[]>;
 /** Re-key cached listings after a rename/move (memo keys are `alias:path`). */
 export declare function rekeyListings(listings: Record<string, RemoteFileEntry[]>, alias: string, from: string, to: string): Record<string, RemoteFileEntry[]>;
+/**
+ * Feed one streamed stdout chunk through a line buffer and hand out every
+ * COMPLETE marker line.
+ *
+ * The stream splits wherever the transport felt like it: a marker can arrive as
+ * `RV_DEL_`, then `OK 3\n` in the next chunk. Only complete lines are parsed,
+ * and the unfinished tail is returned so the next chunk can continue it; the
+ * caller flushes it with a final `'\n'` when the command ends.
+ *
+ * Exported because it is the one place where a cross-chunk parse bug would
+ * silently mis-count deletions; the local probe drives it directly.
+ */
+export declare function drainDeleteMarkers(buffer: string, text: string, onMarker: (marker: {
+    kind: 'item' | 'ok' | 'fail';
+    index: number;
+}) => void): string;
 /** The half-open range of flat rows the tree paints, plus the spacers around it. */
 export interface TreeWindow {
     /** First painted row index into the flat row list. */
