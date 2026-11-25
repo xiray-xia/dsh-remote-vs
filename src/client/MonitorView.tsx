@@ -631,15 +631,15 @@ export function MonitorView(props: {
         {paused && <div className="rvs-banner info">{t('monitor.paused')}</div>}
         {single !== undefined && renderDetail(single)}
         {single === undefined && aliases.length > 1 && renderAll(aliases)}
+        <ProcessesSection
+          t={t}
+          hosts={props.hosts}
+          aliases={aliases}
+          visible={props.visible}
+          paused={paused}
+          intervalMs={intervalMs}
+        />
       </div>
-      <ProcessesSection
-        t={t}
-        hosts={props.hosts}
-        aliases={aliases}
-        visible={props.visible}
-        paused={paused}
-        intervalMs={intervalMs}
-      />
     </div>
   )
 }

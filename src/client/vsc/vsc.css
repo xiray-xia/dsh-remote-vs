@@ -5546,7 +5546,7 @@ body[data-ds-dark-theme] .rvs-doctor {
 /* === inline blame + file history ========================================= */
 
 .rvs-hbtn-on {
-  background: var(--rvs-bg-raised);
+  background: var(--rvs-layer3);
   color: var(--rvs-accent);
 }
 
@@ -5614,7 +5614,9 @@ body[data-ds-dark-theme] .rvs-doctor {
   overflow: hidden;
   border: 1px solid var(--rvs-border);
   border-radius: 6px;
-  background: var(--rvs-bg-raised);
+  /* Must be OPAQUE: this popover floats over the code, and a translucent (or
+     undefined) token made the history rows unreadable in the screenshot. */
+  background: var(--rvs-code-bg, var(--rvs-overlay, #24262e));
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   color: var(--rvs-fg);
 }
