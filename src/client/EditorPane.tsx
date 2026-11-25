@@ -33,7 +33,7 @@ import { DiffView } from './scm/DiffView.tsx'
 import { loadBlame, loadFileHistory } from './scm/actions.ts'
 import { isCommittedBlame, planBlameWindow, type BlameLine, type FileHistoryCommit } from './blame-model.ts'
 import { Btn } from './ui.tsx'
-import { renderMarkdown } from './vsc/markdown.tsx'
+import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { langLabel, langFromPath } from './vsc/tokenize.ts'
 import { FOREIGN_TARGET, installSaveShortcut, isModalLayerOpen } from './vsc/save-shortcut.ts'
 import { OutlinePanel } from './OutlinePanel.tsx'
@@ -42,6 +42,7 @@ import { Breadcrumb } from './vsc/breadcrumb.tsx'
 import { ImagePreview } from './vsc/image-preview.tsx'
 import { hasTextSource, isBytePreview, previewKindLabel, previewKindOf, type PreviewKind } from './vsc/preview-model.ts'
 import { BytePreview, SvgPreview, TablePreview } from './vsc/preview-document.tsx'
+import { isDarkScheme } from './theme.ts'
 import {
   editorSettingsSnapshot,
   stepFontSize,
@@ -699,25 +700,59 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const previewVisible = activeTab?.preview === true
   const previewKind: PreviewKind = activeTab?.kind === 'file' ? previewKindOf(activeTab.fullPath) : 'text'
 
-  const htmlDoc = useMemo(() => (previewIsHtml ? (previewText ?? '') : ''), [previewIsHtml, previewText])
+  const htmlDoc = useMemo(() => {
+    if (!previewIsHtml) return ''
+    const dark = isDarkScheme()
+    const csp = [
+      "default-src 'none'",
+      "style-src 'unsafe-inline'",
+      'img-src data: blob:',
+      'font-src data:',
+      'media-src data: blob:',
+      "form-action 'none'",
+      "base-uri 'none'",
+    ].join('; ')
+    return [
+      '<!doctype html><meta charset="utf-8">',
+      `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
+      '<style>',
+      `:root{color-scheme:${dark ? 'dark' : 'light'}}`,
+      `html,body{background:${dark ? '#1e1e1e' : '#ffffff'};color:${dark ? '#d4d4d4' : '#1f1f1f'}}`,
+      'body{margin:14px;font:14px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-wrap:break-word}',
+      'img,video,canvas{max-width:100%;height:auto}',
+      'table{border-collapse:collapse}',
+      `td,th{border:1px solid ${dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.12)'};padding:4px 8px}`,
+      'pre{overflow:auto}',
+      '</style>',
+      previewText ?? '',
+    ].join('')
+  }, [previewIsHtml, previewText])
+
+  /** Stable labels identity: the platform renderer keys its cache on it. */
+  const markdownLabels = useMemo(() => ({
+    code: {
+      copyLabel: t('preview.copyCode'),
+      copiedLabel: t('preview.copied'),
+    },
+    footnotes: t('preview.footnotes'),
+  }), [t])
 
   /**
-   * The parsed Markdown preview.
-   *
-   * It used to be `renderMarkdown(activeTab.text)` inline in the JSX, which
-   * re-parsed the whole document into a fresh element tree on EVERY store
-   * publish: this component subscribes to the store, so opening another file,
-   * saving, a git refresh or switching a panel all paid for a parse of text
-   * that had not changed. `renderMarkdown` is a pure function of the text, so
-   * the memo key is the TEXT (a stable identity while the bytes are) plus the
-   * two mode flags — see `previewText` above for why the tab object is the wrong
-   * key. The guards keep the parse from happening at all for a file that is
-   * being read in source mode.
+   * Markdown preview through the host's platform renderer (the same one the
+   * chat uses): GFM tables, code highlighting and footnotes come for free and
+   * raw HTML in a remote document is not inserted into the app DOM.
    */
   const markdownPreview = useMemo(() => {
     if (!previewIsMarkdown || !previewVisible || previewText === undefined) return null
-    return renderMarkdown(previewText)
-  }, [previewIsMarkdown, previewVisible, previewText])
+    return (
+      <div className="rvs-preview-scroll">
+        {activeTab?.truncated === true && <div className="rvs-preview-banner">{t('preview.truncated')}</div>}
+        <div className="rvs-preview-markdown rvs-markdown" data-preview-path={activeTab?.fullPath ?? ''}>
+          <MarkdownText text={previewText} labels={markdownLabels} variant="body" />
+        </div>
+      </div>
+    )
+  }, [previewIsMarkdown, previewVisible, previewText, markdownLabels, activeTab?.fullPath, activeTab?.truncated, t])
 
   /**
    * The status bar's indent hint, derived from the loaded text.
@@ -1568,6 +1603,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   <BytePreview
                     alias={alias}
                     path={activeTab.fullPath}
+                    sessionId={chat.sessionId}
                     kind={previewKind}
                     revision={activeTab.reloadNonce ?? 0}
                     t={t}
@@ -1598,7 +1634,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 )}
                 {!activeTab.image && !activeTab.binary && activeTab.markdown && activeTab.preview && markdownPreview}
                 {!activeTab.image && !activeTab.binary && activeTab.html && activeTab.preview && (
-                  <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="allow-same-origin" srcDoc={htmlDoc} />
+                  <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="" srcDoc={htmlDoc} />
                 )}
                 {/* The editor host stays MOUNTED and is hidden with CSS in
                     preview mode. Unmounting it (the old behaviour) rebuilt the

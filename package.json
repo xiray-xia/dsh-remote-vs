@@ -150,6 +150,7 @@
     "@deepseek-ai/dsh-api-remotes": "0.2.2-rc.5",
     "@deepseek-ai/dsh-bash-local": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-locale": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.2-rc.5",

@@ -26,6 +26,9 @@ export declare function fetchRemoteBytes(alias: string, path: string, signal?: A
 export declare function BytePreview(props: {
     alias: string;
     path: string;
+    /** DSH session; lets the host workspaceFiles/officeKit remotes resolve the
+     *  same remote workspace before the plugin's own download fallback. */
+    sessionId?: string;
     kind: 'pdf' | 'office' | 'media';
     revision: number;
     t: (key: string) => string;

@@ -32,6 +32,7 @@ import { SettingsHostsSection, SettingsWorkspacesSection } from './SettingsHosts
 import { openFloatingEditor, setEditorSurface } from './store.tsx'
 import { detectLang, makeT } from './i18n.ts'
 import { DialogHost, setIconService, toast, type IconServiceLike } from './vsc/kit.tsx'
+import { installPreviewServices } from './vsc/preview-services.ts'
 import { setHostNoticeEmitter } from './notices.ts'
 
 /** Services required before mounting (slots/uiWorkspace are core web services). */
@@ -49,6 +50,9 @@ function RemoteIcon({ size }: { size?: number }): React.ReactNode {
 
 /** Client plugin body. */
 export function apply(ctx: Context): void {
+  // Document previews soft-read the host's workspaceFiles/officeKit remotes;
+  // missing services degrade to the plugin's own /download path.
+  ctx.effect(() => installPreviewServices(ctx), 'dsh-remote-vs: preview host services')
   // Explorer surface, exactly one of two: the better-sidebar tab when that
   // plugin is installed, else a native right-Sidebar page (same root, guide
   // entry). No load-order edge exists (client inject metadata is
