@@ -51,7 +51,7 @@ export function extensionOf(path: string): string {
 export function previewKindOf(path: string): PreviewKind {
   const ext = extensionOf(path)
   if (IMAGE_EXTENSIONS.has(ext)) return 'image'
-  return KIND_BY_EXTENSION[ext] ?? 'text'
+  return Object.hasOwn(KIND_BY_EXTENSION, ext) ? KIND_BY_EXTENSION[ext] as PreviewKind : 'text'
 }
 
 export function isBytePreview(kind: PreviewKind): kind is 'pdf' | 'office' | 'media' {

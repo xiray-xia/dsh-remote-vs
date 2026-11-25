@@ -1661,11 +1661,18 @@ body:not([data-ds-dark-theme]) .rvs-fi {
 .rvs-markdown hr { border: none; border-top: 1px solid var(--rvs-border); margin: 12px 0; }
 
 .rvs-html-frame {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   width: 100%;
   border: none;
-  background: #fff;
+  background: var(--rvs-code-bg);
+}
+
+.rvs-preview-frame-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ------------------------------------------------------------------ diff */
@@ -5638,6 +5645,13 @@ body[data-ds-dark-theme] .rvs-doctor {
   to { transform: rotate(360deg); }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .rvs-preview-spinner {
+    animation: none;
+    border-top-color: var(--rvs-border2);
+  }
+}
+
 .rvs-preview-banner {
   padding: 4px 8px;
   border-bottom: 1px solid var(--rvs-border);
@@ -5673,7 +5687,8 @@ body[data-ds-dark-theme] .rvs-doctor {
   font-size: 10.5px;
 }
 
-.rvs-preview-document-hint {
+.rvs-preview-document-hint,
+.rvs-preview-media-hint {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5720,6 +5735,10 @@ body[data-ds-dark-theme] .rvs-doctor {
 
 .rvs-preview-markdown {
   min-width: 0;
+  max-width: 900px;
+  margin: 0 auto;
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 .rvs-preview-svg {
@@ -5769,9 +5788,18 @@ body[data-ds-dark-theme] .rvs-doctor {
 }
 
 .rvs-preview-table .rvs-preview-rownum {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 44px;
   color: var(--rvs-fg3);
+  background: var(--rvs-code-bg);
   text-align: right;
   user-select: none;
+}
+
+.rvs-preview-table thead .rvs-preview-rownum {
+  z-index: 3;
 }
 
 /* === inline blame + file history ========================================= */

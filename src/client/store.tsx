@@ -3228,6 +3228,13 @@ export async function reloadTab(id: string): Promise<void> {
   const tab = state.tabs.find(item => item.id === id)
   if (workspace === undefined || tab === undefined) return
   if (tab.kind === 'file') {
+    // Byte previews have no text buffer: fs.read would fetch a capped base64
+    // window and turn the tab into "binary", hiding the preview. A revision
+    // bump is the whole reload for them.
+    if (isBytePreview(previewKindOf(tab.fullPath))) {
+      patchTab(id, { loading: false, error: undefined, reloadNonce: (tab.reloadNonce ?? 0) + 1 })
+      return
+    }
     try {
       const read = await withDeadline(api.fileOp.read(workspace.alias, tab.fullPath), fileReadDeadlineMs(), t('editor.readTimeout'))
       patchTab(id, {

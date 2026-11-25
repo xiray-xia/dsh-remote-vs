@@ -30,6 +30,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react'
+import { isBytePreview, previewKindOf } from './preview-model.ts'
 import { createPortal } from 'react-dom'
 import { detectLang, makeT } from '../i18n.ts'
 import { FileTypeIcon, FolderGlyph } from './file-icons.tsx'
@@ -405,23 +406,14 @@ export function isImageFile(path: string): boolean {
   return IMAGE_EXTS.has(extOf(path))
 }
 
-export function isMarkdownFile(path: string): boolean {
-  const ext = extOf(path)
-  return ext === 'md' || ext === 'markdown'
-}
-
-export function isHtmlFile(path: string): boolean {
-  const ext = extOf(path)
-  return ext === 'html' || ext === 'htm'
-}
-
 export function mimeFor(path: string): string {
   return MIME[extOf(path)] ?? 'application/octet-stream'
 }
 
 /** True for a file that always opens as a preview, never as a diff. */
 export function isPreviewOnlyFile(path: string): boolean {
-  return isImageFile(path) || extOf(path) === 'pdf'
+  const kind = previewKindOf(path)
+  return kind === 'image' || isBytePreview(kind)
 }
 
 /**

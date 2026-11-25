@@ -8,11 +8,11 @@
  * present on the REMOTE host. When that engine is missing the notice says so;
  * the plugin never claims a corrupt file.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, RemoteApiError } from '../api.ts'
 import { downloadUrl } from '../download.ts'
 import { shQuote } from '../../git-format.ts'
-import { DEFAULT_TABLE_LIMITS, extensionOf, mediaTypeOf, parseDelimited, tableDelimiterOf, type PreviewKind } from './preview-model.ts'
+import { DEFAULT_TABLE_LIMITS, extensionOf, mediaTypeOf, parseDelimited, tableDelimiterOf } from './preview-model.ts'
 import { readWorkspaceBytes, renderOfficePdf, type PreviewFailureReason } from './preview-services.ts'
 
 /** Never assemble a larger preview body than this in the tab. */
@@ -143,17 +143,12 @@ export function BytePreview(props: {
   const [state, setState] = useState<{ status: 'loading' } | { status: 'ready'; url: string; size: number } | { status: 'failed'; error: PreviewError }>({ status: 'loading' })
   const [elementFailed, setElementFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
-  const alive = useRef(true)
-
-  useEffect(() => {
-    alive.current = true
-    return () => { alive.current = false }
-  }, [])
 
   useEffect(() => { setElementFailed(false) }, [props.path, props.kind])
 
   useEffect(() => {
     const controller = new AbortController()
+    let alive = true
     let url: string | undefined
     let hostReason: PreviewFailureReason = 'failed'
     setState({ status: 'loading' })
@@ -170,24 +165,25 @@ export function BytePreview(props: {
       // plugin keeps its own /download path; only the fallback can succeed.
       return download()
     }).then((bytes) => {
-      if (!alive.current) return
+      if (!alive) return
       const mime = props.kind === 'media'
         ? mediaTypeOf(props.path)?.mime ?? 'application/octet-stream'
         : 'application/pdf'
       url = URL.createObjectURL(new Blob([bytes], { type: mime }))
       setState({ status: 'ready', url, size: bytes.byteLength })
     }).catch((error: unknown) => {
-      if (!alive.current) return
+      if (!alive) return
       const reason = typeof error === 'object' && error !== null && 'previewKind' in error
         ? (error as { previewKind: PreviewError['kind'] }).previewKind
         : hostReason
       setState({ status: 'failed', error: { kind: reason, message: errorMessage(error) } })
     })
     return () => {
+      alive = false
       controller.abort()
       if (url !== undefined) URL.revokeObjectURL(url)
     }
-  }, [props.alias, props.path, props.kind, props.revision, attempt])
+  }, [props.alias, props.path, props.kind, props.revision, attempt, props.sessionId])
 
   if (state.status === 'loading') {
     return (
@@ -211,7 +207,7 @@ export function BytePreview(props: {
     const hint = state.error.kind === 'too-large'
       ? props.t('preview.tooLargeHint')
       : state.error.kind === 'unavailable'
-        ? props.t('preview.unavailableHint')
+        ? props.t(props.kind === 'office' ? 'preview.officeUnavailableHint' : 'preview.unavailableHint')
         : state.error.kind === 'not-found'
           ? props.t('preview.notFoundHint')
           : state.error.kind === 'remote'
@@ -231,7 +227,7 @@ export function BytePreview(props: {
           : <audio className="rvs-preview-media-el" src={state.url} controls onError={() => { setElementFailed(true) }} />}
         <div className="rvs-preview-media-meta">
           {sizeText(state.size)}
-          <span className="rvs-preview-document-hint">{props.path}</span>
+          <span className="rvs-preview-media-hint">{props.path}</span>
         </div>
       </div>
     )
@@ -303,7 +299,7 @@ export function TablePreview(props: { path: string; text: string; truncated: boo
   }
   return (
     <div className="rvs-preview-table-wrap">
-      {notes.map(note => <div className="rvs-preview-banner" key={note}>{note}</div>)}
+      {notes.map((note, index) => <div className="rvs-preview-banner" key={`${String(index)}:${note}`}>{note}</div>)}
       <div className="rvs-preview-table-scroll">
         <table className="rvs-preview-table">
           <thead>
@@ -324,8 +320,4 @@ export function TablePreview(props: { path: string; text: string; truncated: boo
       </div>
     </div>
   )
-}
-
-export function previewLabelFor(kind: PreviewKind): string | undefined {
-  return kind === 'text' ? undefined : kind
 }

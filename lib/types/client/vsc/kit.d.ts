@@ -124,8 +124,6 @@ export declare function ExplorerFolderIcon(props: {
     className?: string;
 }): ReactNode;
 export declare function isImageFile(path: string): boolean;
-export declare function isMarkdownFile(path: string): boolean;
-export declare function isHtmlFile(path: string): boolean;
 export declare function mimeFor(path: string): string;
 /** True for a file that always opens as a preview, never as a diff. */
 export declare function isPreviewOnlyFile(path: string): boolean;

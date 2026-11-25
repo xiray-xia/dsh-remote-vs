@@ -42,7 +42,7 @@ import { Breadcrumb } from './vsc/breadcrumb.tsx'
 import { ImagePreview } from './vsc/image-preview.tsx'
 import { hasTextSource, isBytePreview, previewKindLabel, previewKindOf, type PreviewKind } from './vsc/preview-model.ts'
 import { BytePreview, SvgPreview, TablePreview } from './vsc/preview-document.tsx'
-import { isDarkScheme } from './theme.ts'
+import { isDarkScheme, subscribeColorScheme } from './theme.ts'
 import {
   editorSettingsSnapshot,
   stepFontSize,
@@ -701,9 +701,11 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const previewKind: PreviewKind = activeTab?.kind === 'file' ? previewKindOf(activeTab.fullPath) : 'text'
   const bytePreview = isBytePreview(previewKind)
 
+  const darkScheme = useSyncExternalStore(subscribeColorScheme, isDarkScheme)
+
   const htmlDoc = useMemo(() => {
     if (!previewIsHtml) return ''
-    const dark = isDarkScheme()
+    const dark = darkScheme
     const csp = [
       "default-src 'none'",
       "style-src 'unsafe-inline'",
@@ -727,7 +729,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
       '</style>',
       previewText ?? '',
     ].join('')
-  }, [previewIsHtml, previewText])
+  }, [previewIsHtml, previewText, darkScheme])
 
   /** Stable labels identity: the platform renderer keys its cache on it. */
   const markdownLabels = useMemo(() => ({
@@ -1014,7 +1016,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
       const tab = saveShortcutTabRef.current
       // Working-tree diffs are `DiffView`'s own onSave contract; previews have no
       // buffer at all. `saveActive` would misreport both.
-      if (tab === undefined || tab.kind !== 'file' || tab.image || tab.binary) return undefined
+      if (tab === undefined || tab.kind !== 'file' || tab.image || tab.binary || isBytePreview(previewKindOf(tab.fullPath))) return undefined
       return () => { void saveActiveRef.current() }
     })
   }, [props.visible])
@@ -1302,7 +1304,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       both the class and the label, while the project's own
                       review checklist forbids nested ternaries. One lookup per
                       concern instead. */}
-                  {!bytePreview && (
+                  {!bytePreview && !activeTab.image && (
                     <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
                       {t(tabStatusKey(activeTab))}
                     </span>
@@ -1608,7 +1610,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   <BytePreview
                     alias={alias}
                     path={activeTab.fullPath}
-                    sessionId={chat.sessionId}
+                    sessionId={chatEnabled ? chat.sessionId : undefined}
                     kind={previewKind}
                     revision={activeTab.reloadNonce ?? 0}
                     t={t}
@@ -1639,7 +1641,10 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 )}
                 {!activeTab.image && !activeTab.binary && activeTab.markdown && activeTab.preview && markdownPreview}
                 {!activeTab.image && !activeTab.binary && activeTab.html && activeTab.preview && (
-                  <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="" srcDoc={htmlDoc} />
+                  <div className="rvs-preview-frame-wrap">
+                    {activeTab.truncated && <div className="rvs-preview-banner">{t('preview.truncated')}</div>}
+                    <iframe className="rvs-html-frame" title={activeTab.rel} sandbox="" srcDoc={htmlDoc} />
+                  </div>
                 )}
                 {/* The editor host stays MOUNTED and is hidden with CSS in
                     preview mode. Unmounting it (the old behaviour) rebuilt the

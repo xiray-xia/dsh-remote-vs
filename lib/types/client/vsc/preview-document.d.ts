@@ -9,7 +9,6 @@
  * the plugin never claims a corrupt file.
  */
 import { type ReactNode } from 'react';
-import { type PreviewKind } from './preview-model.ts';
 /** Never assemble a larger preview body than this in the tab. */
 export declare const MAX_PREVIEW_BYTES: number;
 export declare function officeExtensionOf(path: string): string | undefined;
@@ -45,4 +44,3 @@ export declare function TablePreview(props: {
     truncated: boolean;
     t: (key: string) => string;
 }): ReactNode;
-export declare function previewLabelFor(kind: PreviewKind): string | undefined;
