@@ -3,7 +3,7 @@
 `dsh-remote-vs` 自身以 MIT 许可发布（见 [LICENSE](./LICENSE)）。本文件列出**随发行包分发**或**由本包声明依赖**的
 第三方组件、版权人与许可证，并说明许可证全文的获取位置。
 
-口径（2026-11-23，插件 `0.25.0`；按 `package.json`、`pnpm-lock.yaml` 与 `node_modules` 实际版本核对）：
+口径（2026-11-25，插件 `0.27.0`；按 `package.json`、`pnpm-lock.yaml` 与 `node_modules` 实际版本核对）：
 
 - **内联** = 该包的代码被构建进本包产物。宿主半（`lib/index.js`、`lib/p2-*.js`）按 `tsdown.config.ts` 的
   `noExternal: ['ssh2']` 打包（`cpu-features` 与 `sshcrypto.node` 保持 external，纯 JS 路径才是实际发布形态）；
@@ -47,11 +47,16 @@
 | `@deepseek-ai/dsh-fs-ssh` | 0.2.2-rc.5（精确 pin） | MIT（DSH 项目） | 见 npm 包内 `LICENSE` |
 | `@deepseek-ai/schemastery` | 3.19.0（精确 pin） | MIT（DSH 项目） | 见 npm 包内 `LICENSE` |
 
-## 4. 由宿主提供的 peer 依赖（不随本包分发）
+## 4. 由宿主提供的平台依赖（不随本包分发）
 
 `react`、`react-dom`（MIT，`Copyright (c) Facebook, Inc. and its affiliates.`）与其余 `@deepseek-ai/*`
 （`cordis`、`dsh-*`；DSH 以 MIT 发布）由 DSH 宿主提供，本包只声明 peer、不打包其代码；§3 里的三个
 `@deepseek-ai/*` 是本包的**运行期依赖**（非 peer），由 npm 随包安装、同样不内联。
+
+`@deepseek-ai/dsh-client-ui-primitives`（`0.2.2-rc.5`，MIT，`Copyright (c) 2026 DeepSeek`）是
+**客户端平台模块表提供的组件**（Markdown 预览使用其 `MarkdownText`）：本包只在 `devDependencies`
+声明它以便类型检查/构建，客户端构建按 external 解析，不内联、也不随本包安装；运行时由 DSH web shell
+的模块表提供。
 
 `vendor/` 下的 helper 种子由 DeepSeek Harness 源码（MIT）按 `dsh-v0.2.2-rc.4` tag 用官方脚本构建，并内嵌
 Node.js 运行时（MIT）；构建流程与两处偏离见 README「Helper 自编译」。
