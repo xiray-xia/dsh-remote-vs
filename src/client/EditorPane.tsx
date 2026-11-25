@@ -40,6 +40,8 @@ import { OutlinePanel } from './OutlinePanel.tsx'
 import type { OutlineEntry } from './outline-model.ts'
 import { Breadcrumb } from './vsc/breadcrumb.tsx'
 import { ImagePreview } from './vsc/image-preview.tsx'
+import { hasTextSource, isBytePreview, previewKindLabel, previewKindOf, type PreviewKind } from './vsc/preview-model.ts'
+import { BytePreview, SvgPreview, TablePreview } from './vsc/preview-document.tsx'
 import {
   editorSettingsSnapshot,
   stepFontSize,
@@ -79,7 +81,7 @@ const CONFLICT_DIFF_HUNKS = 20
 function outlineAvailable(tab: EditorTab | undefined): tab is EditorTab {
   if (tab === undefined || tab.kind !== 'file') return false
   if (tab.image || tab.binary || tab.loading || tab.error !== undefined) return false
-  return !(tab.preview && (tab.markdown || tab.html))
+  return !(tab.preview && hasTextSource(previewKindOf(tab.fullPath)))
 }
 
 const BLAME_PREF_KEY = 'dsh-remote-vs.editor.blame'
@@ -482,7 +484,8 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   useEffect(() => {
     const tab = activeTab
     if (
-      !blameOn || tab === undefined || tab.kind !== 'file' || tab.loading || tab.dirty || tab.binary || tab.truncated
+      !blameOn || tab === undefined || tab.kind !== 'file' || tab.loading || tab.dirty || tab.binary || tab.truncated || tab.preview
+      || isBytePreview(previewKindOf(tab.fullPath))
       || alias === '' || store.repoRoot === undefined || repoRel === '' || blameViewport === undefined
     ) {
       setBlameRows(EMPTY_BLAME)
@@ -694,6 +697,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const previewIsHtml = activeTab?.html === true
   const previewIsMarkdown = activeTab?.markdown === true
   const previewVisible = activeTab?.preview === true
+  const previewKind: PreviewKind = activeTab?.kind === 'file' ? previewKindOf(activeTab.fullPath) : 'text'
 
   const htmlDoc = useMemo(() => (previewIsHtml ? (previewText ?? '') : ''), [previewIsHtml, previewText])
 
@@ -1122,7 +1126,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const displayPath = activeTab?.fullPath ?? ''
   const language = isDiff
     ? 'Diff'
-    : activeTab?.image === true ? 'Image' : langLabel(langFromPath(activeTab?.rel ?? ''))
+    : activeTab?.image === true
+      ? 'Image'
+      : previewKindLabel(previewKind) ?? langLabel(langFromPath(activeTab?.rel ?? ''))
   const activeImageKey = activeTab === undefined ? undefined : imageCacheKey(activeTab)
   const imageSrc = activeTab !== undefined && activeTab.image && activeImageKey !== undefined
     ? images[activeImageKey]
@@ -1226,7 +1232,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               )
               : <span className="rvs-einfo-path" title={displayPath}>{displayPath}</span>}
             <span className="rvs-einfo-actions">
-              {activeTab.kind === 'file' && (activeTab.markdown || activeTab.html) && (
+              {activeTab.kind === 'file' && hasTextSource(previewKind) && (
                 <Segmented<'preview' | 'source'>
                   value={activeTab.preview ? 'preview' : 'source'}
                   onChange={(next) => store.updateTab(activeTab.id, { preview: next === 'preview' })}
@@ -1275,7 +1281,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   </IconButton>
                   {/* 大纲：只对文本文件出现。`≡` 是行内字形（与 blame 的 `B`、
                       浮窗的图标同一套做法），不额外引一个图标组件。 */}
-                  {!activeTab.image && !activeTab.binary && (
+                  {!activeTab.image && !activeTab.binary && !isBytePreview(previewKind) && (
                     <IconButton
                       title={`${t('editor.outline')} (Ctrl+Shift+O)`}
                       onClick={openOutline}
@@ -1313,7 +1319,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   <IconWrap size={13} />
                 </IconButton>
               )}
-              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && repoRel !== '' && (
+              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && !isBytePreview(previewKind) && repoRel !== '' && (
                 <>
                   <IconButton
                     title={blameError === undefined ? t('editor.blameToggle') : `${t('editor.blameToggle')}: ${blameError}`}
@@ -1558,6 +1564,31 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                     <div>{imageFailure ?? t('common.loading')}</div>
                   </div>
                 )}
+                {!activeTab.image && isBytePreview(previewKind) && (
+                  <BytePreview
+                    alias={alias}
+                    path={activeTab.fullPath}
+                    kind={previewKind}
+                    revision={activeTab.reloadNonce ?? 0}
+                    t={t}
+                  />
+                )}
+                {!activeTab.image && !activeTab.binary && activeTab.preview && previewKind === 'svg' && (
+                  <SvgPreview
+                    path={activeTab.rel}
+                    text={previewText ?? ''}
+                    truncated={activeTab.truncated}
+                    t={t}
+                  />
+                )}
+                {!activeTab.image && !activeTab.binary && activeTab.preview && previewKind === 'table' && (
+                  <TablePreview
+                    path={activeTab.rel}
+                    text={previewText ?? ''}
+                    truncated={activeTab.truncated}
+                    t={t}
+                  />
+                )}
                 {!activeTab.image && activeTab.binary && (
                   <div className="rvs-editor-notice">
                     <div className="rvs-editor-notice-title">{t('editor.binaryTitle')}</div>
@@ -1578,9 +1609,9 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                     caret across preview/source switches, and sibling surfaces
                     (the image/HTML previews) end up in the same DOM positions
                     as before, so their own remount behaviour is unchanged. */}
-                {!activeTab.image && !activeTab.binary && (
+                {!activeTab.image && !activeTab.binary && !isBytePreview(previewKind) && (
                   <div
-                    className={`rvs-editor-host${activeTab.preview && (activeTab.markdown || activeTab.html) ? ' rvs-hidden' : ''}`}
+                    className={`rvs-editor-host${activeTab.preview && hasTextSource(previewKind) ? ' rvs-hidden' : ''}`}
                   >
                     {activeTab.truncated && <div className="rvs-banner warn">{t('editor.truncated')}</div>}
                     <CodeEditor

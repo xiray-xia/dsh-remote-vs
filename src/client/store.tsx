@@ -53,7 +53,8 @@ import { planWorkspaceFollow, selectionIsSessionBinding, type WorkspaceFollowDec
 import { revealViewTab } from './reveal.ts'
 import { applyConnectionStatuses, connectionStateOf, isConnectionFailure, markConnectionProbeOk } from './connection.ts'
 import { isRequestAbort } from './request-gate.ts'
-import { confirmDialog, isHtmlFile, isImageFile, isMarkdownFile, toast } from './vsc/kit.tsx'
+import { confirmDialog, isImageFile, toast } from './vsc/kit.tsx'
+import { hasTextSource, isBytePreview, previewKindOf } from './vsc/preview-model.ts'
 import {
   isWithinRoot,
   normalizeRemotePath,
@@ -2653,6 +2654,7 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
   const workspace = currentWorkspace()
   if (workspace === undefined || fullPath === '') return
   const id = `file:${workspace.alias}:${fullPath}`
+  const previewKind = previewKindOf(fullPath)
   // Re-opening a tab that is already up only re-addresses the reveal line, so
   // a second search hit in the same file moves the cursor instead of reloading.
   // The nonce also re-triggers a jump to the SAME line (value alone would not).
@@ -2680,10 +2682,10 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
     saving: false,
     binary: false,
     truncated: false,
-    image: isImageFile(fullPath),
-    markdown: isMarkdownFile(fullPath),
-    html: isHtmlFile(fullPath),
-    preview: isMarkdownFile(fullPath) || isHtmlFile(fullPath),
+    image: previewKind === 'image',
+    markdown: previewKind === 'markdown',
+    html: previewKind === 'html',
+    preview: hasTextSource(previewKind),
     staged: false,
     untracked: false,
     ...(options.line === undefined ? {} : { line: options.line, lineNonce: 1 }),
@@ -2691,6 +2693,13 @@ export function openFile(fullPath: string, options: { line?: number } = {}): voi
     model: undefined,
     view: 'split',
   })
+  // PDF/Office/media have no editable text: reading them through fs.read would
+  // only fetch a capped base64 window and land on the binary notice. The
+  // preview component reads their bytes from the download route instead.
+  if (isBytePreview(previewKind)) {
+    patchTab(id, { loading: false })
+    return
+  }
   void (async () => {
     try {
       const read = await withDeadline(api.fileOp.read(workspace.alias, fullPath), fileReadDeadlineMs(), t('editor.readTimeout'))
