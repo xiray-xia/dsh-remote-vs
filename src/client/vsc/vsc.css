@@ -5088,12 +5088,23 @@ body[data-ds-dark-theme] .rvs-doctor {
  * tabular-nums so a 5 s refresh does not make the text dance.
  */
 .rvs-monitor-body {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 8px 8px 14px;
+  overflow: hidden;
+  padding: 0;
   /* Container for the narrow-sidebar layout rules at the end of this section. */
   container-type: inline-size;
+}
+
+.rvs-monitor-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 8px 4px;
 }
 
 /* The rail title and the scope picker both wanted flex:1; the title yields so
@@ -5916,6 +5927,13 @@ body[data-ds-dark-theme] .rvs-doctor {
   container-type: inline-size;
 }
 
+.rvs-proc.expanded {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 150px;
+}
+
 .rvs-proc-head {
   display: flex;
   align-items: center;
@@ -5974,8 +5992,11 @@ body[data-ds-dark-theme] .rvs-doctor {
 }
 
 .rvs-proc-table {
-  max-height: 240px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
+  scrollbar-width: thin;
   font-family: var(--rvs-mono), monospace;
   font-size: 10px;
 }

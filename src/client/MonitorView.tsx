@@ -626,11 +626,13 @@ export function MonitorView(props: {
         </div>
       )}
       <div className="rvs-monitor-body">
-        {props.hosts.length === 0 && <div className="rvs-banner warn">{t('monitor.noHosts')}</div>}
-        {props.hosts.length > 0 && aliases.length === 0 && <div className="rvs-empty">{t('monitor.noHost')}</div>}
-        {paused && <div className="rvs-banner info">{t('monitor.paused')}</div>}
-        {single !== undefined && renderDetail(single)}
-        {single === undefined && aliases.length > 1 && renderAll(aliases)}
+        <div className="rvs-monitor-content rvs-scroll">
+          {props.hosts.length === 0 && <div className="rvs-banner warn">{t('monitor.noHosts')}</div>}
+          {props.hosts.length > 0 && aliases.length === 0 && <div className="rvs-empty">{t('monitor.noHost')}</div>}
+          {paused && <div className="rvs-banner info">{t('monitor.paused')}</div>}
+          {single !== undefined && renderDetail(single)}
+          {single === undefined && aliases.length > 1 && renderAll(aliases)}
+        </div>
         <ProcessesSection
           t={t}
           hosts={props.hosts}

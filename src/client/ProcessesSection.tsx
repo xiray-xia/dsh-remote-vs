@@ -189,7 +189,7 @@ export function ProcessesSection(props: {
   const toolUnknown = result !== undefined && result.tool === 'unknown'
 
   return (
-    <section className="rvs-proc" aria-label={t('proc.title')}>
+    <section className={expanded ? 'rvs-proc expanded' : 'rvs-proc'} aria-label={t('proc.title')}>
       <div className="rvs-proc-head">
         <button
           type="button"
@@ -251,7 +251,7 @@ export function ProcessesSection(props: {
         <div className="rvs-empty">{t('proc.empty')}</div>
       )}
       {expanded && rows.length > 0 && (
-        <div className="rvs-proc-table" role="table" aria-label={t('proc.title')} aria-live="polite">
+        <div className="rvs-proc-table rvs-scroll" role="table" aria-label={t('proc.title')} aria-live="polite">
           <div className="rvs-proc-row rvs-proc-row-head" role="row">
             <span role="columnheader">PID</span>
             <span role="columnheader">PPID</span>
