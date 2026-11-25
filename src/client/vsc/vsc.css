@@ -5107,6 +5107,13 @@ body[data-ds-dark-theme] .rvs-doctor {
   padding: 8px 8px 4px;
 }
 
+/* While the process section is open it owns the leftover height: the metrics
+   keep their natural height (and scroll if they do not fit), so the process
+   header sits directly under the cards instead of halfway down the pane. */
+.rvs-monitor-body:has(.rvs-proc.expanded) .rvs-monitor-content {
+  flex: 0 1 auto;
+}
+
 /* The rail title and the scope picker both wanted flex:1; the title yields so
    the picker keeps enough width for its own label at 230px. */
 .rvs-monitor-header .rvs-title {
@@ -5929,6 +5936,9 @@ body[data-ds-dark-theme] .rvs-doctor {
 
 .rvs-proc.expanded {
   display: flex;
+  /* `basis:0` is what keeps a 500-row table from claiming its intrinsic
+     height: the section gets only the space left after the metrics' natural
+     height, and the table scrolls inside it. */
   flex: 1 1 0;
   flex-direction: column;
   min-height: 150px;
