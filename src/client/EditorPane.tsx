@@ -699,6 +699,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
   const previewIsMarkdown = activeTab?.markdown === true
   const previewVisible = activeTab?.preview === true
   const previewKind: PreviewKind = activeTab?.kind === 'file' ? previewKindOf(activeTab.fullPath) : 'text'
+  const bytePreview = isBytePreview(previewKind)
 
   const htmlDoc = useMemo(() => {
     if (!previewIsHtml) return ''
@@ -1292,7 +1293,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   so the stamp says WHICH code is running, and the token count
                   says whether the grammar actually produced colored tokens. */}
               <span className="rvs-build" title={`dsh-remote-vs build ${__RVS_BUILD__}`}>{__RVS_BUILD__}</span>
-              {tokenCount !== undefined && (
+              {tokenCount !== undefined && !bytePreview && (
                 <span className="rvs-build" title={t('editor.tokenCount')}>tok {tokenCount}</span>
               )}
               {activeTab.kind === 'file' && (
@@ -1301,19 +1302,23 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       both the class and the label, while the project's own
                       review checklist forbids nested ternaries. One lookup per
                       concern instead. */}
-                  <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
-                    {t(tabStatusKey(activeTab))}
-                  </span>
+                  {!bytePreview && (
+                    <span className={`rvs-status ${tabStatusClass(activeTab)}`}>
+                      {t(tabStatusKey(activeTab))}
+                    </span>
+                  )}
                   <IconButton title={t('editor.reloadFile')} onClick={() => { void reloadWithGuard(activeTab) }} disabled={offline || activeTab.loading}>
                     <IconRefresh size={13} />
                   </IconButton>
-                  <IconButton
-                    title={`${t('editor.save')} (Ctrl+S)`}
-                    onClick={() => { void saveActive() }}
-                    disabled={offline || activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
-                  >
-                    <IconSave size={13} />
-                  </IconButton>
+                  {!bytePreview && !activeTab.image && (
+                    <IconButton
+                      title={`${t('editor.save')} (Ctrl+S)`}
+                      onClick={() => { void saveActive() }}
+                      disabled={offline || activeTab.loading || activeTab.binary || activeTab.truncated || !activeTab.dirty}
+                    >
+                      <IconSave size={13} />
+                    </IconButton>
+                  )}
                   {/* 大纲：只对文本文件出现。`≡` 是行内字形（与 blame 的 `B`、
                       浮窗的图标同一套做法），不额外引一个图标组件。 */}
                   {!activeTab.image && !activeTab.binary && !isBytePreview(previewKind) && (
@@ -1346,7 +1351,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                   )}
                 </>
               )}
-              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && (
+              {activeTab.kind === 'file' && !activeTab.image && !activeTab.binary && !bytePreview && (
                 <IconButton
                   title={t('editor.wrap')}
                   onClick={() => updateEditorSettings({ wrap: !settings.wrap })}
@@ -1384,7 +1389,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
               {/* The floating window owns its OWN Ctrl+wheel zoom (a property of
                   that window, persisted per window): the shared preference is not
                   what paints there, so these two would look dead inside it. */}
-              {variant !== 'float' && (
+              {variant !== 'float' && !bytePreview && !activeTab.image && activeTab.kind !== 'diff' && (
                 <>
                   <IconButton
                     title={t('editor.fontSmaller')}
