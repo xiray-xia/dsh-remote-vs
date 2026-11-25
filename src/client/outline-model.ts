@@ -110,7 +110,9 @@ function maskRulesFor(language: OutlineLanguage): MaskRules {
     single: language !== 'rust',
     double: true,
     backtick: true,
-    triple: false,
+    // Java text blocks are the one non-Python form whose body can contain
+    // braces/`class` words; masking them keeps a block from shifting depth.
+    triple: language === 'java',
   }
 }
 
@@ -147,6 +149,19 @@ export function maskSource(text: string, language: OutlineLanguage): string[] {
         masked.push('   ')
         at += 2
         continue
+      }
+      // Rust char literals (`'{'`, `'\n'`, `'a'`) are masked here because the
+      // generic single-quote mode is disabled for lifetimes (`'a`). Without
+      // this a brace inside a char literal raises the depth for the rest of
+      // the file.
+      if (language === 'rust' && character === "'") {
+        const charLiteral = /^'(?:\\.|[^'\\])'/.exec(text.slice(at))
+        if (charLiteral !== null) {
+          const width = charLiteral[0].length
+          masked.push(' '.repeat(width))
+          at += width - 1
+          continue
+        }
       }
       if (rules.single && character === "'") { mode = 'single'; masked.push(' '); continue }
       if (rules.double && character === '"') { mode = 'double'; masked.push(' '); continue }
@@ -328,7 +343,11 @@ function scanBraceLanguages(
     // parenthesis balance returns to zero (braces still update normally).
     const continuation = continuationParens > 0
     if (!continuation) {
-      const match = matchDeclaration(language, trimmed, owner)
+      // Java text blocks (and a few other constructs) can leave a `;` before
+      // the next declaration on the closing line; it is punctuation, not part
+      // of the declaration name.
+      const candidate = trimmed.replace(/^[;,]+\s*/, '')
+      const match = matchDeclaration(language, candidate, owner)
       if (match !== undefined) {
         const lead = line.length - line.trimStart().length
         const at = depthAtIn(line, startDepth, lead)

@@ -19,6 +19,9 @@ export const PROCESSES_TIMEOUT_MS = 15_000
 /** Hard cap on rows per snapshot (a container host can have thousands). */
 export const PROCESSES_MAX = 500
 
+/** Longest command string sent to the browser per row. */
+export const PROCESS_COMMAND_MAX = 300
+
 /**
  * One bounded probe.
  *
@@ -33,7 +36,9 @@ export function processesCommand(max: number = PROCESSES_MAX): string {
   // Cap + 1: the parser needs one extra row to tell "exactly at the cap" from
   // "there were more rows, we cut them". The GNU branch is sorted by ps; the
   // aux fallback is sorted here (ps aux on BSD has no --sort) on the %CPU column.
-  const gnu = `ps -eo pid=,ppid=,user=,pcpu=,pmem=,etimes=,args= --sort=-pcpu 2>/dev/null`
+  // `user:20` avoids procps' default 8-character user truncation (the panel's
+  // user filter would otherwise silently miss the rest of the name).
+  const gnu = `ps -eo pid=,ppid=,user:20=,pcpu=,pmem=,etimes=,args= --sort=-pcpu 2>/dev/null`
   return [
     // EXPORTED: a plain LC_ALL assignment does not reach `ps` itself.
     'export LC_ALL=C',
@@ -78,6 +83,13 @@ function numberOr(value: string): number | null {
   return Number.isFinite(number) ? number : null
 }
 
+/** Bound one argv line before it is serialized into the JSON response. */
+function trimCommand(command: string): string {
+  return command.length <= PROCESS_COMMAND_MAX
+    ? command
+    : `${command.slice(0, PROCESS_COMMAND_MAX - 1)}…`
+}
+
 /** GNU row: pid ppid user pcpu pmem etimes args. */
 function parseGnuRow(line: string): RemoteProcess | undefined {
   const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+([0-9.]+)\s+(\d+)\s+(.*)$/.exec(line)
@@ -96,7 +108,7 @@ function parseGnuRow(line: string): RemoteProcess | undefined {
     cpuPercent: numberOr(cpu) ?? 0,
     memPercent: numberOr(mem) ?? 0,
     elapsedSeconds: numberOr(elapsed) ?? null,
-    command: command.trim(),
+    command: trimCommand(command.trim()),
   }
 }
 
@@ -116,7 +128,7 @@ function parseBsdRow(line: string): RemoteProcess | undefined {
     cpuPercent: numberOr(cpu) ?? 0,
     memPercent: numberOr(mem) ?? 0,
     elapsedSeconds: null,
-    command: command.trim(),
+    command: trimCommand(command.trim()),
   }
 }
 
@@ -131,7 +143,15 @@ export function parseProcesses(stdout: string, exitCode: number | null): RemoteP
     return { tool: 'unknown', processes: [], truncated: false, error: 'the remote process probe ended without a complete answer' }
   }
   const marker = lines[markerAt]?.trim() ?? ''
-  const endAt = lines.findIndex((line, index) => index > markerAt && line.trim() === `${PROCESSES_MARK} end`)
+  // The real terminator is the LAST marker line: a process argv containing a
+  // literal `@@RVS-PROCS end` must not truncate the table early.
+  let endAt = -1
+  for (let index = lines.length - 1; index > markerAt; index -= 1) {
+    if ((lines[index] as string).trim() === `${PROCESSES_MARK} end`) {
+      endAt = index
+      break
+    }
+  }
   if (endAt < 0) {
     return { tool: 'unknown', processes: [], truncated: false, error: 'the remote process probe was interrupted' }
   }
@@ -141,7 +161,9 @@ export function parseProcesses(stdout: string, exitCode: number | null): RemoteP
   for (const line of lines.slice(markerAt + 1, endAt)) {
     if (line.trim() === '') continue
     const row = gnu ? parseGnuRow(line) : parseBsdRow(line)
-    if (row !== undefined) parsedProcesses.push(row)
+    // The probe's own shell/head/ps wrappers contain the marker in their argv;
+    // they are not user processes and must not be offered for a kill.
+    if (row !== undefined && !row.command.includes(PROCESSES_MARK)) parsedProcesses.push(row)
   }
   if (parsedProcesses.length === 0) {
     return { tool: 'unknown', processes: [], truncated: false, error: 'the remote ps output could not be parsed' }

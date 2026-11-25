@@ -9,7 +9,7 @@
  * 里会被祖先的 `overflow: hidden` 裁掉。`.rvs-portal` 负责声明 `--rvs-*` token
  * 子集 —— portal 之后已经不在 `.rvs-root` 作用域内，缺了它颜色/边框全是空值。
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { matchPositions } from './quickopen-model.ts'
 import {
@@ -25,6 +25,7 @@ function Row(props: {
   query: string
   active: boolean
   index: number
+  id: string
   t: (key: string) => string
   onPick: () => void
   onHover: () => void
@@ -38,7 +39,7 @@ function Row(props: {
       className={props.active ? 'rvs-outline-row active' : 'rvs-outline-row'}
       role="option"
       aria-selected={props.active}
-      id={`rvs-outline-option-${props.index}`}
+      id={props.id}
       data-outline-index={props.index}
       data-outline-depth={entry.depth}
       data-outline-kind={entry.kind}
@@ -76,6 +77,9 @@ export function OutlinePanel(props: {
   onPick: (entry: OutlineEntry) => void
   onClose: () => void
 }): ReactNode {
+  // Two editor seats can keep an outline open at once; DOM ids must not collide.
+  const listId = useId()
+  const optionId = (index: number): string => `${listId}-option-${index}`
   const t = props.t
   const outline = useMemo(() => buildOutline(props.text, props.path), [props.text, props.path])
   const [query, setQuery] = useState('')
@@ -196,7 +200,9 @@ export function OutlinePanel(props: {
     }
     return (
       <span className="rvs-outline-note">
-        {ranked.truncated ? t('outline.more').replace('{count}', String(count)) : `${count} / ${outline.total}`}
+        {ranked.truncated
+          ? t('outline.more').replace('{count}', String(count)).replace('{total}', String(outline.total))
+          : `${count} / ${outline.total}`}
       </span>
     )
   }
@@ -240,14 +246,14 @@ export function OutlinePanel(props: {
               autoComplete="off"
               role="combobox"
               aria-expanded
-              aria-controls="rvs-outline-list"
-              aria-activedescendant={current >= 0 ? `rvs-outline-option-${current}` : undefined}
+              aria-controls={listId}
+              aria-activedescendant={current >= 0 ? optionId(current) : undefined}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={onInputKeyDown}
             />
             <span className="rvs-outline-hint">{t('outline.hint')}</span>
           </div>
-          <div className="rvs-outline-list" id="rvs-outline-list" role="listbox" ref={listRef}>
+          <div className="rvs-outline-list" id={listId} role="listbox" ref={listRef}>
             {ranked.hits.map((entry, index) => (
               <Row
                 key={`${entry.line}:${entry.name}:${index}`}
@@ -255,6 +261,7 @@ export function OutlinePanel(props: {
                 query={query}
                 active={index === current}
                 index={index}
+                id={optionId(index)}
                 t={t}
                 onPick={() => pick(entry)}
                 onHover={() => setActive(index)}

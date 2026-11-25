@@ -309,9 +309,13 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
   const processSnapshots = new Map<string, { at: number; result: RemoteProcessesResult }>()
   /** One probe per alias at a time; a second reader joins the in-flight one. */
   const processInflight = new Map<string, Promise<RemoteProcessesResult>>()
+  const forgetProcesses = (alias: string): void => {
+    processSnapshots.delete(alias)
+    processInflight.delete(alias)
+  }
   const readProcesses = async (alias: string, maxAgeMs: number): Promise<RemoteProcessesResult> => {
     const cached = processSnapshots.get(alias)
-    if (cached !== undefined && Date.now() - cached.at <= maxAgeMs) return cached.result
+    if (maxAgeMs > 0 && cached !== undefined && Date.now() - cached.at < maxAgeMs) return cached.result
     const joined = processInflight.get(alias)
     if (joined !== undefined) return joined
     const task = (async (): Promise<RemoteProcessesResult> => {
@@ -550,6 +554,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
           forwards?.stopAlias(alias)
           pool.forget(alias)
           monitor.forget(alias)
+          forgetProcesses(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           if (!store.remove(alias)) {
             writeJson(res, 404, { error: `unknown host alias: ${alias}` })
@@ -569,6 +574,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
         try {
           pool.forget(alias)
           monitor.forget(alias)
+          forgetProcesses(alias)
           void worlds.dropHost(alias).catch(() => undefined)
           const entry = store.update(alias, body as Partial<HostPayload>)
           writeJson(res, 200, { host: store.summarize(entry) })

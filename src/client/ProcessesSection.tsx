@@ -22,7 +22,8 @@ function formatElapsed(seconds: number | null, t: (key: string) => string): stri
   const minutes = Math.floor((seconds % 3_600) / 60)
   if (days > 0) return `${days}d ${hours}h`
   if (hours > 0) return `${hours}h ${minutes}m`
-  return `${Math.max(1, minutes)}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${Math.max(1, Math.floor(seconds))}s`
 }
 
 function percent(value: number): string {
@@ -56,6 +57,7 @@ export function ProcessesSection(props: {
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('cpu')
   const [killing, setKilling] = useState<number | undefined>(undefined)
+  const [forcePid, setForcePid] = useState<number | undefined>(undefined)
   const inFlight = useRef<Set<string>>(new Set())
   const aliasRef = useRef(alias)
   aliasRef.current = alias
@@ -74,11 +76,11 @@ export function ProcessesSection(props: {
     setError(undefined)
   }, [props.aliases, alias])
 
-  const load = useCallback(async (force = false): Promise<void> => {
+  const load = useCallback(async (force = false, manual = false): Promise<void> => {
     const requested = alias
     if (requested === '' || inFlight.current.has(requested)) return
     inFlight.current.add(requested)
-    setLoading(true)
+    if (manual) setLoading(true)
     try {
       const next = await api.processes(requested, force)
       // The user may have switched hosts while this request was in flight: an
@@ -95,7 +97,7 @@ export function ProcessesSection(props: {
       )
     } finally {
       inFlight.current.delete(requested)
-      if (alive.current && requested === aliasRef.current) setLoading(false)
+      if (manual && alive.current && requested === aliasRef.current) setLoading(false)
     }
   }, [alias])
 
@@ -103,7 +105,7 @@ export function ProcessesSection(props: {
     if (!expanded || !props.visible || props.paused || alias === '') return
     const tick = (): void => {
       if (document.hidden) return
-      void load()
+    void load(false, false)
     }
     tick()
     const timer = window.setInterval(tick, Math.max(2_000, props.intervalMs || PROCESS_POLL_MS))
@@ -113,7 +115,7 @@ export function ProcessesSection(props: {
   useEffect(() => {
     if (!expanded || !props.visible || props.paused) return
     const onVisible = (): void => {
-      if (!document.hidden) void load()
+      if (!document.hidden) void load(false, false)
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
@@ -146,7 +148,36 @@ export function ProcessesSection(props: {
     try {
       await api.killProcess(alias, row.pid, 'TERM')
       toast(t('proc.killSent').replace('{pid}', String(row.pid)))
-      await load(true)
+      await load(true, false)
+    } catch (caught) {
+      toast(caught instanceof RemoteApiError ? caught.message : String(caught), true)
+      // TERM may be ignored (or the file may still be flushing): offer KILL as
+      // a second, deliberately re-confirmed action instead of escalating
+      // silently.
+      setForcePid(row.pid)
+    } finally {
+      if (alive.current) setKilling(undefined)
+    }
+  }
+
+  const forceKill = async (row: RemoteProcess): Promise<void> => {
+    const ok = await confirmDialog({
+      title: t('proc.killForceTitle'),
+      text: t('proc.killForceText')
+        .replace('{host}', alias)
+        .replace('{pid}', String(row.pid))
+        .replace('{command}', row.command.slice(0, 120)),
+      danger: true,
+      okText: t('proc.killForce'),
+      cancelText: t('common.cancel'),
+    })
+    if (!ok) return
+    setKilling(row.pid)
+    try {
+      await api.killProcess(alias, row.pid, 'KILL')
+      toast(t('proc.killForceSent').replace('{pid}', String(row.pid)))
+      setForcePid(undefined)
+      await load(true, false)
     } catch (caught) {
       toast(caught instanceof RemoteApiError ? caught.message : String(caught), true)
     } finally {
@@ -202,7 +233,7 @@ export function ProcessesSection(props: {
               <option value="mem">{t('proc.sortMem')}</option>
               <option value="pid">{t('proc.sortPid')}</option>
             </select>
-            <IconButton title={t('proc.refresh')} onClick={() => { void load(true) }} disabled={loading || alias === ''}>
+            <IconButton title={t('proc.refresh')} onClick={() => { void load(true, true) }} disabled={loading || alias === ''}>
               {loading ? <MiniSpinner /> : <IconRefresh size={13} />}
             </IconButton>
           </>
@@ -220,9 +251,10 @@ export function ProcessesSection(props: {
         <div className="rvs-empty">{t('proc.empty')}</div>
       )}
       {expanded && rows.length > 0 && (
-        <div className="rvs-proc-table" role="table" aria-label={t('proc.title')}>
+        <div className="rvs-proc-table" role="table" aria-label={t('proc.title')} aria-live="polite">
           <div className="rvs-proc-row rvs-proc-row-head" role="row">
             <span role="columnheader">PID</span>
+            <span role="columnheader">PPID</span>
             <span role="columnheader">USER</span>
             <span role="columnheader" title={t('proc.cpuHint')}>CPU</span>
             <span role="columnheader">MEM</span>
@@ -233,21 +265,24 @@ export function ProcessesSection(props: {
           {rows.map(row => (
             <div className="rvs-proc-row" role="row" key={row.pid}>
               <span role="cell" className="rvs-proc-pid">{row.pid}</span>
+              <span role="cell" className="rvs-proc-pid">{row.ppid === 0 ? '—' : row.ppid}</span>
               <span role="cell" className="rvs-proc-user" title={row.user}>{row.user}</span>
               <span role="cell" className="rvs-proc-num">{percent(row.cpuPercent)}</span>
               <span role="cell" className="rvs-proc-num">{percent(row.memPercent)}</span>
               <span role="cell" className="rvs-proc-elapsed">{formatElapsed(row.elapsedSeconds, t)}</span>
               <span role="cell" className="rvs-proc-command" title={row.command}>{row.command}</span>
-              <button
-                type="button"
-                className="rvs-proc-kill"
-                title={t('proc.killTitle')}
-                aria-label={t('proc.killTitle')}
-                disabled={killing === row.pid}
-                onClick={() => { void kill(row) }}
-              >
-                {killing === row.pid ? <MiniSpinner /> : t('proc.kill')}
-              </button>
+              <span role="cell">
+                <button
+                  type="button"
+                  className={forcePid === row.pid ? 'rvs-proc-kill danger' : 'rvs-proc-kill'}
+                  title={forcePid === row.pid ? t('proc.killForceTitle') : t('proc.killTitle')}
+                  aria-label={`${forcePid === row.pid ? t('proc.killForceTitle') : t('proc.killTitle')} PID ${row.pid}`}
+                  disabled={killing === row.pid}
+                  onClick={() => { void (forcePid === row.pid ? forceKill(row) : kill(row)) }}
+                >
+                  {killing === row.pid ? <MiniSpinner /> : (forcePid === row.pid ? t('proc.killForce') : t('proc.kill'))}
+                </button>
+              </span>
             </div>
           ))}
         </div>

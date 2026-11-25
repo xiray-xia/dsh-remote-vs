@@ -14,6 +14,8 @@ export declare const PROCESSES_MARK = "@@RVS-PROCS";
 export declare const PROCESSES_TIMEOUT_MS = 15000;
 /** Hard cap on rows per snapshot (a container host can have thousands). */
 export declare const PROCESSES_MAX = 500;
+/** Longest command string sent to the browser per row. */
+export declare const PROCESS_COMMAND_MAX = 300;
 /**
  * One bounded probe.
  *

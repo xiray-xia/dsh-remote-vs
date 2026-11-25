@@ -5910,7 +5910,8 @@ body[data-ds-dark-theme] .rvs-doctor {
 .rvs-proc {
   flex: 0 0 auto;
   border-top: 1px solid var(--rvs-editor-chrome-border, var(--rvs-border));
-  background: var(--rvs-bg-soft, transparent);
+  background: var(--rvs-layer3);
+  container-type: inline-size;
 }
 
 .rvs-proc-head {
@@ -5979,12 +5980,12 @@ body[data-ds-dark-theme] .rvs-doctor {
 
 .rvs-proc-row {
   display: grid;
-  grid-template-columns: 52px 56px 42px 42px 52px minmax(80px, 1fr) 44px;
+  grid-template-columns: 52px 52px 56px 42px 42px 52px minmax(40px, 1fr) 44px;
   gap: 4px;
   align-items: center;
   min-height: 20px;
   padding: 1px 8px;
-  border-bottom: 1px solid var(--rvs-border-subtle, transparent);
+  border-bottom: 1px solid var(--rvs-border);
 }
 
 .rvs-proc-row:hover {
@@ -5996,7 +5997,7 @@ body[data-ds-dark-theme] .rvs-doctor {
   top: 0;
   z-index: 1;
   color: var(--rvs-fg3);
-  background: var(--rvs-bg-soft, var(--rvs-bg));
+  background: var(--rvs-layer3);
 }
 
 .rvs-proc-pid,
@@ -6035,9 +6036,30 @@ body[data-ds-dark-theme] .rvs-doctor {
   color: var(--rvs-danger-text);
 }
 
+.rvs-proc-kill.danger {
+  border-color: var(--rvs-danger-text);
+  color: var(--rvs-danger-text);
+  font-weight: 600;
+}
+
 .rvs-proc-kill:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+@container (max-width: 330px) {
+  .rvs-proc-row {
+    grid-template-columns: 44px 44px minmax(30px, 1fr) 40px;
+  }
+
+  /* USER/CPU/MEM/ELAPSED are the least useful columns in a 230px rail; keep
+     PID/PPID/COMMAND and the Kill button reachable without scrolling. */
+  .rvs-proc-row > :nth-child(3),
+  .rvs-proc-row > :nth-child(4),
+  .rvs-proc-row > :nth-child(5),
+  .rvs-proc-row > :nth-child(6) {
+    display: none;
+  }
 }
 
 /* ------------------------------------------------------ Ctrl+P quick open */
