@@ -153,7 +153,13 @@ import {
 } from './vsc/change-marks.ts'
 import { blameExtension, blameViewportReporter } from './vsc/blame.ts'
 import type { BlameLine } from './blame-model.ts'
-import { DEFAULT_UNDO_LABEL, undoAffordance } from './changes/undo-affordance.ts'
+import {
+  DEFAULT_CONFIRM_LABEL,
+  DEFAULT_CONFIRMED_LABEL,
+  DEFAULT_TRIGGER_LABEL,
+  DEFAULT_UNDO_LABEL,
+  undoAffordance,
+} from './changes/undo-affordance.ts'
 
 /**
  * The editor surface is OPAQUE and scrolls in the editor's own palette
@@ -228,6 +234,21 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
   onUndoChange?: (mark: ChangeMark) => void
   /** 悬浮按钮的文案（由调用方按 `kind` 给出它的 i18n 说法）。 */
   undoLabel?: (mark: ChangeMark) => string
+  /** 行尾那枚 `⋯` 的说明（title / aria-label，调用方传 i18n）。 */
+  undoTriggerLabel?: () => string
+  /**
+   * 悬浮栏的第二个动作：「确认保留」（块级本地笔记，见 `changes/block-confirm.ts`）。
+   *
+   * 不传 = 悬浮栏只有撤销一个动作（与没有这个功能时完全一致）。传了也只是把
+   * 读/切换交回去：存储、会话归属都在调用方那一侧，编辑器组件不持有这份状态，更
+   * 不会因为它写任何远端。
+   */
+  blockConfirm?: {
+    isConfirmed: (mark: ChangeMark) => boolean
+    onToggle: (mark: ChangeMark) => void
+    label: (mark: ChangeMark) => string
+    pressedLabel?: (mark: ChangeMark) => string
+  }
   /** 改动点跳转的目标行（1-based），配合 `revealHunkNonce` 重跳同一行。 */
   revealHunkLine?: number
   /** 改动点跳转的 nonce（同 `revealNonce` 的道理）。 */
@@ -412,6 +433,12 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
    */
   const labelsRef = useRef(t)
   const undoArmed = props.onUndoChange !== undefined
+  /**
+   * 「确认保留」是否可用也是**能力**的一部分：它随"这批标记有没有块标识"一起到达，
+   * 所以要进 `armed` 键 —— 否则先挂载、后拿到标记的编辑器永远不会重装扩展，第二个
+   * 按钮就再也不会出现。
+   */
+  const confirmArmed = props.blockConfirm !== undefined
   useEffect(() => {
     const current = viewRef.current
     if (current === undefined) return
@@ -421,7 +448,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     }
     const set = props.changeSet
     const marks = set !== undefined
-    const armed = `${marks ? 'm' : ''}${undoArmed ? 'u' : ''}`
+    const armed = `${marks ? 'm' : ''}${undoArmed ? 'u' : ''}${confirmArmed ? 'c' : ''}`
     if (armed !== armedRef.current) {
       armedRef.current = armed
       // 重装扩展会重建字段，之前下发过的数据随之消失，必须再喂一次。
@@ -432,6 +459,19 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
           ? [undoAffordance({
             onUndo: (mark) => { propsRef.current.onUndoChange?.(mark) },
             label: (mark) => propsRef.current.undoLabel?.(mark) ?? DEFAULT_UNDO_LABEL,
+            triggerLabel: () => propsRef.current.undoTriggerLabel?.() ?? DEFAULT_TRIGGER_LABEL,
+            ...(confirmArmed
+              ? {
+                confirm: {
+                  isConfirmed: (mark) => propsRef.current.blockConfirm?.isConfirmed(mark) === true,
+                  onToggle: (mark) => { propsRef.current.blockConfirm?.onToggle(mark) },
+                  label: (mark) => propsRef.current.blockConfirm?.label(mark) ?? DEFAULT_CONFIRM_LABEL,
+                  pressedLabel: (mark) => propsRef.current.blockConfirm?.pressedLabel?.(mark)
+                    ?? propsRef.current.blockConfirm?.label(mark)
+                    ?? DEFAULT_CONFIRMED_LABEL,
+                },
+              }
+              : {}),
           })]
           : []),
       ]
@@ -449,7 +489,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, {
     } catch {
       // Disposed.
     }
-  }, [props.changeSet, undoArmed, view, t])
+  }, [props.changeSet, undoArmed, confirmArmed, view, t])
 
   /**
    * Blame gutter: install/replace it when the pane hands over a new window.

@@ -126,6 +126,21 @@ export declare const CodeEditor: import("react").ForwardRefExoticComponent<{
     onUndoChange?: (mark: ChangeMark) => void;
     /** 悬浮按钮的文案（由调用方按 `kind` 给出它的 i18n 说法）。 */
     undoLabel?: (mark: ChangeMark) => string;
+    /** 行尾那枚 `⋯` 的说明（title / aria-label，调用方传 i18n）。 */
+    undoTriggerLabel?: () => string;
+    /**
+     * 悬浮栏的第二个动作：「确认保留」（块级本地笔记，见 `changes/block-confirm.ts`）。
+     *
+     * 不传 = 悬浮栏只有撤销一个动作（与没有这个功能时完全一致）。传了也只是把
+     * 读/切换交回去：存储、会话归属都在调用方那一侧，编辑器组件不持有这份状态，更
+     * 不会因为它写任何远端。
+     */
+    blockConfirm?: {
+        isConfirmed: (mark: ChangeMark) => boolean;
+        onToggle: (mark: ChangeMark) => void;
+        label: (mark: ChangeMark) => string;
+        pressedLabel?: (mark: ChangeMark) => string;
+    };
     /** 改动点跳转的目标行（1-based），配合 `revealHunkNonce` 重跳同一行。 */
     revealHunkLine?: number;
     /** 改动点跳转的 nonce（同 `revealNonce` 的道理）。 */

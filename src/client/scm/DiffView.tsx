@@ -627,7 +627,9 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
 
   // Seed the editable buffer the first time the "变更后" pane is shown.
   useEffect(() => {
-    if (mode !== 'after' || tab.staged || tab.text !== '' || tab.loading) return
+    // A session diff's "after" side is a read-only pane (§sessionReadOnly): there
+    // is no buffer to seed, so no extra read either.
+    if (mode !== 'after' || tab.staged || tab.sessionDiff !== undefined || tab.text !== '' || tab.loading) return
     let cancelled = false
     void (async () => {
       try {
@@ -674,7 +676,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
    */
   const codeSide = mode === 'before'
     ? beforeSide
-    : mode === 'after' && tab.staged
+    : mode === 'after' && (tab.staged || tab.sessionDiff !== undefined)
       ? afterSide
       : NO_TOKENS
   const codeWindow = useScrollWindow(codeSide.lineCount, CODE_PAD_TOP)
@@ -847,7 +849,15 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
     )
   }
 
-  const editable = mode === 'after' && !tab.staged && props.offline !== true && !tab.truncated
+  /**
+   * 会话改动面板打开的只读 diff（`EditorTab.sessionDiff`）。
+   *
+   * 它比较的是**会话账本**（会话起点为基线），两侧都不是"可写的工作区副本"：改前
+   * 是按 hunk 还原出来的基线，改后是一次独立读取。所以既不能编辑「变更后」，也不能
+   * 提供 hunk 的暂存/撤销 —— 那些动作的入参是 `git diff` 的补丁，不是这里的。
+   */
+  const sessionReadOnly = tab.sessionDiff !== undefined
+  const editable = mode === 'after' && !tab.staged && !sessionReadOnly && props.offline !== true && !tab.truncated
   /**
    * The gutter hunk buttons obey the same refusal as `runHunk` (see
    * `hunkBlockReason`), and a disabled button names the REAL reason when it has
@@ -893,13 +903,19 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
             the exact reason whenever the binding gate refuses. The glyph is
             text because the icon set has no "AI" mark — the same precedent as
             the search options' `Aa` / `.*` glyphs in `kit.tsx`. */}
-        <IconButton
-          title={reviewBlocked ?? t('scm.aiReview')}
-          onClick={reviewWithAi}
-          disabled={reviewBlocked !== undefined}
-        >
-          <span className="rvs-glyph" aria-hidden="true" style={{ fontSize: 12 }}>AI</span>
-        </IconButton>
+        {/* 会话只读 diff 不提供 AI 审查：那条 prompt 写的是"哪个工作区/仓库目录/
+            哪个路径"（`store.alias` + `store.repoRoot`），而这一页的基线是会话账本、
+            路径是面板的显示路径 —— 两者可能不是同一个绑定，指错地方的 prompt 比没有
+            更糟。要审查会话改动，从面板左键打开文件那条路走。 */}
+        {!sessionReadOnly && (
+          <IconButton
+            title={reviewBlocked ?? t('scm.aiReview')}
+            onClick={reviewWithAi}
+            disabled={reviewBlocked !== undefined}
+          >
+            <span className="rvs-glyph" aria-hidden="true" style={{ fontSize: 12 }}>AI</span>
+          </IconButton>
+        )}
         <IconButton title={t('scm.reloadDiff')} onClick={() => { void reload() }} disabled={busy}>
           <IconRefresh size={13} />
         </IconButton>
@@ -957,9 +973,12 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                   // index is the lookup — the linear `find` was one scan per row.
                   const hunk = row.hunk >= 0 ? model.hunks[row.hunk] : undefined
                   const startOfHunk = hunk !== undefined && hunk.startRow === row.id
+                  // 只读的会话 diff 没有 hunk 写动作：整行只留一个色点（指示"这里
+                  // 有一处改动"），不给暂存/撤销那两个会打到别处的按钮。
+                  const changed = row.oldDel || row.newAdd
                   return (
                     <div key={row.id} className="rvs-gutter-line">
-                      {startOfHunk && hunk !== undefined && (
+                      {startOfHunk && hunk !== undefined && !sessionReadOnly && (
                         <span className="rvs-hunk-btns">
                           {hunkBusy === hunk.index
                             ? <MiniSpinner />
@@ -989,7 +1008,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
                             )}
                         </span>
                       )}
-                      {!startOfHunk && (row.oldDel || row.newAdd) && (
+                      {(!startOfHunk || sessionReadOnly) && changed && (
                         <span className="rvs-gutter-dot" style={{ background: row.oldDel ? 'var(--rvs-git-d)' : 'var(--rvs-git-a)' }} />
                       )}
                     </div>
@@ -1021,7 +1040,7 @@ export function DiffView(props: { tab: EditorTab; visible: boolean; offline?: bo
         </div>
       )}
       {mode === 'after' && (
-        tab.staged
+        tab.staged || sessionReadOnly
           ? (
             <div className="rvs-code rvs-scroll" ref={codeWindow.attach} onScroll={codeWindow.onScroll}>
               <CodeLines tokens={codeSide} range={codeWindow.range} emptyText={t('scm.emptySide')} />

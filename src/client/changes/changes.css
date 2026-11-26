@@ -103,6 +103,51 @@
 
 .rvs-changes-stale { color: var(--rvs-chg-mod); }
 
+/*
+ * 作用域切换（会话累计 / 本轮）。
+ *
+ * 一段式小胶囊：两个按钮共用一条描边，选中的那个用悬停底色 + 主色字，未选中的
+ * 用次级色 —— 折叠状态下这一行已经有文件数、+/−、审阅计数，切换必须比那些更像
+ * "开关"而不是"又一个计数"。按钮本身高度与 `.rvs-changes-reviewed` 一致（18px），
+ * 头行不会因为它变高。
+ */
+.rvs-changes-scope {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--rvs-chg-border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.rvs-changes-scope-btn {
+  padding: 0 6px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--rvs-chg-fg3);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rvs-changes-scope-btn + .rvs-changes-scope-btn {
+  border-left: 1px solid var(--rvs-chg-border);
+}
+
+.rvs-changes-scope-btn:hover {
+  background-color: var(--rvs-chg-hover);
+  color: var(--rvs-chg-fg);
+}
+
+.rvs-changes-scope-btn[aria-pressed='true'] {
+  background-color: var(--rvs-chg-hover);
+  color: var(--rvs-chg-fg);
+}
+
+.rvs-changes-scope-btn[aria-pressed='true']:hover { color: var(--rvs-chg-fg); }
+
 .rvs-changes-spacer { flex: 1 1 auto; }
 
 .rvs-changes-nav {

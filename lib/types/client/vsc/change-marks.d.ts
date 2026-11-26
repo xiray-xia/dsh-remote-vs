@@ -119,6 +119,27 @@ export interface ChangeSet {
      * （新建 / 二进制 / 字节被上限扣下）。
      */
     filePatch?: string;
+    /**
+     * 这批 hunk 对应的增删行数（`--numstat` 语义：`+` / `-` 行的条数）。
+     *
+     * 面板每 3 秒重新统计一次，而屏幕上这批标记只会在这几行真的变了之后才作废；
+     * 把"这批标记当初代表多少行"记在数据里，才能拿它和新的统计行比对（见
+     * `changes/staleness.ts`）。省略 = 无可比数字：二进制 / 过大的行不做行级比较、
+     * 被字节上限扣下的 diff 也不会走到建标记这一步（`changes/diff-outcome.ts`），
+     * 所以它们都没有这两个字段，而不是"带一个前缀数字"。
+     */
+    added?: number;
+    deleted?: number;
+    /** 建立这批标记时列表行给出的状态（A/M/D/R/…）；省略 = 未知，不参与比对。 */
+    status?: string;
+    /**
+     * 每个 hunk 的一枚稳定块标识（与 `patches` 同序，见 `changes/block-confirm.ts`）。
+     *
+     * 编辑器里的「确认保留」是**块级**本地记账，块必须有一个跨刷新稳定的名字；
+     * 行号会随远端变化，hunk 头里的四个数字 + 文件的远端绝对路径才代表"同一处改动"。
+     * 省略 = 调用方没有给出文件路径，编辑器的块笔记不启用。
+     */
+    blocks?: string[];
 }
 /** 换一份改动标记；`null` = 清空（有改动数据，但没有任何要画的东西）。 */
 export declare const setChangeSet: import("@codemirror/state").StateEffectType<ChangeSet | null>;

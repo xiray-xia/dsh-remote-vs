@@ -104,7 +104,7 @@ extra configuration is needed.
 | Search | Two modes: **file names** (remote `find`) and **contents** (remote `grep`). Content mode has a scope folder, `Aa` (case) / `ab_` (whole word) / `.*` (regex), results grouped per file with match highlights, and clicking a hit jumps to that line; **content mode can be aborted** (changing or clearing the query kills the running remote `grep`; an older Host without the streaming route degrades to a one-shot, non-cancellable query), success with stderr warnings is reported above the results, and a **directory** hit in name mode is revealed in the tree instead of being opened as a file |
 | Connection status and offline read-only | The top bar and the editor info bar show the current workspace's SSH link state (**connection OK / connection issue / ready, connects on demand**): a drop is no longer silent — open editor tabs keep their cached content and turn **read-only** (saves are blocked with an explanation), the tree keeps showing cached directories while background refreshes stay quiet, and uncached directories say they are offline. When the link recovers, directories, git status, **unmodified file tabs and read-only diff tabs** refresh automatically (tabs with unsaved edits are left alone and the user is told). An errored link is retried at most three times, 30 s apart, then the chip is a manual retry control. While the link is down, "Undo this change" and the diff's hunk actions are blocked too; **a single operation's deadline is NOT treated as a broken link** — the chip stays ok and only that operation fails, with the real reason; when the link is down and the workspace has no cache, the SCM panel says it cannot read instead of sitting on "loading". **No cross-reload persistent cache** (remote source never lands on disk) — a deliberate privacy trade-off |
 | Source control | **Repository-folder picker** (for workspaces whose git repository lives in a sub-folder: browse the remote tree, one-click jump to any repository discovered inside the workspace, type a relative or absolute path, and see which repository each folder resolves to); changes / staged / untracked / ignored buckets; **untracked directory rows expand on click**; per-file AND **per-hunk** stage / unstage / discard (behind a confirm) / commit; branches, remotes and stash panes; sync (fetch/pull/push), with **push refspec support** (Gerrit style `HEAD:refs/for/<branch>`; empty = plain `git push`, a non-empty value is remembered); fetch/pull/push/sync get a **live output panel** (server-sent events showing git/remote output, a running clock, **cancel** that kills the remote process group, and the full log for copying afterwards; an older Host without the streaming route falls back to the one-shot result); a non-repository workspace can **initialize a repository**, a branch can be **renamed**, and a remote URL can be **edited** (each behind a confirm/validation) |
-| Session change review | The **collapsible** panel above the composer: what THIS SESSION changed (one row per file, file-type icon, `+a −b` on the right); clicking a file opens it in the remote editor with **line shading plus character-level inline diff**, `n/N ↑↓` jumps between change points, and hovering a changed line offers **Undo this change** (remote `git apply -R`). See "Session change review" below; the header can **show only unreviewed files** and **jump to the next unreviewed one** (wraps, never marks a file reviewed) |
+| Session change review | The **collapsible** panel above the composer: what THIS SESSION changed, with a one-click switch to **this turn** (the most recent completed turn; the default stays the session total) — one row per file, file-type icon, `+a −b` on the right; clicking a file opens it in the remote editor with **line shading plus character-level inline diff**, `n/N ↑↓` jumps between change points; hovering a changed line puts a `⋯` menu at the row end with **Undo this change** (remote `git apply -R`, failures classified) and **Keep this change** (per block, local only, independent of the file-level ✓); a row's right-click opens a **read-only side-by-side diff** of the ledger baseline, and open tabs are marked "positions stale" when the panel's poll sees their row move. See "Session change review" below; the header can **show only unreviewed files** and **jump to the next unreviewed one** (wraps, never marks a file reviewed) |
 | Side-by-side diff | Panes stay **exactly equal** + per-hunk buttons in the middle gutter + a **top horizontal scrollbar** (a very long line can no longer break the symmetry) + pinned line numbers, **rendering only the rows inside the viewport** (a 3000-line file goes from 9000 row containers to ~174, with exactly the same scroll range as a full render); switch between "before / after", and the after side is editable and savable (the save writes the working-tree file back; a diff above 8MiB is read-only, so a truncated prefix can never be written over the real file) |
 | Commit graph | SVG branch/merge graph; selecting a commit opens the **resizable / expandable commit-details pane** below it with three views: **Commit details** (subject, author, time, full hash + copy, parents, refs, message body, checkout), **Contents** (changed files grouped by directory, collapsible and path-filterable; click for the diff, right-click or the row button to open in the editor), **Diff** (only the first ~1500 rows start expanded, later files start folded; both line numbers, `+/−` counts, line wrapping, previous/next-file navigation, and copy of one file's patch or the whole patch). Merge commits are shown against their **first parent** (git lists no files for a merge otherwise) |
 | AI review | A single-file diff OR a **whole commit** can be handed to the conversation with one click — the request is **appended to the composer draft only** (nothing is sent automatically, and you can edit it first): a diff up to 32 KiB is inlined verbatim; a larger one (or one silently truncated at the 2 MB cap) becomes a summary request — file/commit facts + hunk headers + "fetch it yourself with `git show`" (a 2 MB diff is hundreds of thousands of tokens, so inlining it is pointless); an untracked or binary file is passed by path and the model reads it. Entries: the side-by-side diff toolbar and the commit pane's Diff toolbar; the button is disabled with the reason when the current session is not bound to this remote workspace, or the host exposes no conversation input channel |
@@ -351,16 +351,59 @@ with zero change events).
   right with the composer card; click the header to collapse/expand, `⟳` forces an immediate rescan. With no
   changes it says "this session has not changed any file yet"; when it cannot compute, it states the
   **specific reason** (see the limits below) instead of handing you an empty list to guess about.
+- **Scope switch: session total / this turn** (the default is still the session total; nothing changes unless
+  you switch). The two small buttons in the header appear only when the host really published a completed
+  turn (not before the first turn ends, and not against an older host). In "This turn" the title becomes
+  **"Turn #N · HH:MM"** and both the rows and `+a −b` describe the **most recent completed turn** only — a file
+  some earlier turn changed but this turn did not is absent. The choice is remembered per browser
+  (`rvs.changes.scope`). N is a **completed** turn number: the turn the session is running right now is never
+  folded in early.
+- **Opening a row in turn mode** uses the same marks/undo machinery as the cumulative view, but the baseline
+  is **what the file looked like when the previous turn closed**: `n/N ↑↓`, the hover "Undo this change"
+  (reverse-applies that turn's hunk) and the row's "Revert all changes in this file" (the turn's whole-file
+  reverse patch) all undo **this turn's** work only. If the file was modified after the turn closed, the host
+  answers "stale" and the panel **says so and switches back to the session-total view** before fetching that
+  comparison — it never paints line numbers from a comparison that no longer describes the file. Turn mode
+  has no "undo the new file (delete it)" entry (that needs git's index copy, and the turn cache keeps
+  patches only); the row menu says to delete it from the session-total view or the Source Control panel.
 - **Clicking a file** opens it in the remote editor with change marks: added lines get a **green line
   background**, deleted characters are drawn as an **inline struck-through chip** (a deleted character does
   not exist in the new file, so it can only be an inserted widget), and the left gutter carries a change bar.
 - **Jumping between change points**: the floating `n/N ↑↓` control at the editor's top-right
   (`Alt+Shift+Cmd/Ctrl+↓/↑`) cycles through them; typing in the editor invalidates the marks and says
-  "position may be out of date".
-- **Undo this change**: hover a changed line and click → remote `git apply -R`. When the context no longer
+  "position may be out of date". **The panel's 3-second rescan invalidates open tabs too** (the session or
+  the remote side changed the same file again, or the file left the list): the same "positions stale" badge
+  appears and clicking that row recomputes against what is there now — an open tab never keeps painting
+  marks nobody knows are out of date.
+- **View diff (read-only)**: right-click a row → "View diff" opens the file as a **side-by-side** diff whose
+  data comes from the **session ledger** (baseline = session start), not from `git diff` (that compares
+  index/HEAD and may include uncommitted edits that predate the session). The before side is reconstructed
+  exactly from the served hunks plus the current file, reusing the existing side-by-side renderer. The page
+  is read-only: no editing, no per-hunk stage/revert, and reloading still goes through the ledger. Binary and
+  oversized rows keep the entry **visible but disabled**, with the reason in its hint (opening it could only
+  show an empty or fake view); when the content was withheld at the byte cap — or the "after" read hit the
+  8 MiB cap — the page is **not opened** and says the comparison is incomplete (the two panes would be
+  misaligned).
+- **The five outcomes of opening a row are stated**: a diff withheld at the byte cap says "the comparison is
+  incomplete (it may count the whole file as changed), so nothing is marked and nothing can be reverted"; an
+  oversized file says "no line-level comparison, no undo — open the file to read it"; binary files, files the
+  remote cannot read, and files whose change is already gone each get their own sentence instead of a silent
+  empty list.
+- **Row-end `⋯` menu**: hovering a changed line puts a small `⋯` at the row's right end (one row tall, its
+  vertical centre locked to that row, so the pointer reaches it horizontally without entering another row);
+  clicking it opens "Undo this change" and "Keep this change".
+- **Undo this change**: pick undo in that menu → remote `git apply -R`. When the context no longer
   matches, the far end refuses outright (not one byte of the file changes); a tab with unsaved edits is
   refused first, so a remote patch can never overwrite your buffer; on success the caret stays where it was
-  and the marks are re-read (they do not simply vanish because something was undone).
+  and the marks are re-read (they do not simply vanish because something was undone). **Failures are
+  classified**: surroundings moved / the file is gone from the repository / permission denied / the
+  repository has a `dubious ownership` problem (set `safe.directory` or fix ownership) / the patch is corrupt
+  — each with the sentence that tells you what to do, plus git's raw wording.
+- **Keep this change (per block, local only)**: the same menu carries a toggle, "Keep this change" —
+  "I read this block and agree with it". It **writes nothing, sends nothing, and does not touch the diff
+  data**; the state lives in browser storage per session, keyed by a stable block identity (file + the four
+  hunk-header numbers), so it survives a page reload. It is a **second level** and does **not** sync with the
+  row's ✓: a block note is "I looked at this piece", the ✓ stays a file-level manual mark. No bulk keep.
 - **Follow the session's workspace**: the sidebar, the editor's dropdown and the file tree all follow the
   workspace the **current session** lives in; after a manual switch they are not pulled back within that
   session, and a new session follows again. The capability lives in the store, so it works even when **the
@@ -383,11 +426,40 @@ with zero change events).
 - Binary and oversized files are marked "binary / too large" on the row and get no character-level diff;
   **non-UTF-8 text (GBK and friends) is treated as binary** (no counts, no undo) so it cannot produce
   garbage numbers and an undo that always fails.
+- **Oversized files get no line-level comparison**: the list pins their `+a −b` to `0/0` (not real counts),
+  so opening one only opens the file with the sentence "too large, no line-level comparison" — no marks and
+  no undo, which also keeps `0/0` from being compared against real line counts and mislabelling the tab
+  "positions stale".
+- **The turn view covers the most recent completed turn only** (no per-turn history): at each turn close the
+  host records every listed file's text and diffs the next close against it, so the turn the session is
+  running right now is never mixed in.
+- **The turn's patches and hunk text have a budget (4 MiB by default)**: it counts whole-file reverse
+  patches plus hunk lines only; both full texts and the previous-close snapshot are bounded separately by
+  the scan caps (resident cost is roughly 4 MiB + those texts, worst case ≈ 20 MiB per active session).
+  Over budget, that session's turn view keeps **the real counts only** — no marks, no undo, the reason
+  stated, and the host **stops computing turn views for the rest of the session**. Continuing would
+  compare the next turn against a snapshot that was never advanced and attribute old work to it. The
+  session-total view is unaffected.
+- **New files are found by the slow scan**: a turn close first uses whatever scan result is cached and the
+  list says "still waiting for the new-file scan"; after the slow walk (`git ls-files --others`) lands the
+  **same turn is recomputed** and that marker clears. When the walk is written off, the list was cut by the
+  file cap, or a PREVIOUS turn never finished its correction, the turn view stays marked partial — and a
+  path whose previous side was withheld (binary / too large) is dropped rather than reported as a
+  whole-file creation.
+- Binary/oversized files keep "binary / too large" in the turn view too, with no line-level comparison; the
+  turn cache does not keep their bytes.
 - When the untracked scan gives up (e.g. the far end refuses), the panel **states the reason** and keeps the
   refresh entry point instead of silently listing fewer rows.
 - Undo carries **provenance** (session / binding / repository directory), so a patch can never be applied to
   another host after switching sessions or bindings; a file this session created whole is not offered for
   undo (a reverse patch must never delete an untracked file).
+- Binary/oversized rows show "View diff" **disabled with its reason**; content withheld at the byte cap (or
+  an "after" read over 8 MiB) opens no diff at all, because those hunks are a whole-file fake comparison
+  that could never be reverted.
+- When a file is back at its session baseline, opening the row says "no diff to show right now" instead of
+  claiming the remote cannot read it.
+- "Positions stale" is only a **notice**, never an automatic re-read: that happens when you click the row (or
+  after a successful save).
 
 ## P2 transparent remote execution (Windows native)
 

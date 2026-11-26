@@ -396,15 +396,63 @@ function collectHunk(hunk: UnifiedHunk, marks: ChangeMark[], index: number): num
 }
 
 /**
+ * 建立这批标记时随数据一起带下来的元信息（都可省略）。
+ *
+ * 两者各自服务一个上层判断，而且都**只能在这一层算**：块标识要用 hunk 头的四个
+ * 数字 + 文件身份；状态来自列表行。行数统计也在这里算（面板的过期判定要用）。
+ */
+export interface ChangeSetMeta {
+  /**
+   * 文件的**远端绝对路径**（块标识的前半段，见 `changes/block-confirm.ts`）。
+   *
+   * 用绝对路径而不是显示路径：显示路径是相对会话根的，两个绑定/两个仓库子目录
+   * 可以有相同的显示路径 + 相同的 hunk 头，那样它们的块会被认成同一块。
+   */
+  path?: string
+  /** 列表行的状态字母（`RemoteChangedFile.status`）。 */
+  status?: string
+}
+
+/** `+` / `-` 行数（`--numstat` 语义），与列表行给出的数字同源。 */
+function countHunkLines(hunks: readonly UnifiedHunk[]): { added: number; deleted: number } {
+  let added = 0
+  let deleted = 0
+  for (const hunk of hunks) {
+    for (const raw of hunk.lines) {
+      if (raw[0] === '+') added += 1
+      else if (raw[0] === '-') deleted += 1
+    }
+  }
+  return { added, deleted }
+}
+
+/**
+ * 每个 hunk 的稳定块标识：`远端绝对路径|oldStart:oldLines:newStart:newLines`。
+ *
+ * 行号会随远端改动漂移，hunk 头里的四个数字才是"这一处改动"的身份；带上绝对
+ * 路径是为了不同文件、不同仓库里恰好同号的块不会互相认领（显示路径是相对会话根
+ * 的，两个仓库子目录可以给出同一个字符串）。
+ */
+function blockIdsOf(hunks: readonly UnifiedHunk[], path: string): string[] {
+  return hunks.map(hunk => `${path}|${hunk.oldStart}:${hunk.oldCount}:${hunk.newStart}:${hunk.newCount}`)
+}
+
+/**
  * Build the editable set for one file.
  *
  * @param hunks - served hunks for the whole session.
  * @param stamp - identity of the comparison (file + baseline + turn).
  * @param filePatch - the host's whole-file reverse patch, when it served one
  *   (see `ChangeSet.filePatch`); '' / missing = nothing to revert as a whole.
+ * @param meta - 行数 / 状态 / 块标识的来处（见 {@link ChangeSetMeta}）。
  * @returns the mark set the editor paints, or {@link EMPTY_CHANGE_SET}.
  */
-export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string, filePatch?: string): ChangeSet {
+export function changeSetFromHunks(
+  hunks: readonly UnifiedHunk[],
+  stamp: string,
+  filePatch?: string,
+  meta: ChangeSetMeta = {},
+): ChangeSet {
   if (hunks.length === 0) return { marks: [], hunks: [], stamp, patches: [] }
   const marks: ChangeMark[] = []
   // `hunks[i]` / `patches[i]` must stay in step with the mark's `hunk` index, so
@@ -421,11 +469,18 @@ export function changeSetFromHunks(hunks: readonly UnifiedHunk[], stamp: string,
   // Jump order is ascending by line; the mark's `hunk` is a key into `patches`,
   // never into this list — that indirection is what keeps both orderings right.
   const order = [...anchors].sort((left, right) => left.line - right.line)
+  const counts = countHunkLines(hunks)
   return {
     marks,
     hunks: [...new Set(order.map(anchor => anchor.line))],
     stamp,
     patches,
     ...(filePatch === undefined || filePatch === '' ? {} : { filePatch }),
+    // 行数只在**完整比较**里才建：调用方（`changeSetFromDiff`）不会把被字节上限
+    // 扣下的 diff 送进来，所以走到这里的 hunk 就是可信的比较结果。
+    added: counts.added,
+    deleted: counts.deleted,
+    ...(meta.status === undefined || meta.status === '' ? {} : { status: meta.status }),
+    ...(meta.path === undefined || meta.path === '' ? {} : { blocks: blockIdsOf(hunks, meta.path) }),
   }
 }

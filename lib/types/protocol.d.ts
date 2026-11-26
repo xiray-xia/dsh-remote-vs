@@ -522,6 +522,61 @@ export interface RemoteChangedFile {
     revert?: 'patch' | 'delete';
 }
 /**
+ * The most recent COMPLETED turn, as the review panel switches to it.
+ *
+ * "This turn" is answered from the ledger's own turn boundaries: the host keeps
+ * every listed path's text at each turn close and compares the next close
+ * against it. Deliberately ONE turn deep — a per-turn history would need the
+ * full text of every file at every boundary, and the panel's job is "what did
+ * the turn I just ran change", not a time machine.
+ */
+export interface RemoteChangesTurnView {
+    /** Turn number the delta describes (0 = no turn has closed yet). */
+    turn: number;
+    /** Files this turn changed, with THIS TURN's counts (not the session total). */
+    files: RemoteChangedFile[];
+    added: number;
+    deleted: number;
+    /** Wall-clock ms when the delta was computed. */
+    at: number;
+    /**
+     * Whether the per-file hunks behind `turnDiff` are cached.
+     *
+     * `false` = the turn's contents were too large for the memory budget (or the
+     * file cap made attribution unreliable): the counts above are still real, but
+     * clicking a row cannot paint hunks or revert. Honest degradation — the
+     * alternative would be comparing the next turn against a half-updated
+     * snapshot and attributing old changes to it.
+     */
+    cached: boolean;
+    /** Why `cached` is false (shown to the user, never swallowed). */
+    reason?: string;
+    /**
+     * This view is INCOMPLETE — and it is not "a prefix of a longer list".
+     *
+     * Three ways rows go missing:
+     * - the file cap cut the list (`files` is the first N of the scanned paths);
+     * - the previous turn's snapshot was cut by that cap, or a previous side was
+     *   withheld (binary / over the read cap), so a path that cannot be compared is
+     *   DROPPED instead of being guessed as a whole-file creation;
+     * - the previous turn's slow scan never landed before this turn closed, so a
+     *   file missing from that snapshot cannot be proven new either.
+     *
+     * A partial view must say so: "these rows are what this turn provably changed",
+     * not "this is everything the turn changed".
+     */
+    truncated?: true;
+    /**
+     * The turn's slow scan (`git ls-files --others`) has not landed yet.
+     *
+     * The same turn is REBUILT when it does (`correctTurn`), so this list may still
+     * grow — it is never relabelled as the next turn. When a newer turn closes
+     * first, the view stops waiting and `truncated` records that it never caught
+     * up.
+     */
+    pending?: true;
+}
+/**
  * What one session changed on its remote host since the session's baseline.
  *
  * The baseline is the content of every file git already reported as dirty when
@@ -562,10 +617,30 @@ export interface RemoteChangesSummary {
     pending: boolean;
     /** Why this session has no ledger (local session, no git, timeout, …). */
     unavailable?: string;
+    /**
+     * The last completed turn's delta, when the host computed one.
+     *
+     * Optional on purpose: an older host (or a session with no closed turn yet)
+     * omits it and the panel stays on the session-cumulative view it has always
+     * shown. A client that does not know the field ignores it.
+     */
+    turnView?: RemoteChangesTurnView;
 }
 /** One file's whole-session comparison, ready for editor decorations. */
 export interface RemoteChangesDiff {
-    kind: 'text' | 'binary' | 'missing';
+    /**
+     * `unavailable` / `stale` belong to the per-turn comparison only.
+     *
+     * - `unavailable`: the host has no cached per-turn hunks for this session
+     *   (memory budget, file cap, or no completed turn) — `reason` says which;
+     * - `stale`: the file changed after the turn closed, so the cached comparison
+     *   no longer describes what is on disk; the client falls back to the
+     *   session-cumulative view instead of painting wrong lines.
+     *
+     * The whole-session `diff` never returns them, so a client that switches on
+     * the old three kinds keeps working unchanged.
+     */
+    kind: 'text' | 'binary' | 'missing' | 'unavailable' | 'stale';
     /** Remote absolute POSIX path. */
     path: string;
     display: string;
@@ -584,6 +659,8 @@ export interface RemoteChangesDiff {
     status?: 'A' | 'M' | 'D' | 'R' | 'C' | 'T' | 'U';
     /** The diff was cut at the byte cap: `hunks` is a prefix. */
     truncated?: true;
+    /** For `unavailable` / `stale`: what happened, in words the panel can show. */
+    reason?: string;
 }
 /** One row of the side-by-side diff projection. */
 export interface DiffRow {

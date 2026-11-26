@@ -69,6 +69,13 @@ export interface SessionChangesDeps {
      * fire.
      */
     execBudgetMs?: number;
+    /**
+     * Memory budget for the cached per-turn hunks and reverse patches, in bytes.
+     *
+     * Overridable so a check can exercise the over-budget degradation without
+     * generating four megabytes of text; the real default is {@link MAX_TURN_PATCH_BYTES}.
+     */
+    turnPatchBytes?: number;
 }
 export declare class SessionChanges {
     private readonly ledgers;
@@ -103,6 +110,25 @@ export declare class SessionChanges {
      * @returns hunks for decorations, or null when the session/file is unknown.
      */
     diff(sessionId: string, path: string): Promise<RemoteChangesDiff | null>;
+    /**
+     * One file's comparison for the most recent COMPLETED turn.
+     *
+     * Same shape as {@link diff} (the editor paints both the same way), but the
+     * "before" side is the previous turn's close instead of the session baseline.
+     * The hunks are served from the turn delta's cache, so this call costs NO
+     * remote work in the common case — but a cached comparison is only worth
+     * showing while it still describes the disk. That is why the `after` side is
+     * read back here and compared with the cached text FIRST: if the file moved on
+     * after the turn closed (a later save, a terminal command, an agent), the
+     * answer is `stale` and the client falls back to the session view instead of
+     * painting line numbers that no longer exist.
+     *
+     * @param sessionId - live session owning the ledger.
+     * @param path - the file's remote absolute path (as listed in `turnView.files`).
+     * @returns hunks for decorations, `unavailable`/`stale` with a reason, or null
+     *   when the session itself is unknown.
+     */
+    turnDiff(sessionId: string, path: string): Promise<RemoteChangesDiff | null>;
     /** Resolve once every queued refresh has settled, including coalesced work. */
     settled(): Promise<void>;
     /** Drop one session's ledger. */
@@ -187,8 +213,76 @@ export declare class SessionChanges {
      * Phase one publishes, phase two adds the new files when (and if) it lands.
      */
     private refresh;
-    /** Recompute the panel's list from the scans currently known. */
+    /**
+     * Recompute the panel's list from the scans currently known.
+     *
+     * @param fromSlowScan - this publish was triggered by the `git ls-files
+     *   --others` walk. A turn delta closed before that walk landed is still
+     *   provisional: this flag is what lets it be re-derived once the turn's new
+     *   files are known (see `correctTurn`).
+     */
     private publish;
+    /**
+     * Close one turn: compute "what did it change" and remember this close as the
+     * next turn's starting point.
+     *
+     * The delta is defined against the PREVIOUS close, not the session baseline, so
+     * a file the session changed in turn 1 and left alone in turn 2 must not appear
+     * in turn 2's list — otherwise the view says the same work happened twice.
+     * That is what `turnAfter` is for: it holds every listed path's text at the
+     * moment the previous turn closed, and it is replaced (never merged) here.
+     *
+     * A failed `after` read leaves the boundary unconsumed, so the next publish
+     * retries instead of recording a turn against "nothing".
+     */
+    private closeTurn;
+    /**
+     * Re-derive the CURRENT turn's delta once the slow scan behind it has landed.
+     *
+     * A turn's new files are discovered by `git ls-files --others`, which runs
+     * after the tracked scan by design and can land seconds later. Rebuilding the
+     * same turn from the SAME "before" snapshot (kept in `turnBefore`) is what
+     * makes those files appear in the turn they belong to instead of in the next
+     * one. Guarded against the two ways this could lie: a newer turn boundary
+     * (which supersedes this delta) and a root move.
+     */
+    private correctTurn;
+    /** Remember one close's sides for the next boundary (see `TurnSideText`). */
+    private turnSnapshotOf;
+    /**
+     * The "after" side of one turn close, in `display` space.
+     *
+     * Starts from the publish's own reads (every listed path), then reads the paths
+     * the PREVIOUS close listed but this publish does not: those left the dirty
+     * list (reverted to their baseline, deleted, restored), and without reading
+     * them now the revert would be attributed to nobody — "the turn put the file
+     * back" would look like "the turn changed nothing".
+     *
+     * @returns `ok` with the sides; `retry` when a read failed (the caller keeps
+     *   the turn boundary for the next publish); `superseded` when a root move or
+     *   a newer publish already owns the observation.
+     */
+    private collectTurnSides;
+    /**
+     * Compare one turn's before/after sides into panel rows plus cached hunks.
+     *
+     * The comparison rules are the ones the whole-session `publish` uses (binary
+     * and cap-withheld bytes carry 0/0 counts, a creation has no reverse patch,
+     * hunks come from the same Myers implementation), so a row means the same
+     * thing in both views.
+     */
+    private buildTurnDelta;
+    /**
+     * Commit one built delta, degrading honestly when it blew the memory budget.
+     *
+     * Over budget the statistics are already computed and stay usable, but the
+     * per-file hunks and patches are dropped and this session stops computing turn
+     * views: keeping a half-filled snapshot would make the NEXT turn compare
+     * against texts that belong to an older boundary.
+     */
+    private storeTurnDelta;
+    /** Stop computing turn views for this session, saying why (sticky). */
+    private disableTurn;
     /**
      * The cheap scan: tracked files whose working-tree bytes differ from the
      * index (1.4s measured on the reference monorepo).

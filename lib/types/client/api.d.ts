@@ -251,6 +251,16 @@ export declare const api: {
     changes: {
         list: (sessionId: string, force?: boolean, repoSubdir?: string) => Promise<RemoteChangesSummary | null>;
         diff: (sessionId: string, path: string, repoSubdir?: string) => Promise<RemoteChangesDiff | null>;
+        /**
+         * The same comparison, but against the previous completed turn's close
+         * instead of the session baseline (the panel's 「本轮」 scope).
+         *
+         * Answers `unavailable` / `stale` (with a reason) instead of hunks when the
+         * host has no cached per-turn contents or the file moved on after the turn —
+         * the client must fall back to `diff` (session view) rather than paint lines
+         * that no longer exist.
+         */
+        turnDiff: (sessionId: string, path: string, repoSubdir?: string) => Promise<RemoteChangesDiff | null>;
     };
     setRoutingMode: (mode: "off" | "shadow" | "enforce") => Promise<"off" | "shadow" | "enforce">;
     getViewSettings: () => Promise<RemoteViewSettings>;

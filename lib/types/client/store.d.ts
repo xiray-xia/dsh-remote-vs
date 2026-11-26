@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
-import type { DiffModel, GitStatusDetail, RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts';
+import type { DiffModel, GitStatusDetail, RemoteChangedFile, RemoteChangesTurnView, RemoteHostSummary, RemoteRoutingStatus, RemoteWorkspaceBinding } from '../protocol.ts';
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts';
+import { type DiffNotice } from './changes/diff-outcome.ts';
 import { type StatusBuckets, type TreeMarks } from './scm/status-map.ts';
 import { type DiffPayload } from './scm/actions.ts';
 import { type DirExpansions } from './scm/untracked-dirs.ts';
@@ -94,10 +95,32 @@ export interface EditorTab {
     activeHunk?: number;
     /** 编辑器报告文档已与 `changeSet` 脱钩（用户敲过字），上层该重新拉数据。 */
     changeStale?: boolean;
+    /**
+     * 这批改动标记的建立时刻（`Date.now()`，`applyChangeSet` 写入）。
+     *
+     * 面板的轮询用它和 `RemoteChangesSummary.at` 比先后：标记比列表新时（保存/撤销
+     * 刚重读过），那份更早的列表不能证明标记过期（见 `changes/staleness.ts`）。
+     */
+    changeSetAt?: number;
     /** 改动点跳转目标行（1-based）。与 `line` 分开，两条跳转链路互不干扰。 */
     revealHunkLine?: number;
     /** 改动点跳转的 nonce，语义同 `lineNonce`。 */
     revealHunkNonce?: number;
+    /**
+     * 「会话改动」面板那一行的只读 diff（不是 git 工作区 diff）。
+     *
+     * 有它 = 这一页是账本轮次的比较：两栏都只读（改前是还原出来的基线、改后是远端
+     * 当前内容），没有 hunk 暂存/撤销，重新载入走账本而不是 `git diff`。`reloadTab`
+     * 与 `saveTargetOf` 都按它分流。
+     */
+    sessionDiff?: {
+        sessionId: string;
+        alias: string;
+        /** 会话账本的仓库根（`git apply -R` 的目标目录，也是仓库目录的答案）。 */
+        root: string;
+        /** 面板显示路径（标签条与 diff 头用它，不参与任何写操作）。 */
+        display: string;
+    };
     /**
      * 重读（`reloadTab`）成功后递增的 nonce。
      *
@@ -896,6 +919,54 @@ export declare function gotoChange(tabId: string, dir: 1 | -1): number | undefin
  * 重新拉数据是上层的事，仓库在这一层不发起任何请求。
  */
 export declare function markChangeStale(tabId: string): void;
+/**
+ * 面板拿到新统计后，指出哪些已开标签页的改动标记已经过期。
+ *
+ * 标记的失效原来只由"本地输入"触发（`markChangeStale` 由编辑器报告），所以远端或
+ * 会话继续改同一个文件时，屏幕上那份行号与补丁会一直画着、看起来仍然准确。面板每
+ * 3 秒重读一次账本，那份列表就是"这批标记还算不算数"的唯一证据 —— 这里把它翻成
+ * 既有那张「位置已过期」标记。
+ *
+ * 判据是纯函数（`changes/staleness.ts`），这里只负责选出**属于这个会话**的标签页：
+ * 换会话后屏幕上可能还留着上一个会话的标记，拿本会话的列表去比对只会误报。
+ * **不发起任何远端读**：重新计算是用户点该行时的事。
+ *
+ * @param sessionId - 面板当前会话。
+ * @param files - 这一轮列表的行。
+ * @param truncated - 列表自己被文件上限截断（"找不到"不再算证据）。
+ * @param listedAt - 这份列表的重算时刻（`RemoteChangesSummary.at`）。
+ * @param turnView - 本轮视图；带本轮来源的标记要用它那一份行来判（见实现）。
+ */
+export declare function syncChangeSetStaleness(sessionId: string, files: readonly RemoteChangedFile[], truncated?: boolean, listedAt?: number, turnView?: RemoteChangesTurnView): void;
+/**
+ * 「会话改动」面板那一行的 → 只读并排 diff（见 `changes/session-diff.ts`）。
+ *
+ * 与 `openFile`/`openDiff` 的区别是数据来源：这里读的是会话账本（会话起点为基线），
+ * 而 `openDiff` 读的是 git 工作区（索引/HEAD 为基线）。两件事不能互相顶替 ——
+ * 工作区里可能有会话开始之前就存在的未提交改动。
+ *
+ * 结果里的 `notice` 就是面板要显示的那句话（截断 / 二进制 / 读不到 / 已无差异），
+ * 打开成功时为 `undefined`。调用方负责把它渲染出来，不要吞掉。
+ */
+export interface ChangeDiffTarget {
+    sessionId: string;
+    alias: string;
+    /** 会话账本的仓库根（与 `revertFileChanges` 的 `root` 同源）。 */
+    root: string;
+    /** 远端绝对路径。 */
+    path: string;
+    /** 面板显示路径（标签条用）。 */
+    display: string;
+    /** 面板选定的仓库子目录（透传给账本的 `repoSubdir`，可省略）。 */
+    repoSubdir?: string;
+}
+export interface ChangeDiffResult {
+    opened: boolean;
+    /** 必须显示给用户的结论；`undefined` = 打开成功且没有任何要说明的。 */
+    notice?: DiffNotice;
+}
+/** 打开（或聚焦）一行的会话只读 diff。 */
+export declare function openChangeDiff(target: ChangeDiffTarget): Promise<ChangeDiffResult>;
 export declare function undoChange(tabId: string, mark: ChangeMark): Promise<void>;
 /**
  * Coordinates for "undo everything this session did to this file".
@@ -913,6 +984,15 @@ export interface RevertFileTarget {
     path: string;
     display: string;
     mode: 'patch' | 'delete';
+    /**
+     * Which comparison the patch must come from.
+     *
+     * `turn` = "undo what THIS turn did to this file" (restore the previous turn's
+     * close); absent = the session baseline (unchanged default). The patch is
+     * re-fetched from the host rather than taken from the panel's poll, so the
+     * same argument decides WHICH host read to make.
+     */
+    scope?: 'session' | 'turn';
 }
 /**
  * Revert one file's WHOLE session change set (the panel row's action).

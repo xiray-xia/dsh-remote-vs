@@ -1288,7 +1288,7 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
     // ------------------------------------------- session change ledger
     // What one live session changed on its remote host. The ledger itself is
     // fed by turn events (see index.ts); the browser only ever reads it, which
-    // is why both ops are side-effect free and answer null instead of 404 when
+    // is why all three ops are side-effect free and answer null instead of 404 when
     // the session has no ledger yet (the panel shows its pending/absent state).
     {
       kind: 'exact',
@@ -1307,8 +1307,8 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
         const body = read.body
         const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
         const op = typeof body?.op === 'string' ? body.op : ''
-        if (sessionId === '' || (op !== 'list' && op !== 'diff')) {
-          writeJson(res, 400, { error: 'op (list|diff) and a non-empty sessionId are required' })
+        if (sessionId === '' || (op !== 'list' && op !== 'diff' && op !== 'turnDiff')) {
+          writeJson(res, 400, { error: 'op (list|diff|turnDiff) and a non-empty sessionId are required' })
           return
         }
         const ledger = deps.changes
@@ -1342,11 +1342,17 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
         }
         const path = typeof body?.path === 'string' ? body.path : ''
         if (path === '') {
-          writeJson(res, 400, { error: 'path is required for op=diff' })
+          writeJson(res, 400, { error: `path is required for op=${op}` })
           return
         }
         try {
-          writeJson(res, 200, { diff: await ledger.diff(sessionId, path) })
+          // `turnDiff` answers the same shape from the ledger's last completed
+          // turn (cached hunks, plus a `stale` verdict when the file moved on).
+          writeJson(res, 200, {
+            diff: op === 'turnDiff'
+              ? await ledger.turnDiff(sessionId, path)
+              : await ledger.diff(sessionId, path),
+          })
         } catch (error) {
           // Reading the diff is a remote (git) round trip: it failed upstream.
           writeRouteError(res, error)

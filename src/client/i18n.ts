@@ -106,6 +106,28 @@ export const DYNAMIC_KEYS = [
   'editor.imageFailedHint',
   'editor.imageTooLargeTitle',
   'editor.imageTooLargeHint',
+  // Chosen through the `NOTICE_KEY` table in `changes/diff-outcome.ts`: the
+  // panel renders "why this diff has no (or only partial) marks" from a
+  // resolved notice value, so the scanner sees no literal t() call to count.
+  'changes.diffTruncated',
+  'changes.diffOversized',
+  'changes.diffBinary',
+  'changes.diffMissing',
+  'changes.diffEmpty',
+  // Chosen through `turnOutcomeOf` in `changes/turn-view.ts`: the panel resolves
+  // "why this turn row painted nothing / fell back" from a notice value, so the
+  // scanner sees no literal t() call for these.
+  'changes.turnStatsOnly',
+  'changes.turnUnavailable',
+  'changes.turnStaleFallback',
+  // Chosen through the `FAILURE_KEY` table in `changes/apply-failure.ts`: a
+  // revert failure is classified from the stderr text, then translated.
+  'changes.applyContextMoved',
+  'changes.applyPathMissing',
+  'changes.applyPermission',
+  'changes.applyOwnership',
+  'changes.applyCorrupt',
+  'changes.applyOther',
 ] as const
 
 const zh: Record<string, string> = {
@@ -752,6 +774,21 @@ const zh: Record<string, string> = {
   'git.notARepo': '当前远端工作区不是 git 仓库。',
   // -- session change panel (above the composer)
   'changes.title': '本次改动',
+  'changes.scopeLabel': '改动范围',
+  'changes.scopeSession': '会话累计',
+  'changes.scopeTurn': '本轮',
+  'changes.scopeSessionHint': '以会话起点为基线，列出这个会话改过的全部文件',
+  'changes.scopeTurnHint': '只看最近一个已完成轮次改了什么（更早的轮次不计入）',
+  'changes.turnTitle': '本轮 #{turn} · {time}',
+  'changes.turnEmpty': '本轮没有改动文件。',
+  'changes.turnStatsOnly': '本轮只有增删统计：改动内容超出 Host 的内存预算，没有块标记也不能撤销（会话累计视图不受影响）。',
+  'changes.turnUnavailable': '本轮没有可显示的改动内容',
+  'changes.turnStaleFallback': '该文件在本轮之后又被修改，已回退为会话累计视图。',
+  'changes.turnMarksStale': '本轮改动内容已过期（文件在本轮之后又被修改），标记已清除。',
+  'changes.turnDiffDisabled': '本轮视图只打开文件；并排差异请切回会话累计',
+  'changes.turnPending': '本轮的新文件扫描还没落地：同一轮会被重新统计，列表可能继续变长。',
+  'changes.turnPartial': '本轮视图不完整：部分文件无法归属（上一轮内容未知、超出文件上限，或上一轮扫描未落定），已略过。',
+  'changes.turnRevertNotPossible': '本轮只保留反向补丁，不提供「撤销新建」；要删除这个新文件请在会话累计视图撤销，或到源代码管理面板处理。',
   'changes.onlyUnreviewed': '只看未审阅',
   'changes.nextUnreviewed': '下一个未审阅',
   'changes.allReviewed': '全部已审阅',
@@ -792,7 +829,7 @@ const zh: Record<string, string> = {
   'changes.navLabel': '改动跳转',
   'changes.refresh': '重新统计改动',
   'changes.stale': '位置已过期',
-  'changes.staleHint': '编辑器内容已改动，改动位置可能不准。点击列表里的文件重新计算。',
+  'changes.staleHint': '改动列表或编辑器内容已经变了，屏幕上这批标记可能不再准确。点列表里的文件重新计算。',
   'changes.noWorkspace': '找不到该主机对应的工作区，无法打开文件。',
   // -- 编辑器 gutter 标记与删除 chip（vsc/change-marks.ts 的 title / aria-label）
   'changes.markAdd': '新增行',
@@ -809,6 +846,27 @@ const zh: Record<string, string> = {
   'changes.undoNoContext': '找不到这处改动所属的主机与仓库，无法撤销。',
   'changes.undoConflict': '这处改动的上下文已经变了，远端拒绝了撤销（文件未被修改）。',
   'changes.undoMissing': '这处改动没有可用的补丁内容，无法撤销。',
+  // -- 撤销失败的原因分类（git apply 的 stderr → 可操作的四种说法）
+  'changes.applyContextMoved': '远端文件的内容已经变了，补丁对不上（文件未被修改）。',
+  'changes.applyPathMissing': '补丁指向的文件在远端不见了（可能已被删除或重命名）。',
+  'changes.applyPermission': '远端拒绝写入（权限不足或只读文件系统）。',
+  'changes.applyOwnership': '远端仓库的所有者与当前用户不一致，git 拒绝操作：请配置 safe.directory 或修正目录所有权。',
+  'changes.applyCorrupt': '补丁内容不完整或已损坏，重新打开该文件取一次改动内容后再试。',
+  'changes.applyOther': '远端拒绝了这次补丁，原因见后面的原始信息。',
+  // -- 悬浮栏的第二个动作：块级「确认保留」（纯本地笔记）
+  'changes.actions': '改动操作',
+  'changes.confirmBlock': '确认保留',
+  'changes.confirmedBlock': '已确认保留',
+  // -- 点开一行时 diff 的五种可见结论
+  'changes.diffTruncated': '改动内容被远端字节上限扣下，这次比较不完整（可能整篇都算改动），因此不标改动、也不能撤销。',
+  'changes.diffOversized': '文件太大，Host 扣下了内容，不做行级比较（没有改动标记、也不能撤销）；可以打开文件自行查看。',
+  'changes.diffBinary': '二进制文件没有可显示的文本差异，编辑器里不会画改动标记。',
+  'changes.diffMissing': '远端读不到这个文件的内容（可能已被删除或无法读取），没有可显示的改动。',
+  'changes.diffEmpty': '这个文件现在没有可显示的差异（改动可能已经被撤销）。',
+  // -- 面板直达差异（账本基线的只读并排 diff）
+  'changes.menuViewDiff': '查看差异（只读）',
+  'changes.diffNotPossible': '二进制或过大，没有可显示的差异',
+  'changes.diffTabLabel': '会话改动',
   // -- 连接状态与断线降级
   'connection.ok': '连接正常',
   'connection.error': '连接异常',
@@ -1582,6 +1640,21 @@ const en: Record<string, string> = {
   'git.notARepo': 'This remote workspace is not a git repository.',
   // -- session change panel (above the composer)
   'changes.title': 'Changed files',
+  'changes.scopeLabel': 'Change scope',
+  'changes.scopeSession': 'Session total',
+  'changes.scopeTurn': 'This turn',
+  'changes.scopeSessionHint': 'Everything this session changed, measured from the session baseline',
+  'changes.scopeTurnHint': 'Only what the most recent completed turn changed (earlier turns are not included)',
+  'changes.turnTitle': 'Turn #{turn} · {time}',
+  'changes.turnEmpty': 'This turn changed no file.',
+  'changes.turnStatsOnly': 'This turn has totals only: its contents exceeded the host memory budget, so there are no change marks and nothing can be reverted (the session-total view is unaffected).',
+  'changes.turnUnavailable': 'No turn contents to show for this file',
+  'changes.turnStaleFallback': 'This file was modified after the turn closed, so the session-total view is used instead.',
+  'changes.turnMarksStale': 'The turn comparison is out of date (the file changed after the turn closed); its marks were cleared.',
+  'changes.turnDiffDisabled': 'The turn view opens the file only; use the session-total view for the side-by-side diff',
+  'changes.turnPending': 'This turn is still waiting for its new-file scan: the same turn is recomputed, so the list may still grow.',
+  'changes.turnPartial': 'This turn view is incomplete: some files could not be attributed (the previous side was unknown, the list exceeded the file cap, or the previous turn\'s scan never landed) and were skipped.',
+  'changes.turnRevertNotPossible': 'The turn view keeps reverse patches only and offers no "undo the new file"; delete it from the session-total view or the Source Control panel.',
   'changes.onlyUnreviewed': 'Only unreviewed',
   'changes.nextUnreviewed': 'Next unreviewed',
   'changes.allReviewed': 'All reviewed',
@@ -1622,7 +1695,7 @@ const en: Record<string, string> = {
   'changes.navLabel': 'Change navigation',
   'changes.refresh': 'Recompute changes',
   'changes.stale': 'positions stale',
-  'changes.staleHint': 'The editor content changed, so the marked positions may be off. Click the file in the list to recompute.',
+  'changes.staleHint': 'The change list or the editor content moved on, so these marks may be out of date. Click the file in the list to recompute.',
   'changes.noWorkspace': 'No workspace is bound to that host, so the file cannot be opened.',
   // -- editor gutter marks and deleted chips (title / aria-label in vsc/change-marks.ts)
   'changes.markAdd': 'Added line',
@@ -1639,6 +1712,27 @@ const en: Record<string, string> = {
   'changes.undoNoContext': 'The host and repository behind this change are unknown, so nothing was reverted.',
   'changes.undoConflict': 'The surroundings of this change moved, so the host refused the revert (the file was not modified).',
   'changes.undoMissing': 'No patch is available for this change, so nothing was reverted.',
+  // -- why a revert failed (git apply stderr → four actionable readings)
+  'changes.applyContextMoved': 'The remote file has moved on, so the patch no longer applies (the file was not modified).',
+  'changes.applyPathMissing': 'The file the patch names is gone on the remote side (deleted or renamed).',
+  'changes.applyPermission': 'The remote side refused the write (permission denied or a read-only filesystem).',
+  'changes.applyOwnership': 'The remote repository is owned by a different user, so git refuses: set safe.directory or fix the ownership.',
+  'changes.applyCorrupt': 'The patch is incomplete or corrupt; reopen the file to fetch the change again, then retry.',
+  'changes.applyOther': 'The remote side refused this patch; the raw message follows.',
+  // -- the hover bar's second action: a block-level local "keep" note
+  'changes.actions': 'Change actions',
+  'changes.confirmBlock': 'Keep this change',
+  'changes.confirmedBlock': 'Kept',
+  // -- the five visible outcomes when one row's diff is fetched
+  'changes.diffTruncated': 'The remote withheld this change at its byte cap, so the comparison is incomplete (it may count the whole file as changed): nothing is marked and nothing can be reverted.',
+  'changes.diffOversized': 'The file is too large and its content was withheld, so there is no line-level comparison (no change marks, no undo); open the file to read it.',
+  'changes.diffBinary': 'This is a binary file: there is no text diff, so no change marks are drawn.',
+  'changes.diffMissing': 'The file could not be read on the remote side (deleted or unreadable), so there is no change to show.',
+  'changes.diffEmpty': 'This file has no diff to show right now (the change may have been reverted).',
+  // -- straight to a diff from the panel (read-only, ledger baseline)
+  'changes.menuViewDiff': 'View diff (read-only)',
+  'changes.diffNotPossible': 'Binary or too large: there is no diff to show',
+  'changes.diffTabLabel': 'Session change',
   // -- connection status + degraded (offline read-only) mode
   'connection.ok': 'Connection OK',
   'connection.error': 'Connection issue',

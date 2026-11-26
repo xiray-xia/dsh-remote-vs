@@ -29,6 +29,9 @@ import { sameLocalDir } from './composer.ts'
 import { editorViewStateOf, pruneEditorViewStates, registerLiveEditor, rememberEditorViewState } from './live-editor.ts'
 import { useRemoteChatTarget } from './use-remote-chat-target.ts'
 import { useExplorer, gotoChange, markChangeStale, repoRelative, undoChange, type EditorTab } from './store.tsx'
+import { blockIdForMark, isStoredBlockConfirmed, toggleStoredBlock, type ConfirmStorage } from './changes/block-confirm.ts'
+import { changeOriginForTab } from './changes/undo-target.ts'
+import type { ChangeMark } from './vsc/change-marks.ts'
 import { DiffView } from './scm/DiffView.tsx'
 import { loadBlame, loadFileHistory } from './scm/actions.ts'
 import { isCommittedBlame, planBlameWindow, type BlameLine, type FileHistoryCommit } from './blame-model.ts'
@@ -1157,11 +1160,66 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
    */
   const canSwitchToEdit = activeTab !== undefined
     && activeTab.kind === 'diff'
+    // 会话只读 diff 不开「切换为内容编辑」：它属于会话账本，编辑入口是面板左键
+    // （会带着标记打开）；这里再开一次只会打开一个没有标记的普通标签页。
+    && activeTab.sessionDiff === undefined
     && activeTab.ref === undefined
     && activeTab.diff !== undefined
     && !activeTab.diff.unsupported
     && !(activeTab.diff.newText === '' && activeTab.diff.oldText !== '')
   const displayPath = activeTab?.fullPath ?? ''
+  /**
+   * 信息栏里那句"这一页是什么 diff"。
+   *
+   * 三种来源必须分得清：会话账本的只读比较、暂存区（只读）、某个提交（历史）。
+   * 写成一串 if 而不是嵌套三元：三种情况各说各的，读起来不会串行。
+   */
+  let diffScopeLabel = ''
+  if (activeTab?.kind === 'diff') {
+    if (activeTab.sessionDiff !== undefined) diffScopeLabel = t('changes.diffTabLabel')
+    else if (activeTab.ref !== undefined) diffScopeLabel = `${t('scm.commitDiff')} ${activeTab.ref.slice(0, 7)}`
+    else if (activeTab.staged) diffScopeLabel = t('scm.stagedReadonly')
+  }
+  /**
+   * 编辑器悬浮栏的「确认保留」（块级本地笔记，见 `changes/block-confirm.ts`）。
+   *
+ * 三个前提缺一不可：这一页有改动标记、标记带着块标识（建标记时带了远端绝对路径）、
+ * 以及这批标记有 provenance（会话归属 —— 笔记按会话存）。任何一个缺失就不提供这个
+   * 动作，悬浮栏回到"只有撤销"。
+   *
+   * 读写都走 `localStorage`，**不发任何请求**：这是"我看到哪儿了"的记号，不是远端
+   * 事实；状态变化不经过 React（编辑器在 React 之外点它），所以每次现读。
+   */
+  const blockConfirm = (() => {
+    const set = activeTab?.changeSet
+    if (activeTab === undefined || set === undefined || set === null) return undefined
+    const blocks = set.blocks
+    const sessionId = changeOriginForTab(activeTab.id)?.sessionId
+    if (blocks === undefined || sessionId === undefined || sessionId === '') return undefined
+    const storage = (): ConfirmStorage | undefined => {
+      try {
+        return window.localStorage
+      } catch {
+        // 隐私模式 / 禁用存储：不提供这一级（而不是给一个点了不生效的按钮）。
+        return undefined
+      }
+    }
+    return {
+      isConfirmed: (mark: ChangeMark): boolean => {
+        const id = blockIdForMark(blocks, mark)
+        const store = storage()
+        return id === undefined || store === undefined ? false : isStoredBlockConfirmed(store, sessionId, id)
+      },
+      onToggle: (mark: ChangeMark): void => {
+        const id = blockIdForMark(blocks, mark)
+        const store = storage()
+        if (id === undefined || store === undefined) return
+        toggleStoredBlock(store, sessionId, id)
+      },
+      label: (): string => t('changes.confirmBlock'),
+      pressedLabel: (): string => t('changes.confirmedBlock'),
+    }
+  })()
   const language = isDiff
     ? 'Diff'
     : activeTab?.image === true
@@ -1281,10 +1339,7 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                 />
               )}
               {activeTab.kind === 'diff' && (
-                <span style={{ color: 'var(--rvs-fg3)' }}>
-                  {activeTab.staged && activeTab.ref === undefined ? t('scm.stagedReadonly') : ''}
-                  {activeTab.ref !== undefined ? `${t('scm.commitDiff')} ${activeTab.ref.slice(0, 7)}` : ''}
-                </span>
+                <span style={{ color: 'var(--rvs-fg3)' }}>{diffScopeLabel}</span>
               )}
               <span style={{ color: 'var(--rvs-fg3)' }}>{language}</span>
               {/* Connection health sits where the build stamp does: it is the
@@ -1693,6 +1748,8 @@ export function EditorPane(props: { visible: boolean }): ReactNode {
                       onChangeStale={() => { markChangeStale(activeTab.id) }}
                       onUndoChange={(mark) => { void undoChange(activeTab.id, mark) }}
                       undoLabel={(mark) => undoActionLabel(t, mark.kind)}
+                      undoTriggerLabel={() => t('changes.actions')}
+                      {...(blockConfirm === undefined ? {} : { blockConfirm })}
                       onSave={() => { void saveActive() }}
                       onDirty={(dirty) => store.updateTab(activeTab.id, { dirty })}
                       onBuffer={(tabId, text) => store.updateTab(tabId, { text })}

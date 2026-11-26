@@ -656,6 +656,22 @@ export const api = {
         path,
         ...(repoSubdir === '' ? {} : { repoSubdir }),
       }).then(r => r.diff ?? null),
+    /**
+     * The same comparison, but against the previous completed turn's close
+     * instead of the session baseline (the panel's 「本轮」 scope).
+     *
+     * Answers `unavailable` / `stale` (with a reason) instead of hunks when the
+     * host has no cached per-turn contents or the file moved on after the turn —
+     * the client must fall back to `diff` (session view) rather than paint lines
+     * that no longer exist.
+     */
+    turnDiff: (sessionId: string, path: string, repoSubdir = '') =>
+      post<{ diff: RemoteChangesDiff | null }>(REMOTE_API.changes, {
+        op: 'turnDiff',
+        sessionId,
+        path,
+        ...(repoSubdir === '' ? {} : { repoSubdir }),
+      }).then(r => r.diff ?? null),
   },
   // -- routing mode (volatile, persists to the profile patch)
   setRoutingMode: (mode: 'off' | 'shadow' | 'enforce') =>

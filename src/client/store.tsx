@@ -17,6 +17,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {
   DiffModel,
   GitStatusDetail,
+  RemoteChangedFile,
+  RemoteChangesTurnView,
   RemoteHostSummary,
   RemoteRoutingStatus,
   RemoteWorkspaceBinding,
@@ -27,9 +29,12 @@ import { DEFAULT_GIT_TIMEOUT_MS, clientDeadlineFor } from '../timeouts.ts'
 import { normalizeRepoSubdir, repoSubdirOf, repoWorkdir } from '../git-ops.ts'
 import { buildDiffModel } from './scm/diff-model.ts'
 import type { ChangeMark, ChangeSet } from './vsc/change-marks.ts'
-import { changeSetFromHunks } from './changes/model.ts'
+import { changeSetFromDiff, diffNoticeKey, noticeOfDiff, type DiffNotice } from './changes/diff-outcome.ts'
+import { applyFailureText } from './changes/apply-failure.ts'
+import { sessionDiffOutcome } from './changes/session-diff.ts'
+import { tabsToMarkStale, turnMarksStale, type MarksTab } from './changes/staleness.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
-import { changeOriginForTab, resolveUndoTarget } from './changes/undo-target.ts'
+import { changeOriginForTab, forgetChangeOrigin, rememberChangeOrigin, resolveUndoTarget } from './changes/undo-target.ts'
 import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, optimisticStageDetail, type ChangeEntry, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
 import { loadCommitFileDiff, findRepos, loadDiff, loadHead, loadStatusDetail, probeRepoRoot, probeStatusDir, probeStatusPaths, applyHunk, stagePaths, unstagePaths, type DiffPayload } from './scm/actions.ts'
 import { StageCoordinator } from './scm/stage-queue.ts'
@@ -147,10 +152,32 @@ export interface EditorTab {
   activeHunk?: number
   /** 编辑器报告文档已与 `changeSet` 脱钩（用户敲过字），上层该重新拉数据。 */
   changeStale?: boolean
+  /**
+   * 这批改动标记的建立时刻（`Date.now()`，`applyChangeSet` 写入）。
+   *
+   * 面板的轮询用它和 `RemoteChangesSummary.at` 比先后：标记比列表新时（保存/撤销
+   * 刚重读过），那份更早的列表不能证明标记过期（见 `changes/staleness.ts`）。
+   */
+  changeSetAt?: number
   /** 改动点跳转目标行（1-based）。与 `line` 分开，两条跳转链路互不干扰。 */
   revealHunkLine?: number
   /** 改动点跳转的 nonce，语义同 `lineNonce`。 */
   revealHunkNonce?: number
+  /**
+   * 「会话改动」面板那一行的只读 diff（不是 git 工作区 diff）。
+   *
+   * 有它 = 这一页是账本轮次的比较：两栏都只读（改前是还原出来的基线、改后是远端
+   * 当前内容），没有 hunk 暂存/撤销，重新载入走账本而不是 `git diff`。`reloadTab`
+   * 与 `saveTargetOf` 都按它分流。
+   */
+  sessionDiff?: {
+    sessionId: string
+    alias: string
+    /** 会话账本的仓库根（`git apply -R` 的目标目录，也是仓库目录的答案）。 */
+    root: string
+    /** 面板显示路径（标签条与 diff 头用它，不参与任何写操作）。 */
+    display: string
+  }
   /**
    * 重读（`reloadTab`）成功后递增的 nonce。
    *
@@ -3005,6 +3032,10 @@ function saveTargetOf(id: string): { alias: string; fullPath: string; rel: strin
   const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
   if (workspace === undefined || tab === undefined) return undefined
+  // A session diff is a comparison of the session's history, not an editable
+  // working-tree copy: nothing in it may be written back (its "after" side is a
+  // read of the file that a revert/agent may have moved on since).
+  if (tab.sessionDiff !== undefined) return undefined
   const writable = tab.kind === 'file' || (tab.kind === 'diff' && tab.ref === undefined && !tab.staged)
   if (!writable || tab.binary || tab.truncated) return undefined
   return { alias: workspace.alias, fullPath: tab.fullPath, rel: tab.rel }
@@ -3224,9 +3255,43 @@ export function dismissConflict(id: string): void {
  * is fixing, only harder to see.
  */
 export async function reloadTab(id: string): Promise<void> {
-  const workspace = currentWorkspace()
   const tab = state.tabs.find(item => item.id === id)
-  if (workspace === undefined || tab === undefined) return
+  if (tab === undefined) return
+  /**
+   * A session-diff tab re-reads the LEDGER, not the working tree: it has its own
+   * alias/root on the tab (the sidebar may be pointing at another binding), and
+   * `git diff` would show a different baseline. Handled before the workspace
+   * lookup below, which a session diff does not need at all.
+   */
+  if (tab.sessionDiff !== undefined) {
+    try {
+      const loaded = await loadSessionDiffPayload({
+        sessionId: tab.sessionDiff.sessionId,
+        alias: tab.sessionDiff.alias,
+        root: tab.sessionDiff.root,
+        path: tab.fullPath,
+        display: tab.sessionDiff.display,
+      })
+      if (loaded.payload === undefined) {
+        // 重新载入时拿不到完整的两栏（内容被扣下 / 已无差异 / 读不到）：说清是哪一种，
+        // 而不是留一个错误字符串占位。标签页本身保留，用户可以再试或改看文件。
+        const notice = loaded.notice ?? 'missing'
+        patchTab(id, { loading: false, error: t(diffNoticeKey(notice)), diff: undefined, model: undefined })
+        return
+      }
+      patchTab(id, {
+        loading: false,
+        error: undefined,
+        diff: loaded.payload,
+        model: buildDiffModel(loaded.payload),
+      })
+    } catch (error) {
+      patchTab(id, { loading: false, error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  const workspace = currentWorkspace()
+  if (workspace === undefined) return
   if (tab.kind === 'file') {
     // Byte previews have no text buffer: fs.read would fetch a capped base64
     // window and turn the tab into "binary", hiding the preview. A revision
@@ -3434,7 +3499,7 @@ export function dockFloatingEditor(): void {
  * `hunks[0]`），所以紧接着按"下一个"会走到第 2 处，不会把第 1 处跳过。
  */
 export function applyChangeSet(tabId: string, set: ChangeSet | null): void {
-  patchTab(tabId, { changeSet: set, activeHunk: 0, changeStale: false })
+  patchTab(tabId, { changeSet: set, activeHunk: 0, changeStale: false, changeSetAt: Date.now() })
 }
 
 /**
@@ -3479,6 +3544,176 @@ export function markChangeStale(tabId: string): void {
 }
 
 /**
+ * 面板拿到新统计后，指出哪些已开标签页的改动标记已经过期。
+ *
+ * 标记的失效原来只由"本地输入"触发（`markChangeStale` 由编辑器报告），所以远端或
+ * 会话继续改同一个文件时，屏幕上那份行号与补丁会一直画着、看起来仍然准确。面板每
+ * 3 秒重读一次账本，那份列表就是"这批标记还算不算数"的唯一证据 —— 这里把它翻成
+ * 既有那张「位置已过期」标记。
+ *
+ * 判据是纯函数（`changes/staleness.ts`），这里只负责选出**属于这个会话**的标签页：
+ * 换会话后屏幕上可能还留着上一个会话的标记，拿本会话的列表去比对只会误报。
+ * **不发起任何远端读**：重新计算是用户点该行时的事。
+ *
+ * @param sessionId - 面板当前会话。
+ * @param files - 这一轮列表的行。
+ * @param truncated - 列表自己被文件上限截断（"找不到"不再算证据）。
+ * @param listedAt - 这份列表的重算时刻（`RemoteChangesSummary.at`）。
+ * @param turnView - 本轮视图；带本轮来源的标记要用它那一份行来判（见实现）。
+ */
+export function syncChangeSetStaleness(
+  sessionId: string,
+  files: readonly RemoteChangedFile[],
+  truncated = false,
+  listedAt?: number,
+  turnView?: RemoteChangesTurnView,
+): void {
+  const sessionRows: MarksTab[] = []
+  const turnRows: MarksTab[] = []
+  for (const tab of state.tabs) {
+    const set = tab.changeSet
+    if (set === undefined || set === null) continue
+    const origin = changeOriginForTab(tab.id)
+    // 没有 provenance 就没法证明这批标记是哪个会话画的：不猜。
+    if (origin === undefined || origin.sessionId !== sessionId) continue
+    const row: MarksTab = {
+      id: tab.id,
+      path: tab.fullPath,
+      ...(set.added === undefined ? {} : { added: set.added }),
+      ...(set.deleted === undefined ? {} : { deleted: set.deleted }),
+      ...(set.status === undefined ? {} : { status: set.status }),
+      ...(tab.changeStale === true ? { stale: true } : {}),
+      ...(tab.changeSetAt === undefined ? {} : { at: tab.changeSetAt }),
+    }
+    // 行数是"哪条轴"的数字：同一文件的本轮 Δ 与会话累计按定义不同，所以每种
+    // 标记只能拿它当初所在的那份列表来判，否则切一轮就会把好好的标记判成过期。
+    if (origin.scope === 'turn') turnRows.push(row)
+    else sessionRows.push(row)
+  }
+  for (const tabId of tabsToMarkStale(sessionRows, files, truncated, listedAt)) markChangeStale(tabId)
+  // Remembered for later re-reads: see `latestTurns`.
+  if (turnView !== undefined) rememberLatestTurn(sessionId, turnView.turn)
+  /*
+   * 本轮轴用 `turnMarksStale`，不是 `tabsToMarkStale`：
+   * - 不传 `listedAt`（`turnView.at` 是关闭时刻、`changeSetAt` 是点击时刻，传了会
+   *   让判据恒假 —— 审核 S1 的第一半）；
+   * - 轮次翻篇直接判过期（`origin.turn !== turnView.turn`），否则旧轮标记永久脱离
+   *   校验（S1 的第二半）。
+   */
+  for (const row of turnRows) {
+    if (row.stale === true) continue
+    if (turnMarksStale(row, changeOriginForTab(row.id)?.turn, turnView)) markChangeStale(row.id)
+  }
+}
+
+/**
+ * 「会话改动」面板那一行的 → 只读并排 diff（见 `changes/session-diff.ts`）。
+ *
+ * 与 `openFile`/`openDiff` 的区别是数据来源：这里读的是会话账本（会话起点为基线），
+ * 而 `openDiff` 读的是 git 工作区（索引/HEAD 为基线）。两件事不能互相顶替 ——
+ * 工作区里可能有会话开始之前就存在的未提交改动。
+ *
+ * 结果里的 `notice` 就是面板要显示的那句话（截断 / 二进制 / 读不到 / 已无差异），
+ * 打开成功时为 `undefined`。调用方负责把它渲染出来，不要吞掉。
+ */
+export interface ChangeDiffTarget {
+  sessionId: string
+  alias: string
+  /** 会话账本的仓库根（与 `revertFileChanges` 的 `root` 同源）。 */
+  root: string
+  /** 远端绝对路径。 */
+  path: string
+  /** 面板显示路径（标签条用）。 */
+  display: string
+  /** 面板选定的仓库子目录（透传给账本的 `repoSubdir`，可省略）。 */
+  repoSubdir?: string
+}
+
+export interface ChangeDiffResult {
+  opened: boolean
+  /** 必须显示给用户的结论；`undefined` = 打开成功且没有任何要说明的。 */
+  notice?: DiffNotice
+}
+
+/** 读一次账本 diff 并拼成 DiffPayload；拿不到可显示内容时 `undefined`。 */
+async function loadSessionDiffPayload(target: ChangeDiffTarget): Promise<{
+  payload: DiffPayload | undefined
+  notice?: DiffNotice
+}> {
+  const diff = await api.changes.diff(target.sessionId, target.path, target.repoSubdir)
+  // 被字节上限扣下的 diff 不值得再读文件：结论已经确定（比较不完整、不能撤销）。
+  if (diff === null || diff.kind !== 'text' || diff.truncated === true || diff.hunks.length === 0) {
+    const outcome = sessionDiffOutcome(diff, { text: '' }, target.display)
+    return { payload: undefined, ...(outcome.ok ? {} : { notice: outcome.notice }) }
+  }
+  /**
+   * 改后一栏的读取结果要参与结论：撞上 8 MiB 上限的 `text` 只是前缀，拿去还原
+   * 基线会让两栏整体错位；二进制读取也没有可比的文本（审核 S4）。
+   */
+  let read: { text: string; truncated?: true; binary?: true } = { text: '' }
+  try {
+    const answer = await api.fileOp.read(target.alias, target.path)
+    read = {
+      text: answer.binary ? '' : (answer.text ?? ''),
+      ...(answer.truncated === true ? { truncated: true as const } : {}),
+      ...(answer.binary === true ? { binary: true as const } : {}),
+    }
+  } catch {
+    // 读不到"改后"（已删除 / 权限）：改后一栏空着，改前仍可看。
+    read = { text: '' }
+  }
+  const outcome = sessionDiffOutcome(diff, read, target.display)
+  return { payload: outcome.ok ? outcome.payload : undefined, ...(outcome.ok ? {} : { notice: outcome.notice }) }
+}
+
+/** 打开（或聚焦）一行的会话只读 diff。 */
+export async function openChangeDiff(target: ChangeDiffTarget): Promise<ChangeDiffResult> {
+  const id = `changes-diff:${target.alias}:${target.path}`
+  const loaded = await loadSessionDiffPayload(target)
+  const notice = loaded.payload === undefined ? (loaded.notice ?? 'missing') : undefined
+  const sessionDiff = {
+    sessionId: target.sessionId,
+    alias: target.alias,
+    root: target.root,
+    display: target.display,
+  }
+  const already = state.tabs.find(item => item.id === id)
+  if (already !== undefined) {
+    if (loaded.payload !== undefined) {
+      patchTab(id, { diff: loaded.payload, model: buildDiffModel(loaded.payload), sessionDiff, loading: false, error: undefined })
+      patch({ activeTabId: id })
+      revealEditor()
+    }
+    return { opened: loaded.payload !== undefined, ...(notice === undefined ? {} : { notice }) }
+  }
+  if (loaded.payload === undefined) return { opened: false, ...(notice === undefined ? {} : { notice }) }
+  upsertTab({
+    id,
+    kind: 'diff',
+    fullPath: target.path,
+    rel: target.display,
+    loading: false,
+    error: undefined,
+    text: '',
+    dirty: false,
+    saving: false,
+    binary: false,
+    truncated: false,
+    image: isImageFile(target.display),
+    markdown: false,
+    html: false,
+    preview: false,
+    staged: false,
+    untracked: false,
+    diff: loaded.payload,
+    model: buildDiffModel(loaded.payload),
+    view: 'split',
+    sessionDiff,
+  })
+  return { opened: true, ...(notice === undefined ? {} : { notice }) }
+}
+
+/**
  * 撤销「本会话在某个文件里的一处改动」（改动行上那个悬浮按钮点下去的动作）。
  *
  * 语义是**把远端工作区里这一块反向应用回去**，不是编辑器 buffer 的 undo：真正的反向
@@ -3496,6 +3731,33 @@ export function markChangeStale(tabId: string): void {
  * 5. 失败时**不清标记、不重读**：远端一个字节都没动，屏幕上那份标记仍然是事实。
  */
 /**
+ * The newest turn each session has seen (`summary.turnView.turn`).
+ *
+ * Written by the panel's every poll (`syncChangeSetStaleness`) and read when a
+ * save/revert re-reads a turn-scope tab: the host's `turnDiff` always answers for
+ * the CURRENT turn, so the provenance's `turn` must move forward with it — pinned
+ * to the turn of the click, the marks would be judged stale the instant a new
+ * turn closed (review S1).
+ */
+const latestTurns = new Map<string, number>()
+/** Ceiling on tracked sessions (a long-lived page must not grow this forever). */
+const LATEST_TURNS_CAP = 200
+
+function latestTurnOf(sessionId: string): number | undefined {
+  return latestTurns.get(sessionId)
+}
+
+function rememberLatestTurn(sessionId: string, turn: number): void {
+  if (turn <= 0) return
+  latestTurns.delete(sessionId)
+  if (latestTurns.size >= LATEST_TURNS_CAP) {
+    const oldest = latestTurns.keys().next().value
+    if (oldest !== undefined) latestTurns.delete(oldest)
+  }
+  latestTurns.set(sessionId, turn)
+}
+
+/**
  * Re-read one file's change set from the host and hand it to the editor.
  *
  * The host reads the worktree for every `diff` call, so the marks this installs
@@ -3505,13 +3767,56 @@ export function markChangeStale(tabId: string): void {
 async function refreshChangeSet(tabId: string, context: UndoContext): Promise<void> {
   const tab = state.tabs.find(item => item.id === tabId)
   if (tab === undefined || tab.kind !== 'file') return
+  const turnScope = context.scope === 'turn'
   try {
-    const diff = await api.changes.diff(context.sessionId, tab.fullPath)
-    if (diff === null || diff.kind !== 'text' || diff.hunks.length === 0) {
+    /*
+     * Re-read the SAME axis the marks came from. A turn-scope tab rebuilt from the
+     * session baseline would change what "undo this change" means mid-review (its
+     * hunks cover the whole session, not the turn), and its counts would then
+     * disagree with the turn list on every poll.
+     */
+    const diff = turnScope
+      ? await api.changes.turnDiff(context.sessionId, tab.fullPath)
+      : await api.changes.diff(context.sessionId, tab.fullPath)
+    if (turnScope && (diff === null || diff.kind === 'stale' || diff.kind === 'unavailable')) {
+      // The turn's comparison no longer describes the disk (a write of ours just
+      // moved the file, or the turn rolled over): drop the marks and SAY so. The
+      // session view is the surface that still knows the file.
       applyChangeSet(tabId, null)
+      forgetChangeOrigin(tabId)
+      info(t('changes.turnMarksStale'))
       return
     }
-    applyChangeSet(tabId, changeSetFromHunks(diff.hunks, `${tab.fullPath}@${Date.now()}`, diff.patch))
+    /**
+     * 不能建标记的结局都要**说出来**（审核 NIT-4）：被字节上限扣下、二进制、读不到、
+     * 或者改动已经没了时，静默清空标记会让用户以为"改动消失了 / 工具坏了"。这里复用
+     * 面板点行时那套结论文案（`changes/diff-outcome.ts`），一次 `info` 就够了 ——
+     * 标记本身确实失效，不能继续画。
+     */
+    const notice = noticeOfDiff(diff)
+    if (notice !== undefined) {
+      applyChangeSet(tabId, null)
+      info(t(diffNoticeKey(notice)))
+      return
+    }
+    // 块级「确认保留」的身份用**远端绝对路径**（不是显示路径）：它与面板打开时
+    // 是同一个字符串，所以一次保存/撤销不会让已确认的块失配，也不会把另一个仓库
+    // 里同号同显示路径的块认成同一块。
+    const built = changeSetFromDiff(diff, `${tab.fullPath}@${turnScope ? 'turn' : 'session'}@${Date.now()}`, { path: tab.fullPath })
+    applyChangeSet(tabId, built.set)
+    /*
+     * A turn-scope re-read fetches the CURRENT turn's comparison (the host only
+     * ever holds one). Recording that turn on the provenance is what keeps the
+     * marks from being instantly judged stale the moment a new turn has closed —
+     * they now describe the current turn, not the one the click happened in
+     * (review S1: `origin.turn` used to stay pinned to the old turn forever).
+     */
+    if (turnScope) {
+      const current = latestTurnOf(context.sessionId)
+      if (current !== undefined && current !== context.turn) {
+        rememberChangeOrigin(tabId, { ...context, turn: current })
+      }
+    }
   } catch {
     // A read that fails leaves no marks rather than wrong ones.
     applyChangeSet(tabId, null)
@@ -3565,8 +3870,9 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
       return
     }
     // 可把 git 的说法附在后面（"patch does not apply" 之类），但**不动**标记与文件。
+    // 先按 stderr 归类：上下文变了 / 文件不在了 / 不是仓库 / 权限，四种修法完全不同。
     const detail = error instanceof Error ? error.message.trim() : String(error).trim()
-    info(detail === '' ? t('changes.undoConflict') : `${t('changes.undoConflict')} · ${detail}`)
+    info(applyFailureText(detail, t) ?? t('changes.undoConflict'))
     return
   }
   // Refresh the marks instead of dropping them, and put the caret back where the
@@ -3614,6 +3920,15 @@ export interface RevertFileTarget {
   path: string
   display: string
   mode: 'patch' | 'delete'
+  /**
+   * Which comparison the patch must come from.
+   *
+   * `turn` = "undo what THIS turn did to this file" (restore the previous turn's
+   * close); absent = the session baseline (unchanged default). The patch is
+   * re-fetched from the host rather than taken from the panel's poll, so the
+   * same argument decides WHICH host read to make.
+   */
+  scope?: 'session' | 'turn'
 }
 
 /**
@@ -3658,6 +3973,8 @@ export async function revertFileChanges(target: RevertFileTarget): Promise<boole
     bindingId: target.bindingId,
     alias: target.alias,
     root: target.root,
+    display: target.display,
+    ...(target.scope === 'turn' ? { scope: 'turn' as const } : {}),
   }
   /**
    * The session check inside `resolveUndoTarget` is trivially true here (the panel
@@ -3681,7 +3998,16 @@ export async function revertFileChanges(target: RevertFileTarget): Promise<boole
     if (target.mode === 'patch') {
       // Fresh from the host: the panel's numbers may be a poll old, and the patch
       // must describe the file as it is NOW.
-      const diff = await api.changes.diff(target.sessionId, target.path)
+      const diff = target.scope === 'turn'
+        ? await api.changes.turnDiff(target.sessionId, target.path)
+        : await api.changes.diff(target.sessionId, target.path)
+      if (target.scope === 'turn' && diff !== null && (diff.kind === 'stale' || diff.kind === 'unavailable')) {
+        // The turn's comparison is gone (the file moved on, or the host dropped
+        // the hunks): nothing was written, and saying which is better than a
+        // generic refusal the user cannot act on.
+        info(t('changes.turnMarksStale'))
+        return false
+      }
       const patch = diff !== null && diff.kind === 'text' ? (diff.patch ?? '') : ''
       if (patch.trim() === '') {
         info(t('changes.undoMissing'))
@@ -3704,11 +4030,15 @@ export async function revertFileChanges(target: RevertFileTarget): Promise<boole
       return false
     }
     const detail = error instanceof Error ? error.message.trim() : String(error).trim()
-    // A refused reverse patch means "the surroundings moved" (that is the conflict
-    // guard); a failed delete has no such reading, so it gets its own wording
-    // instead of pretending the patch context drifted.
-    const label = target.mode === 'delete' ? t('changes.revertFailed') : t('changes.undoConflict')
-    info(detail === '' ? label : `${label} · ${detail}`)
+    /**
+     * A refused reverse patch means "the surroundings moved" — one of several
+     * causes, each with a different fix, so the patch path classifies git's own
+     * stderr (`changes/apply-failure.ts`). A failed delete has no such reading
+     * (it is one `rm`), so it keeps its own wording instead of pretending the
+     * patch context drifted.
+     */
+    const label = target.mode === 'delete' ? t('changes.revertFailed') : (applyFailureText(detail, t) ?? t('changes.undoConflict'))
+    info(target.mode === 'delete' && detail !== '' ? `${label} · ${detail}` : label)
     return false
   }
   /**

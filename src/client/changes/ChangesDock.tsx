@@ -29,6 +29,7 @@ import {
   applyChangeSet,
   bootstrap,
   followSessionWorkspace,
+  openChangeDiff,
   openRemoteFileInBinding,
   refreshAll,
   remoteOpenBindings,
@@ -36,13 +37,25 @@ import {
   sessionRepoSubdir,
   setFollowSession,
   setView,
+  syncChangeSetStaleness,
   useExplorer,
   workspaceMatchesSession,
 } from '../store.tsx'
 import { bindingForChangedFile } from '../remote-file-open-target.ts'
 import { useRemoteChatTarget } from '../use-remote-chat-target.ts'
-import type { RemoteChangedFile, RemoteChangesSummary } from '../../protocol.ts'
-import { EMPTY_CHANGE_SET, changeSetFromHunks, type ChangeSet } from './model.ts'
+import type { RemoteChangedFile, RemoteChangesDiff, RemoteChangesSummary, RemoteChangesTurnView } from '../../protocol.ts'
+import type { ChangeSet } from './model.ts'
+import { canShowChangeDiff } from './session-diff.ts'
+import { changeSetFromDiff, diffNoticeKey, type DiffNotice } from './diff-outcome.ts'
+import {
+  CHANGE_SCOPE_STORAGE_KEY,
+  parseChangeScope,
+  scopeAfterOutcome,
+  serializeChangeScope,
+  turnOutcomeOf,
+  turnScopeAvailable,
+  type ChangeScope,
+} from './turn-view.ts'
 import {
   isReviewed,
   nextUnreviewed,
@@ -154,6 +167,39 @@ function loadReviewed(sessionId: string | undefined): Record<string, 1> {
   }
 }
 
+/** 读上次选择的作用域；读不出来就是默认的会话累计。 */
+function loadScope(): ChangeScope {
+  try {
+    return parseChangeScope(window.localStorage.getItem(CHANGE_SCOPE_STORAGE_KEY))
+  } catch {
+    // Private mode / disabled storage: the choice simply does not persist.
+    return 'session'
+  }
+}
+
+function saveScope(scope: ChangeScope): void {
+  try {
+    window.localStorage.setItem(CHANGE_SCOPE_STORAGE_KEY, serializeChangeScope(scope))
+  } catch {
+    // Same trade as the review marks: persistence is the only thing lost.
+  }
+}
+
+/**
+ * 「本轮 #N · HH:MM」——时间用本机时区的时:分，标签短到能和文件数并排。
+ *
+ * 带上 `#N` 是刻意的：`turnView` 描述的是**最近一个已完成轮次**，而面板的
+ * `summary.turn` 可能已经翻到下一轮（那一轮还没结束）。数字不一致时用户看到的是
+ * "本轮还在跑"，而不是一份被悄悄标错的列表。
+ */
+function turnTitle(t: (key: string) => string, view: RemoteChangesTurnView): string {
+  const at = new Date(view.at)
+  const time = Number.isNaN(at.getTime())
+    ? ''
+    : `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+  return t('changes.turnTitle').replace('{turn}', String(view.turn)).replace('{time}', time)
+}
+
 export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const explorer = useExplorer()
   // The dock is a second surface of the same store as the explorer, and it can
@@ -179,6 +225,20 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   // push the composer off the screen.
   const [collapsed, setCollapsed] = useState(true)
   const [busy, setBusy] = useState<string | undefined>(undefined)
+  /**
+   * 上一次点行留下的"这份 diff 是哪一种结局"的说明（二进制 / 读不到 / 已被改回 /
+   * 只给了前缀）。一次只留一条：它描述的就是刚才那一次点击，换一行就该换说法。
+   */
+  const [diffNotice, setDiffNotice] = useState<{ path: string; notice: DiffNotice } | undefined>(undefined)
+  /**
+   * 面板按哪条轴列改动：会话累计（默认）还是最近一个已完成轮次。
+   *
+   * 选择存在浏览器本地（`CHANGE_SCOPE_STORAGE_KEY`）：它描述的是"我想怎么看"，
+   * 不是远端事实。默认必须是 `session` —— 那是这个面板一直以来的语义。
+   */
+  const [scope, setScope] = useState<ChangeScope>(loadScope)
+  /** 本轮模式下这次点击"为什么没画标记 / 为什么回退"的那句话（不静默）。 */
+  const [scopeNote, setScopeNote] = useState<{ key: string; detail?: string } | undefined>(undefined)
   /** This session's local review marks (see `review-state.ts`). */
   const [reviewed, setReviewed] = useState<Record<string, 1>>(() => loadReviewed(sessionId))
   /**
@@ -228,6 +288,11 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       if (!alive.current || currentSession.current !== asked) return
       setData({ id: asked, summary: next })
       setError(undefined)
+      // 新的统计列表是"屏幕上那批标记还算不算数"的唯一证据：行数/状态变了或文件
+      // 从列表消失，就给对应标签页打既有那张「位置已过期」。不发起远端读。
+      if (next !== null) {
+        syncChangeSetStaleness(asked, next.files, next.truncated === true, next.at, next.turnView)
+      }
     } catch (problem) {
       if (!alive.current || currentSession.current !== asked) return
       setError(problem instanceof Error ? problem.message : String(problem))
@@ -359,7 +424,43 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     void followSessionWorkspace({ sessionId, alias: summary.alias, remoteRoot: summary.root })
   }, [sessionId, summary, chatTarget.sessionId])
 
-  const files = useMemo(() => summary?.files ?? [], [summary])
+  /**
+   * 会话累计的行永远是这份 summary 的 `files`；本轮是 `turnView.files`。
+   *
+   * `turnMode` 还要求 Host 真的给了可用的一轮（`turn > 0`）：没关闭过轮次、或者
+   * 客户端连的是更老的 Host 时，作用域选择自动退回会话累计 —— 面板不能因为一个
+   * 存下来的偏好就空着。
+   */
+  const sessionFiles = useMemo(() => summary?.files ?? [], [summary])
+  const turnView = summary?.turnView
+  const turnFiles = useMemo(() => turnView?.files ?? [], [turnView])
+  const turnMode = scope === 'turn' && turnScopeAvailable(turnView)
+  const files = turnMode ? turnFiles : sessionFiles
+  /**
+   * 审阅标记是按"行数 + 状态"建键的，两种视图对同一文件给出的数字按定义不同。
+   *
+   * 清理/切换标记时按**两份列表的并集**来判：只用当前视图那张表，切一次作用域就会
+   * 把另一边的 ✓ 全删掉，而它们描述的是另一条轴上仍然有效的审阅。
+   */
+  const reviewable = useMemo(
+    () => (turnFiles.length === 0 ? sessionFiles : [...sessionFiles, ...turnFiles]),
+    [sessionFiles, turnFiles],
+  )
+
+  /**
+   * 切换作用域。
+   *
+   * @param keepNote - `stale` 回退时保留那句解释（见 `scopeAfterOutcome`）：否则
+   *   用户只会看到列表静默换轴（审核 M1）。其余切换照常清掉上一条"为什么没标记"的
+   *   说明，它描述的是上一次点击、且属于另一个轴。
+   */
+  const switchScope = useCallback((next: ChangeScope, keepNote = false): void => {
+    setScope(next)
+    saveScope(next)
+    if (!keepNote) setScopeNote(undefined)
+    setDiffNotice(undefined)
+    setCursorKey(undefined)
+  }, [])
 
   /**
    * Resolve the binding a row belongs to, with one refresh for a cold page.
@@ -378,6 +479,76 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     return binding
   }, [summary])
 
+  /**
+   * Paint one row's comparison into the editor (both scopes end up here).
+   *
+   * Everything after `diff` is scope-agnostic on purpose: the editor only ever
+   * receives hunks, the review marks only ever carry counts, and the revert
+   * coordinates are the ones the comparison came from — so the two axes differ in
+   * WHICH comparison is fetched, not in how it is shown.
+   *
+   * @param notice - a conclusion the panel must state although no marks will be
+   *   painted (`oversized` / `binary` rows: the comparison was not even fetched).
+   * @param quiet - 调用方已经用 `scopeNote` 说清了这次点击的处置（例如「本轮只有统计」），
+   *   不要再叠一句 `diff-outcome` 的结论：两句会互相拆台（"没有块标记" vs "远端读不到"）。
+   */
+  const attachMarks = useCallback(async (
+    file: RemoteChangedFile,
+    diff: RemoteChangesDiff | null,
+    stamp: string,
+    origin: { scope: ChangeScope; turn?: number },
+    notice?: DiffNotice,
+    quiet = false,
+  ): Promise<void> => {
+    if (sessionId === undefined || summary === null) return
+    // 行数/状态/块标识一起带下去：面板的轮询要用行数判断这批标记是否过期
+    // （`syncChangeSetStaleness`），编辑器要用**远端绝对路径**命名「确认保留」
+    // 的块。被字节上限扣下的 diff 不建标记（审核 M2），只给结论。
+    const built = changeSetFromDiff(diff, stamp, {
+      path: file.path,
+      ...(file.status === undefined ? {} : { status: file.status }),
+    })
+    const set: ChangeSet = built.set
+    // 二进制 / 过大 / 读不到 / 已被改回 / 截断：屏幕上不会出现标记，必须当面说清
+    // 是哪一种，而不是留下一片空白让人以为"没改动"。
+    if (notice !== undefined) setDiffNotice({ path: file.path, notice })
+    else if (!quiet && built.notice !== undefined) setDiffNotice({ path: file.path, notice: built.notice })
+    // Resolved by the session's REMOTE root, never by the alias alone: one
+    // alias carries several bindings (two workspaces can live on one alias),
+    // and the alias-only form picked whichever came first —
+    // the file opened while the tree and the selector stayed on the other
+    // workspace. That was the reported bug.
+    const binding = await bindingOf(file)
+    if (binding === undefined) {
+      explorer.info(t('changes.noWorkspace'))
+      return
+    }
+    openRemoteFileInBinding(binding.id, file.path, set.hunks[0] === undefined ? {} : { line: set.hunks[0] })
+    // The tab id is deterministic (store.openFile builds it the same way), so
+    // the marks can be attached without waiting for the file read to settle.
+    const tabId = `file:${binding.alias}:${file.path}`
+    applyChangeSet(tabId, set)
+    // Remember WHERE these marks came from, once: the revert coordinates are
+    // read back from here (`publishableUndoOrigin`) instead of from the last
+    // summary this panel happened to render. No real hunk = no revert target,
+    // so a binary/failed diff forgets the previous provenance instead of
+    // leaving an older one around.
+    // 被字节上限扣下的 diff 没有可撤销的补丁（每个 hunk patch 都是 ''）：既不能
+    // 标标记，也不能留 provenance，否则悬浮撤销会指向一次注定失败的远端写。
+    if (diff !== null && diff.kind === 'text' && diff.truncated !== true && diff.hunks.length > 0) {
+      rememberChangeOrigin(tabId, {
+        sessionId,
+        bindingId: binding.id,
+        alias: binding.alias,
+        root: summary.root,
+        scope: origin.scope,
+        ...(origin.turn === undefined ? {} : { turn: origin.turn }),
+      })
+    } else {
+      forgetChangeOrigin(tabId)
+    }
+  }, [bindingOf, explorer, sessionId, summary, t])
+
   /** Open one listed file in the remote editor with its change marks. */
   const openChanged = useCallback(async (file: RemoteChangedFile): Promise<void> => {
     if (sessionId === undefined || summary === null) return
@@ -386,44 +557,86 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     // instead of from wherever the last jump happened to stop.
     setCursorKey(reviewKeyOf(file))
     setBusy(file.path)
+    setDiffNotice(undefined)
+    setScopeNote(undefined)
     try {
-      const diff = await api.changes.diff(sessionId, file.path, repoSubdirOf())
+      if (turnMode && turnView !== undefined) {
+        const turnOrigin = { scope: 'turn' as const, turn: turnView.turn }
+        // The stamp carries the axis and the turn: a saved turn comparison and a
+        // session comparison of the same file are different data.
+        const turnStamp = `${file.path}@turn${turnView.turn}@${turnView.at}`
+        /**
+         * 只有统计的一轮（内容超出内存预算 / 文件上限）：不发请求，打开文件并说明
+         * 原因。列表行已经给出真实增删数，但没有可画的 hunk，也没有可撤销的补丁。
+         */
+        if (turnView.cached !== true) {
+          setScopeNote({
+            key: 'changes.turnStatsOnly',
+            ...(turnView.reason === undefined ? {} : { detail: turnView.reason }),
+          })
+          await attachMarks(file, null, turnStamp, turnOrigin, undefined, true)
+          return
+        }
+        /**
+         * 二进制/过大行与会话视图同一套结论，连比较都不取（审核 M1/M2）：这类行的
+         * 计数被 Host 钉成 0/0，取了行级比较只会得到一份永远对不上的数字。
+         */
+        if (file.binary === true) {
+          await attachMarks(file, null, turnStamp, turnOrigin, 'binary')
+          return
+        }
+        if (file.oversized === true) {
+          await attachMarks(file, null, turnStamp, turnOrigin, 'oversized')
+          return
+        }
+        const answer = await api.changes.turnDiff(sessionId, file.path, repoSubdirOf())
+        if (!alive.current) return
+        /**
+         * 四种结局都在这里定：画本轮 hunk / 文件在本轮之后又变了（回退会话累计）/
+         * 没有可画的内容（说明原因）/ 二进制。判定本身是纯函数（`turn-view.ts`）。
+         */
+        const outcome = turnOutcomeOf(answer, turnView)
+        if (outcome.action === 'fallback') {
+          // Switch FIRST and keep the note, then say why (review M1): the old
+          // order cleared the very sentence that explains the switch.
+          const next = scopeAfterOutcome(outcome, scope)
+          switchScope(next.scope, next.keepNote)
+          setScopeNote({ key: outcome.noteKey })
+          // …and fall through to the session comparison below, in this same click.
+        } else if (outcome.action === 'closed') {
+          setScopeNote({
+            key: outcome.noteKey,
+            ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+          })
+          await attachMarks(file, null, turnStamp, turnOrigin, undefined, true)
+          return
+        } else if (outcome.action === 'binary') {
+          await attachMarks(file, null, turnStamp, turnOrigin, 'binary')
+          return
+        } else {
+          await attachMarks(file, outcome.diff, turnStamp, turnOrigin)
+          return
+        }
+      }
+      /**
+       * 过大的行（字节被增量扫描的上限扣下）**不做行级比较**（审核 M1）。
+       *
+       * 列表对这类行把计数钉成 0/0，而点开时 Host 走更大的读取预算、可能真的给出
+       * 一份比较 —— 那份比较的计数与列表行的 0/0 永远对不上，会引起 3 秒一次的假
+       * "位置已过期"；极端情况下 before 侧仍被扣下，得到的是"整篇删除/新增"的假
+       * 差异。所以这里连 diff 都不取：不建标记、不说行数，只打开文件并说明原因。
+       */
+      const oversized = file.oversized === true
+      const diff = oversized ? null : await api.changes.diff(sessionId, file.path, repoSubdirOf())
       if (!alive.current) return
       const stamp = `${file.path}@${summary.at}@${summary.turn}`
-      const set: ChangeSet = diff !== null && diff.kind === 'text'
-        ? changeSetFromHunks(diff.hunks, stamp, diff.patch)
-        : { ...EMPTY_CHANGE_SET, stamp }
-      // Resolved by the session's REMOTE root, never by the alias alone: one
-      // alias carries several bindings (two workspaces can live on one alias),
-      // and the alias-only form picked whichever came first —
-      // the file opened while the tree and the selector stayed on the other
-      // workspace. That was the reported bug.
-      const binding = await bindingOf(file)
-      if (binding === undefined) {
-        explorer.info(t('changes.noWorkspace'))
-        return
-      }
-      openRemoteFileInBinding(binding.id, file.path, set.hunks[0] === undefined ? {} : { line: set.hunks[0] })
-      // The tab id is deterministic (store.openFile builds it the same way), so
-      // the marks can be attached without waiting for the file read to settle.
-      const tabId = `file:${binding.alias}:${file.path}`
-      applyChangeSet(tabId, set)
-      // Remember WHERE these marks came from, once: the revert coordinates are
-      // read back from here (`publishableUndoOrigin`) instead of from the last
-      // summary this panel happened to render. No real hunk = no revert target,
-      // so a binary/failed diff forgets the previous provenance instead of
-      // leaving an older one around.
-      if (diff !== null && diff.kind === 'text' && diff.hunks.length > 0) {
-        rememberChangeOrigin(tabId, { sessionId, bindingId: binding.id, alias: binding.alias, root: summary.root })
-      } else {
-        forgetChangeOrigin(tabId)
-      }
+      await attachMarks(file, diff, stamp, { scope: 'session' }, oversized ? 'oversized' : undefined)
     } catch (problem) {
       if (alive.current) explorer.info(`${t('changes.diffFailed')}: ${problem instanceof Error ? problem.message : String(problem)}`)
     } finally {
       if (alive.current) setBusy(undefined)
     }
-  }, [bindingOf, explorer, sessionId, summary, t])
+  }, [attachMarks, explorer, scope, sessionId, summary, switchScope, t, turnMode, turnView])
 
   /**
    * Revert EVERYTHING this session did to one listed file.
@@ -450,15 +663,19 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
         path: file.path,
         display: file.display,
         mode: file.revert,
+        // 本轮行上的"撤销该文件的全部改动"= 撤到上一轮关闭时；补丁由 Host 从
+        // 本轮缓存里给（`turnDiff`），不是会话基线那份。
+        ...(turnMode ? { scope: 'turn' as const } : {}),
       })
     } finally {
       if (alive.current) setBusy(undefined)
     }
-  }, [bindingOf, explorer, sessionId, summary, t])
+  }, [bindingOf, explorer, sessionId, summary, t, turnMode])
 
   const toggleReviewed = useCallback((file: RemoteChangedFile): void => {
-    setReviewed(previous => toggleReviewedEntry(files, previous, file))
-  }, [files])
+    // 清理按两份列表的并集来（见 `reviewable`）：切作用域不该删掉另一边的 ✓。
+    setReviewed(previous => toggleReviewedEntry(reviewable, previous, file))
+  }, [reviewable])
 
   // Persist the marks whenever they change. A storage that refuses (private mode)
   // must cost nothing but persistence — never a broken panel.
@@ -479,11 +696,11 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     // just restored from localStorage (and wrote the empty map back).
     if (summary === null) return
     setReviewed(previous => {
-      const next = pruneReviewed(files, previous)
+      const next = pruneReviewed(reviewable, previous)
       // A prune only ever removes entries, so equal length means "identical".
       return Object.keys(next).length === Object.keys(previous).length ? previous : next
     })
-  }, [files, summary])
+  }, [reviewable, summary])
 
   /**
    * Bring the cursor's row into view.
@@ -520,24 +737,73 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     [files, reviewed, cursorKey],
   )
 
+  /**
+   * 「查看差异」：把这一行打开成**只读并排 diff**（数据来自会话账本）。
+   *
+   * 与左键「打开」是两件事：打开是"进文件里看这一处"，这里是"先把改前改后并排
+   * 看一遍"，不改变编辑器里的标签页内容、也不写任何东西。`notice` 是这次比较
+   * 必须说清的话（截断/二进制/读不到/已无差异），由调用方渲染。
+   */
+  const viewDiff = useCallback(async (file: RemoteChangedFile): Promise<void> => {
+    if (sessionId === undefined || summary === null) return
+    setBusy(file.path)
+    setDiffNotice(undefined)
+    try {
+      const binding = await bindingOf(file)
+      if (binding === undefined) {
+        explorer.info(t('changes.noWorkspace'))
+        return
+      }
+      const result = await openChangeDiff({
+        sessionId,
+        alias: binding.alias,
+        root: summary.root,
+        path: file.path,
+        display: file.display === '' ? file.path : file.display,
+        repoSubdir: repoSubdirOf(),
+      })
+      if (!alive.current) return
+      if (result.notice !== undefined) setDiffNotice({ path: file.path, notice: result.notice })
+    } catch (problem) {
+      if (alive.current) explorer.info(`${t('changes.diffFailed')}: ${problem instanceof Error ? problem.message : String(problem)}`)
+    } finally {
+      if (alive.current) setBusy(undefined)
+    }
+  }, [bindingOf, explorer, sessionId, summary, t])
+
   const openRowMenu = useCallback((event: React.MouseEvent, file: RemoteChangedFile): void => {
     event.preventDefault()
     event.stopPropagation()
     const cannotRevert = file.revert === undefined
+    /**
+     * 只有真的画得出两栏时才给这条：
+     * - 二进制/超大文件打开只会得到空视图；
+     * - **本轮视图只开文件**：「查看差异」读的是会话累计的账本，和行上的本轮行数
+     *   不是同一份比较，摆在这里只会让人以为这一轮的差异就是那两栏。
+     */
+    const canDiff = canShowChangeDiff(file) && !turnMode
     rowMenu.open(event.clientX, event.clientY, [
       { label: t('changes.menuOpen'), onSelect: () => { void openChanged(file) } },
+      {
+        label: t('changes.menuViewDiff'),
+        disabled: !canDiff,
+        ...(canDiff ? {} : { hint: turnMode ? t('changes.turnDiffDisabled') : t('changes.diffNotPossible') }),
+        onSelect: () => { void viewDiff(file) },
+      },
       {
         label: file.revert === 'delete' ? t('changes.revertCreation') : t('changes.revertFile'),
         danger: true,
         disabled: cannotRevert,
-        ...(cannotRevert ? { hint: t('changes.revertNotPossible') } : {}),
+        // 本轮只保留反向补丁：新建文件在本轮**没有**撤销项，原因要说到"用哪条路"
+        // （切回会话累计或 SCM 面板），不是通用的"无法撤销"（审核 N2）。
+        ...(cannotRevert ? { hint: turnMode ? t('changes.turnRevertNotPossible') : t('changes.revertNotPossible') } : {}),
         separated: true,
         onSelect: () => { void revertRow(file) },
       },
       { label: t('changes.openInScm'), separated: true, onSelect: () => { setView('scm') } },
       { label: t('changes.copyPath'), onSelect: () => { void copyText(file.path) } },
     ])
-  }, [openChanged, revertRow, rowMenu, t])
+  }, [openChanged, revertRow, rowMenu, t, turnMode, viewDiff])
 
   /** The header counter doubles as the "mark all / clear all" menu. */
   const openReviewMenu = useCallback((event: React.MouseEvent): void => {
@@ -565,8 +831,14 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const activeTab = explorer.tabs.find(candidate => candidate.id === explorer.activeTabId)
   const visible = useMemo(() => {
     if (summary === null) return false
-    return files.length > 0 || summary.pending === true || summary.unavailable !== undefined
-  }, [files.length, summary])
+    // Visibility is the SESSION surface's question: the panel exists while the
+    // session has work in either view — a turn that changed nothing must not hide
+    // the dock (that would also strand the user in a scope with no rows).
+    return sessionFiles.length > 0
+      || turnFiles.length > 0
+      || summary.pending === true
+      || summary.unavailable !== undefined
+  }, [sessionFiles.length, turnFiles.length, summary])
   // Published for the tick (see `visibleRef`): read at tick time, not captured at
   // effect time, so the cadence follows the panel without restarting the timer.
   // "Rendered" mirrors the early return below: an error is shown even without a
@@ -577,7 +849,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   if (!visible && error === undefined) return null
 
   const stale = activeTab?.changeStale === true
-  const title = files.length > 0 ? `${t('changes.title')} · ${files.length}` : t('changes.title')
+  /**
+   * 标题跟着作用域走：累计视图还是「本次改动 · N」，本轮是无歧义的「本轮 #N · HH:MM」。
+   * 带轮次号是必须的 —— `turnView` 只描述最近一个**已完成**轮次，画面上的
+   * `summary.turn` 可能已经翻到还没结束的下一轮。
+   */
+  const title = turnMode && turnView !== undefined
+    ? `${turnTitle(t, turnView)}${files.length > 0 ? ` · ${files.length}` : ''}`
+    : files.length > 0 ? `${t('changes.title')} · ${files.length}` : t('changes.title')
+  const shownAdded = turnMode ? (turnView?.added ?? 0) : (summary?.added ?? 0)
+  const shownDeleted = turnMode ? (turnView?.deleted ?? 0) : (summary?.deleted ?? 0)
 
   return (
     <div className="rvs-changes" data-collapsed={collapsed ? '1' : '0'}>
@@ -594,8 +875,30 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
         </button>
         {files.length > 0 && (
           <span className="rvs-changes-totals">
-            <span className="rvs-chg-add">+{summary?.added ?? 0}</span>
-            <span className="rvs-chg-del">−{summary?.deleted ?? 0}</span>
+            <span className="rvs-chg-add">+{shownAdded}</span>
+            <span className="rvs-chg-del">−{shownDeleted}</span>
+          </span>
+        )}
+        {/*
+          作用域切换只在 Host 真的给了一轮时出现：没有 `turnView` 的会话（老 Host、
+          或还没关闭过轮次）保持原样，不给一个点了没有反应的选择。
+        */}
+        {turnScopeAvailable(turnView) && (
+          <span className="rvs-changes-scope" role="group" aria-label={t('changes.scopeLabel')}>
+            <button
+              type="button"
+              className="rvs-changes-scope-btn"
+              aria-pressed={scope === 'session'}
+              title={t('changes.scopeSessionHint')}
+              onClick={() => { switchScope('session') }}
+            >{t('changes.scopeSession')}</button>
+            <button
+              type="button"
+              className="rvs-changes-scope-btn"
+              aria-pressed={scope === 'turn'}
+              title={t('changes.scopeTurnHint')}
+              onClick={() => { switchScope('turn') }}
+            >{t('changes.scopeTurn')}</button>
           </span>
         )}
         {done > 0 && (
@@ -653,11 +956,55 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       {!collapsed && (
         <div className="rvs-changes-body">
           {error !== undefined && <div className="rvs-changes-note rvs-changes-error">{t('changes.failed')}: {error}</div>}
+          {/*
+            刚才那次点击的结论（二进制 / 读不到 / 已被改回 / 只给了前缀）。留在这里
+            而不是只闪一条 toast：它解释的是"为什么屏幕上没有标记"，用户随时能回读。
+          */}
+          {diffNotice !== undefined && (
+            <div className="rvs-changes-note rvs-changes-diffnote" title={diffNotice.path}>
+              {t(diffNoticeKey(diffNotice.notice))}
+            </div>
+          )}
+          {/*
+            本轮视图自己的说明（"为什么没有标记 / 为什么回退成会话累计"）。上方那条
+            `diffNotice` 是**比较结论文案**，这条是**这次点击的处置**，两者可能同时
+            存在，所以分两行。
+          */}
+          {scopeNote !== undefined && (
+            <div className="rvs-changes-note rvs-changes-scopenote" title={scopeNote.detail}>
+              {t(scopeNote.key)}
+              {scopeNote.detail === undefined ? '' : ` · ${scopeNote.detail}`}
+            </div>
+          )}
           {summary?.unavailable !== undefined && (
             <div className="rvs-changes-note">{t('changes.unavailable')} · {summary.unavailable}</div>
           )}
-          {files.length === 0 && summary?.unavailable === undefined && summary?.pending !== true && (
-            <div className="rvs-changes-note">{t('changes.empty')}</div>
+          {/*
+            本轮只有统计（内存预算 / 文件上限）：统计是真的，但点行拿不到 hunk，也
+            不能撤销。这句话必须常驻，不能只在点击后出现 —— 用户有权先知道。
+          */}
+          {turnMode && turnView?.cached === false && (
+            <div className="rvs-changes-note rvs-changes-turnnote" title={turnView.reason}>
+              {t('changes.turnStatsOnly')}
+            </div>
+          )}
+          {/*
+            这一轮的新文件扫描还没落地：同一轮会被重算，列表可能继续变长。说清楚，
+            否则用户会以为"新文件没算进本轮"（审核 S2）。
+          */}
+          {turnMode && turnView?.pending === true && (
+            <div className="rvs-changes-note rvs-changes-turnnote">{t('changes.turnPending')}</div>
+          )}
+          {/*
+            A turn still waiting for its slow scan is NOT "this turn changed nothing":
+            saying both would flatly contradict the "still filling in" note above
+            (review NIT-1).
+          */}
+          {files.length === 0
+            && summary?.unavailable === undefined
+            && summary?.pending !== true
+            && turnView?.pending !== true && (
+            <div className="rvs-changes-note">{turnMode ? t('changes.turnEmpty') : t('changes.empty')}</div>
           )}
           {/*
             The filter can hide every row; an empty body must then say WHY instead
@@ -723,7 +1070,18 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
               </div>
             )
           })}
-          {summary?.truncated === true && <div className="rvs-changes-note">{t('changes.truncated')}</div>}
+          {/*
+            两条轴说"不完整"的原因不同，不能共用一句话：
+            - 会话累计：`changes.truncated` = 文件超过 500，只列出前 N 个（语义不变）；
+            - 本轮：`changes.turnPartial` 覆盖三种成因 —— 文件上限、上一侧内容未知
+              （二进制/字节被扣下，无法归属）、上一轮扫描从未落定（上一轮校正没赶上）。
+              常见场景（改过二进制文件）几乎每轮都会显示，用"文件过多"解释会撒谎。
+          */}
+          {turnMode
+            ? (turnView?.truncated === true
+              && <div className="rvs-changes-note rvs-changes-turnnote">{t('changes.turnPartial')}</div>)
+            : (summary?.truncated === true
+              && <div className="rvs-changes-note">{t('changes.truncated')}</div>)}
           {/*
             Which paths the new-file scan skipped. Stated, never silent: a file
             the user expected to see must not be missing without a reason, and

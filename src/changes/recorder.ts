@@ -54,7 +54,7 @@ import {
   type ReadResult,
   type StatusEntry,
 } from './status.ts'
-import { diffText, filePatch, hunkPatch } from './text-diff.ts'
+import { diffText, filePatch, hunkPatch, type TextHunk } from './text-diff.ts'
 
 /** The two facts a turn boundary needs from a Session, kept cordis-free. */
 export interface LedgerTarget {
@@ -94,6 +94,13 @@ export interface SessionChangesDeps {
    * fire.
    */
   execBudgetMs?: number
+  /**
+   * Memory budget for the cached per-turn hunks and reverse patches, in bytes.
+   *
+   * Overridable so a check can exercise the over-budget degradation without
+   * generating four megabytes of text; the real default is {@link MAX_TURN_PATCH_BYTES}.
+   */
+  turnPatchBytes?: number
 }
 
 /** A status letter the panel can paint (untracked has no git letter of its own). */
@@ -132,6 +139,105 @@ interface FileRecord {
   beforeFrom: 'baseline' | 'head' | 'none'
 }
 
+/**
+ * One file's comparison for the most recent COMPLETED turn.
+ *
+ * `before` is the text the file had at the previous turn's close (or, for a path
+ * that only became a session change in this turn, the session baseline — see
+ * `closeTurn`), `after` is the text at THIS turn's close. Both sides are kept so
+ * `turnDiff` can prove the file has not moved since (a fresh read against
+ * `after`) — that proof is what keeps stale hunks off the screen.
+ */
+interface TurnFileRecord {
+  display: string
+  /** Remote absolute POSIX path (the `turnDiff` lookup key). */
+  path: string
+  status: PanelStatus | undefined
+  binary: boolean
+  /** Bytes were withheld by a read cap: no comparison, no patch. */
+  oversized: boolean
+  hunks: TextHunk[]
+  before: string | null
+  after: string | null
+  /** The WHOLE turn comparison as one reverse-appliable patch (`''` = none). */
+  filePatch: string
+}
+
+/** The last completed turn's delta, cached between turn closes. */
+interface TurnDelta {
+  turn: number
+  files: RemoteChangedFile[]
+  added: number
+  deleted: number
+  at: number
+  /**
+   * Whether {@link TurnDelta.records} is usable.
+   *
+   * `false` = the contents blew the memory budget: the counts/files above are
+   * still real, but there are no hunks and no revert. Set once per session and
+   * never cleared (see {@link Ledger.turnDisabled}).
+   */
+  cached: boolean
+  reason: string | undefined
+  /**
+   * This view is incomplete — see `RemoteChangesTurnView.truncated` for the exact
+   * meaning (it is NOT "files is a prefix": rows that cannot be attributed are
+   * dropped outright).
+   */
+  truncated: true | undefined
+  /**
+   * The turn's slow scan has not landed yet: the same turn will be rebuilt once
+   * it does (`correctTurn`), so the row list may still grow.
+   */
+  provisional: boolean
+  /** Per absolute remote path. */
+  records: Map<string, TurnFileRecord>
+  /** Bytes the cached hunks/patches occupy (see {@link MAX_TURN_PATCH_BYTES}). */
+  bytes: number
+}
+
+/** Both sides of one path as the turn delta builder needs them. */
+interface TurnSide {
+  /** Text on this side, or null when the side is absent / not text. */
+  text: string | null
+  binary: boolean
+  truncated: boolean
+  /**
+   * Whether `text: null` means "the file is absent" (known) or "the bytes were
+   * withheld" (unknown).
+   *
+   * Load-bearing at a turn boundary: an unknown side must never be read as an
+   * empty one, or the next turn reports the file as a whole-file CREATION even
+   * though its bytes never moved (review M2).
+   */
+  known: boolean
+}
+
+/** Text of one read result, with "nothing usable transferred" folded into null. */
+function turnSideOf(read: ReadResult): TurnSide {
+  const binary = read.binary === true
+  const truncated = read.truncated === true
+  return {
+    text: read.absent || binary || truncated ? null : read.text,
+    binary,
+    truncated,
+    known: !binary && !truncated,
+  }
+}
+
+/**
+ * One path's remembered side at a turn close.
+ *
+ * A plain `string | null` could not tell "the file was absent" from "its bytes
+ * were withheld", and the two call for opposite answers at the next boundary
+ * (absent = a creation; withheld = no evidence at all).
+ */
+interface TurnSideText {
+  text: string | null
+  /** False = `text` is unknown (binary or over a read cap), not "empty". */
+  known: boolean
+}
+
 /** Grace added to an exec budget before the watchdog gives up on it. */
 const WATCHDOG_GRACE_MS = 5_000
 /** Sentinel for "the host call never came back". */
@@ -149,6 +255,25 @@ const DIFF_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 /** The single-file read budget, as `readPaths` wants it. */
 const DIFF_LIMITS = { perFile: DIFF_MAX_FILE_BYTES, total: DIFF_MAX_FILE_BYTES } as const
+
+/**
+ * Budget for ONE completed turn's **per-file hunks and reverse patches**.
+ *
+ * What it counts (and what it deliberately does NOT): the sum of every served
+ * file patch plus the hunk line bodies. The two FULL texts per record (`before`
+ * and `after`) and the `turnAfter` snapshot are not counted — they are what the
+ * staleness proof compares against, and they are already bounded by the scan
+ * caps (≲256 KiB/file, 8 MiB/turn for `after` plus the same order for `before`
+ * and the snapshot). So the real resident cost is this budget PLUS those texts
+ * (worst case ≈ 16 MiB + 4 MiB per active session), which is why the copy says
+ * "patches and hunk text" rather than "the turn's contents".
+ *
+ * The turn view must keep a comparison per changed file until the next turn
+ * closes (that is what `turnDiff` serves without re-reading the remote). 4 MiB
+ * fits a large refactor's patches; crossing it disables per-turn hunks for the
+ * session (see {@link Ledger.turnDisabled}) rather than thrashing the budget.
+ */
+const MAX_TURN_PATCH_BYTES = 4 * 1024 * 1024
 
 /** One session's bookkeeping. */
 interface Ledger {
@@ -213,6 +338,63 @@ interface Ledger {
   queue: Promise<void>
   dirty: boolean
   /**
+   * The latest turn that closed since the last publish consumed it.
+   *
+   * `endTurn` only records the boundary; the delta itself is computed inside
+   * `publish`, AFTER its root/publishSeq gates. Computing it in `endTurn` would
+   * race the very refresh it is about to schedule (the file reads are the
+   * expensive part), and also miss the untracked scan that a turn's new files
+   * arrive through.
+   */
+  pendingClose: number | undefined
+  /**
+   * Every LISTED path's side at the previous turn close (see `TurnSideText`:
+   * `known: false` = the bytes were withheld, so the value says nothing about
+   * whether the file was there). This is the "before" side of the next turn's
+   * delta; it moves only when a turn closes, so a mid-turn poll cannot fold the
+   * session's own work into the next turn.
+   */
+  turnAfter: Map<string, TurnSideText> | undefined
+  /**
+   * The previous close's snapshot was cut by the file cap.
+   *
+   * A path missing from a truncated snapshot is not evidence that it was not
+   * dirty then, so "new to the list = changed this turn" becomes a guess. The
+   * ledger stops attributing rather than guessing (see {@link turnDisabled}).
+   */
+  turnAfterTruncated: boolean
+  /** The most recent completed turn's delta (what `summary().turnView` reports). */
+  turnDelta: TurnDelta | undefined
+  /**
+   * The snapshot the CURRENT delta was computed against.
+   *
+   * Kept so a late `git ls-files --others` result can RECOMPUTE the same turn:
+   * the slow walk is what discovers files a turn created, and it lands after the
+   * turn's tracked scan by design. Without this the delta would either miss them
+   * or attribute them to the next turn.
+   */
+  turnBefore: Map<string, TurnSideText> | undefined
+  /**
+   * Whether THAT snapshot was cut by the file cap.
+   *
+   * Kept apart from {@link turnAfterTruncated}: a correction compares against the
+   * snapshot the delta was built from, while the close records the one the NEXT
+   * turn will use. Sharing one flag made the correction of a turn that had just
+   * crossed the cap silently drop every row it had.
+   */
+  turnBeforeTruncated: boolean
+  /** The current delta is still waiting for its turn's slow scan to land. */
+  turnProvisional: boolean
+  /**
+   * Why per-turn views stopped for this session; sticky.
+   *
+   * Currently one source: the memory budget. Once the hunks of a turn were
+   * dropped, its "before" side was never advanced, so continuing would attribute
+   * an older change to the newest turn — worse than not having the view at all.
+   * The session-cumulative view is unaffected.
+   */
+  turnDisabled: string | undefined
+  /**
    * Monotonic publish ledger: only the LATEST started publish may write.
    *
    * Two publishes can be in flight at once by design (the queued `refresh` and the
@@ -232,6 +414,12 @@ function posixJoin(base: string, rel: string): string {
   const left = base.endsWith('/') ? base.slice(0, -1) : base
   const right = rel.startsWith('./') ? rel.slice(2) : rel
   return right === '' ? left : `${left}/${right}`
+}
+
+/** The inverse of {@link posixJoin} for a path under `root`; '' when it is not. */
+function displayUnder(root: string, path: string): string {
+  const base = root.endsWith('/') ? root : `${root}/`
+  return path.startsWith(base) ? path.slice(base.length) : ''
 }
 
 /**
@@ -274,7 +462,16 @@ export class SessionChanges {
     if (this.disposed) return
     const ledger = this.ensure(target)
     if (ledger === undefined) return
+    /*
+     * Two events deliver the SAME boundary: `turn/end` and
+     * `agent/turn-stopping`. Re-opening it after it was consumed would make the
+     * next publish close the same turn again — with `turnAfter` already advanced,
+     * that second delta is empty and would overwrite the real one (review S3).
+     * A boundary is therefore recorded only when it moves the ledger forward.
+     */
+    const advanced = turn > ledger.turn
     ledger.turn = Math.max(ledger.turn, turn)
+    if (advanced) ledger.pendingClose = turn
     this.schedule(ledger)
   }
 
@@ -327,6 +524,28 @@ export class SessionChanges {
       pending: ledger.untrackedJob !== undefined || (ledger.pending && ledger.files.length > 0),
       ...(ledger.truncated === true ? { truncated: true as const } : {}),
       ...(unavailable === undefined ? {} : { unavailable }),
+      /*
+       * The turn view rides along with every summary: the panel polls ONE route,
+       * and a second request just to learn "is there a turn delta" would double
+       * the poll cost. Omitted entirely when no turn has closed yet, which is
+       * what keeps an older client (and a session that never finished a turn)
+       * on the cumulative list.
+       */
+      ...(ledger.turnDelta === undefined ? {} : {
+        turnView: {
+          turn: ledger.turnDelta.turn,
+          files: ledger.turnDelta.files,
+          added: ledger.turnDelta.added,
+          deleted: ledger.turnDelta.deleted,
+          at: ledger.turnDelta.at,
+          cached: ledger.turnDelta.cached,
+          ...(ledger.turnDelta.reason === undefined ? {} : { reason: ledger.turnDelta.reason }),
+          ...(ledger.turnDelta.truncated === true ? { truncated: true as const } : {}),
+          // The turn's own slow scan has not landed yet: the rows may still grow
+          // (the same turn is rebuilt, never relabelled as the next one).
+          ...(ledger.turnDelta.provisional ? { pending: true as const } : {}),
+        },
+      }),
     }
   }
 
@@ -407,6 +626,23 @@ export class SessionChanges {
       patch: reverse === '' ? '' : hunkPatch(record.display, hunk),
     }))
     if (hunks.length === 0) {
+      /**
+       * Both sides were READ and compared, so "no hunks" means the file is back
+       * at its session baseline (the change was reverted, or an identical byte
+       * round-trip). That is NOT "missing": the panel shows `missing` as "the
+       * remote cannot read this file", and saying that about a file the host
+       * just read is a lie that also hides "your change is gone". A withheld
+       * side (null) keeps `missing` — there is genuinely nothing to compare.
+       */
+      /**
+       * 判定只看**改后那一侧读到了**：新建的空文件 before 是 null（不存在），after
+       * 读到 `''`，零 hunk 是"读到了、只是没有内容"，不是"读不到"。老条件要求两侧
+       * 都非 null，于是会话新建的空文件被报成 `missing`，面板显示「远端读不到」
+       * （审核 NIT-1）。
+       */
+      if (afterText !== null) {
+        return { kind: 'text', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
+      }
       return { kind: 'missing', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
     }
     return {
@@ -417,6 +653,135 @@ export class SessionChanges {
       ...(reverse === '' ? {} : { patch: reverse }),
       ...(status === undefined ? {} : { status }),
       ...(truncated ? { truncated: true as const } : {}),
+    }
+  }
+
+  /**
+   * One file's comparison for the most recent COMPLETED turn.
+   *
+   * Same shape as {@link diff} (the editor paints both the same way), but the
+   * "before" side is the previous turn's close instead of the session baseline.
+   * The hunks are served from the turn delta's cache, so this call costs NO
+   * remote work in the common case — but a cached comparison is only worth
+   * showing while it still describes the disk. That is why the `after` side is
+   * read back here and compared with the cached text FIRST: if the file moved on
+   * after the turn closed (a later save, a terminal command, an agent), the
+   * answer is `stale` and the client falls back to the session view instead of
+   * painting line numbers that no longer exist.
+   *
+   * @param sessionId - live session owning the ledger.
+   * @param path - the file's remote absolute path (as listed in `turnView.files`).
+   * @returns hunks for decorations, `unavailable`/`stale` with a reason, or null
+   *   when the session itself is unknown.
+   */
+  async turnDiff(sessionId: string, path: string): Promise<RemoteChangesDiff | null> {
+    const ledger = this.ledgers.get(sessionId)
+    if (ledger === undefined) return null
+    const delta = ledger.turnDelta
+    const display = delta?.records.get(path)?.display ?? displayUnder(ledger.root, path)
+    if (delta === undefined) {
+      return {
+        kind: 'unavailable',
+        path,
+        display,
+        hunks: [],
+        reason: 'no turn has closed since this session started',
+      }
+    }
+    if (!delta.cached) {
+      return {
+        kind: 'unavailable',
+        path,
+        display,
+        hunks: [],
+        reason: delta.reason ?? 'per-turn change contents are not cached for this session',
+      }
+    }
+    const record = delta.records.get(path)
+    if (record === undefined) {
+      return {
+        kind: 'unavailable',
+        path,
+        display,
+        hunks: [],
+        reason: `this file is not part of turn ${delta.turn}'s change set`,
+      }
+    }
+    const status = record.status
+    if (record.binary) {
+      return { kind: 'binary', path, display: record.display, hunks: [], ...(status === undefined ? {} : { status }) }
+    }
+    if (record.oversized) {
+      return {
+        kind: 'unavailable',
+        path,
+        display: record.display,
+        hunks: [],
+        reason: 'the bytes of this file were withheld by the size cap, so there is no line-level comparison',
+        ...(status === undefined ? {} : { status }),
+      }
+    }
+    /**
+     * Verify the cache against the disk before serving it.
+     *
+     * A failed read is NOT "unchanged": without evidence the honest answer is
+     * `unavailable` (no palatable guess). A binary or cap-truncated read proves
+     * the bytes moved on after the turn closed, which is exactly `stale`.
+     */
+    const fresh = await this.readPaths(ledger, [record.display], 'worktree', DIFF_LIMITS)
+    if (ledger.disposed) return null
+    const side = fresh.get(record.display)
+    if (side === undefined) {
+      return {
+        kind: 'unavailable',
+        path,
+        display: record.display,
+        hunks: [],
+        reason: 'the file could not be read back from the host, so the turn comparison cannot be verified',
+        ...(status === undefined ? {} : { status }),
+      }
+    }
+    const current = turnSideOf(side)
+    if (current.binary || current.truncated) {
+      return {
+        kind: 'stale',
+        path,
+        display: record.display,
+        hunks: [],
+        reason: current.binary
+          ? 'the file has become binary since the turn closed'
+          : 'the file has grown past the read budget since the turn closed',
+        ...(status === undefined ? {} : { status }),
+      }
+    }
+    if (current.text !== record.after) {
+      return {
+        kind: 'stale',
+        path,
+        display: record.display,
+        hunks: [],
+        reason: 'the file was modified after the turn closed',
+        ...(status === undefined ? {} : { status }),
+      }
+    }
+    const hunks: UnifiedHunk[] = record.hunks.map(hunk => ({
+      oldStart: hunk.oldStart,
+      oldCount: hunk.oldLines,
+      newStart: hunk.newStart,
+      newCount: hunk.newLines,
+      heading: '',
+      lines: hunk.lines,
+      // Same rule as `diff`: a real `git apply -R` patch per hunk, empty when the
+      // turn's reverse cannot be expressed (a whole-file creation).
+      patch: record.filePatch === '' ? '' : hunkPatch(record.display, hunk),
+    }))
+    return {
+      kind: 'text',
+      path,
+      display: record.display,
+      hunks,
+      ...(record.filePatch === '' ? {} : { patch: record.filePatch }),
+      ...(status === undefined ? {} : { status }),
     }
   }
 
@@ -553,6 +918,18 @@ export class SessionChanges {
     // appeared in the new one before the move "session work" (and list them with
     // whole-file counts). Restart it with the rest of the observation.
     ledger.startedAt = Date.now()
+    // The turn delta describes the previous tree: its paths are relative to the
+    // old root and its patch headers would apply in the wrong checkout. Drop it
+    // with the rest of the observation. `turnDisabled` deliberately stays — it is
+    // a verdict about this session's size (like `publishSeq`, which is not an
+    // observation either), and re-enabling it would only re-blow the budget.
+    ledger.pendingClose = undefined
+    ledger.turnAfter = undefined
+    ledger.turnAfterTruncated = false
+    ledger.turnDelta = undefined
+    ledger.turnBefore = undefined
+    ledger.turnBeforeTruncated = false
+    ledger.turnProvisional = false
   }
 
   // ------------------------------------------------------------- internals
@@ -640,6 +1017,14 @@ export class SessionChanges {
       pending: false,
       queue: Promise.resolve(),
       dirty: false,
+      pendingClose: undefined,
+      turnAfter: undefined,
+      turnAfterTruncated: false,
+      turnDelta: undefined,
+      turnBefore: undefined,
+      turnBeforeTruncated: false,
+      turnProvisional: false,
+      turnDisabled: undefined,
       publishSeq: 0,
       disposed: false,
     }
@@ -690,8 +1075,15 @@ export class SessionChanges {
     void this.kickUntracked(ledger)
   }
 
-  /** Recompute the panel's list from the scans currently known. */
-  private async publish(ledger: Ledger): Promise<void> {
+  /**
+   * Recompute the panel's list from the scans currently known.
+   *
+   * @param fromSlowScan - this publish was triggered by the `git ls-files
+   *   --others` walk. A turn delta closed before that walk landed is still
+   *   provisional: this flag is what lets it be re-derived once the turn's new
+   *   files are known (see `correctTurn`).
+   */
+  private async publish(ledger: Ledger, fromSlowScan = false): Promise<void> {
     if (ledger.disposed) return
     // Ordering ticket: see Ledger.publishSeq. Taken before the first await.
     const seq = ++ledger.publishSeq
@@ -816,6 +1208,384 @@ export class SessionChanges {
       ? 'file contents could not be read from the host'
       : undefined
     ledger.at = Date.now()
+    /*
+     * The turn delta is derived from the SAME snapshot the panel just received
+     * and only after the two write gates above: it compares against "what the
+     * file looked like when the previous turn closed", so it must not be fed an
+     * older (or mixed-root) list. A publish that only carries the slow scan's
+     * result instead CORRECTS the turn it already closed.
+     */
+    if (ledger.pendingClose !== undefined) {
+      await this.closeTurn(ledger, root, seq, entries, listed, after, records, truncated)
+    } else if (fromSlowScan) {
+      await this.correctTurn(ledger, root, seq, entries, listed, after, records, truncated)
+    }
+  }
+
+  /**
+   * Close one turn: compute "what did it change" and remember this close as the
+   * next turn's starting point.
+   *
+   * The delta is defined against the PREVIOUS close, not the session baseline, so
+   * a file the session changed in turn 1 and left alone in turn 2 must not appear
+   * in turn 2's list — otherwise the view says the same work happened twice.
+   * That is what `turnAfter` is for: it holds every listed path's text at the
+   * moment the previous turn closed, and it is replaced (never merged) here.
+   *
+   * A failed `after` read leaves the boundary unconsumed, so the next publish
+   * retries instead of recording a turn against "nothing".
+   */
+  private async closeTurn(
+    ledger: Ledger,
+    root: string,
+    seq: number,
+    entries: readonly StatusEntry[],
+    listed: readonly StatusEntry[],
+    after: Map<string, ReadResult>,
+    records: Map<string, FileRecord>,
+    truncated: boolean,
+  ): Promise<void> {
+    const turn = ledger.pendingClose
+    if (turn === undefined || ledger.disposed) return
+    // A written-off session must not keep a boundary around: nothing will ever
+    // consume it, and `endTurn` would only re-set it on the next turn.
+    ledger.pendingClose = undefined
+    if (ledger.turnDisabled !== undefined) return
+    const known = ledger.turnAfter
+    const collected = await this.collectTurnSides(ledger, root, seq, listed, after, known)
+    if (collected.kind === 'retry') {
+      ledger.pendingClose = turn
+      return
+    }
+    if (collected.kind === 'superseded') return
+    /**
+     * A previous snapshot cut by the file cap cannot prove that a path MISSING
+     * from it was clean — it may simply have been past the cap. Entries that were
+     * listed then are still exact, so only the "newcomer = changed this turn"
+     * inference is dropped, and the view says it is partial (`truncated`).
+     */
+    const partial = ledger.turnAfterTruncated
+    /*
+     * If the PREVIOUS turn's slow scan never landed before this close, its
+     * snapshot may be missing files — so this turn's "newcomer = changed now"
+     * inference is unreliable too. The new view therefore keeps saying it is
+     * partial (review S2).
+     */
+    const previousUncorrected = ledger.turnProvisional
+    const built = this.buildTurnDelta(root, turn, collected.now, entries, records, known, partial, truncated)
+    this.storeTurnDelta(ledger, built, previousUncorrected)
+    if (built.overflow) return
+    ledger.turnBefore = known
+    ledger.turnBeforeTruncated = partial
+    ledger.turnProvisional = true
+    /**
+     * This close becomes the next turn's starting point. Built from `listed`
+     * ONLY: a path that left the dirty list is at its baseline, and the session
+     * baseline is exactly what a re-appearance will be compared against — keeping
+     * it here would cost a full re-read of every reverted file on every later
+     * turn.
+     */
+    ledger.turnAfter = this.turnSnapshotOf(listed, collected.now)
+    ledger.turnAfterTruncated = truncated
+  }
+
+  /**
+   * Re-derive the CURRENT turn's delta once the slow scan behind it has landed.
+   *
+   * A turn's new files are discovered by `git ls-files --others`, which runs
+   * after the tracked scan by design and can land seconds later. Rebuilding the
+   * same turn from the SAME "before" snapshot (kept in `turnBefore`) is what
+   * makes those files appear in the turn they belong to instead of in the next
+   * one. Guarded against the two ways this could lie: a newer turn boundary
+   * (which supersedes this delta) and a root move.
+   */
+  private async correctTurn(
+    ledger: Ledger,
+    root: string,
+    seq: number,
+    entries: readonly StatusEntry[],
+    listed: readonly StatusEntry[],
+    after: Map<string, ReadResult>,
+    records: Map<string, FileRecord>,
+    truncated: boolean,
+  ): Promise<void> {
+    const delta = ledger.turnDelta
+    const before = ledger.turnBefore
+    // `before === undefined` is legitimate on the FIRST turn (there is no previous
+    // close): the delta then compares against the session baseline, so the
+    // correction must run there too or a turn's new files never arrive.
+    if (!ledger.turnProvisional || delta === undefined) return
+    // Only the first slow-scan publish after the close may correct it, and only
+    // while its turn is still the current one.
+    ledger.turnProvisional = false
+    if (ledger.turnDisabled !== undefined || ledger.turn !== delta.turn) return
+    const collected = await this.collectTurnSides(ledger, root, seq, listed, after, before)
+    if (collected.kind !== 'ok') return
+    // The correction compares against `turnBefore`, so it must use THAT snapshot's
+    // cap verdict — not the one the close just stored for the next turn.
+    const partial = ledger.turnBeforeTruncated
+    const built = this.buildTurnDelta(root, delta.turn, collected.now, entries, records, before, partial, truncated)
+    // `previousUncorrected` is false here: this IS the correction, so it must not
+    // carry the "previous view was uncorrected" verdict forward.
+    this.storeTurnDelta(ledger, built, false)
+    if (built.overflow) return
+    // The correction has landed: the view is final for this turn.
+    const stored = ledger.turnDelta
+    if (stored !== undefined) stored.provisional = false
+    ledger.turnAfter = this.turnSnapshotOf(listed, collected.now)
+  }
+
+  /** Remember one close's sides for the next boundary (see `TurnSideText`). */
+  private turnSnapshotOf(
+    listed: readonly StatusEntry[],
+    now: Map<string, TurnSide>,
+  ): Map<string, TurnSideText> {
+    const snapshot = new Map<string, TurnSideText>()
+    for (const entry of listed) {
+      const side = now.get(entry.path)
+      snapshot.set(entry.path, { text: side?.text ?? null, known: side?.known ?? false })
+    }
+    return snapshot
+  }
+
+  /**
+   * The "after" side of one turn close, in `display` space.
+   *
+   * Starts from the publish's own reads (every listed path), then reads the paths
+   * the PREVIOUS close listed but this publish does not: those left the dirty
+   * list (reverted to their baseline, deleted, restored), and without reading
+   * them now the revert would be attributed to nobody — "the turn put the file
+   * back" would look like "the turn changed nothing".
+   *
+   * @returns `ok` with the sides; `retry` when a read failed (the caller keeps
+   *   the turn boundary for the next publish); `superseded` when a root move or
+   *   a newer publish already owns the observation.
+   */
+  private async collectTurnSides(
+    ledger: Ledger,
+    root: string,
+    seq: number,
+    listed: readonly StatusEntry[],
+    after: Map<string, ReadResult>,
+    known: Map<string, TurnSideText> | undefined,
+  ): Promise<{ kind: 'ok'; now: Map<string, TurnSide> } | { kind: 'retry' } | { kind: 'superseded' }> {
+    // No "after" side at all (the reads failed): there is nothing to compare.
+    if (listed.length > 0 && after.size === 0) return { kind: 'retry' }
+    const now = new Map<string, TurnSide>()
+    for (const entry of listed) {
+      const side = after.get(entry.path)
+      if (side === undefined) return { kind: 'retry' }
+      now.set(entry.path, turnSideOf(side))
+    }
+    const vanished = known === undefined ? [] : [...known.keys()].filter(display => !now.has(display))
+    if (vanished.length === 0) return { kind: 'ok', now }
+    const reads = await this.readPaths(ledger, vanished, 'worktree')
+    if (ledger.disposed) return { kind: 'superseded' }
+    if (ledger.root !== root || ledger.publishSeq !== seq) return { kind: 'superseded' }
+    if (reads.size === 0) return { kind: 'retry' }
+    for (const display of vanished) {
+      const side = reads.get(display)
+      if (side === undefined) return { kind: 'retry' }
+      now.set(display, turnSideOf(side))
+    }
+    return { kind: 'ok', now }
+  }
+
+  /**
+   * Compare one turn's before/after sides into panel rows plus cached hunks.
+   *
+   * The comparison rules are the ones the whole-session `publish` uses (binary
+   * and cap-withheld bytes carry 0/0 counts, a creation has no reverse patch,
+   * hunks come from the same Myers implementation), so a row means the same
+   * thing in both views.
+   */
+  private buildTurnDelta(
+    root: string,
+    turn: number,
+    now: Map<string, TurnSide>,
+    entries: readonly StatusEntry[],
+    records: Map<string, FileRecord>,
+    known: Map<string, TurnSideText> | undefined,
+    partial: boolean,
+    capTruncated: boolean,
+  ): {
+    turn: number
+    files: RemoteChangedFile[]
+    added: number
+    deleted: number
+    records: Map<string, TurnFileRecord>
+    bytes: number
+    overflow: boolean
+    /** This view drops rows it cannot attribute (see `TurnDelta.truncated`). */
+    incomplete: boolean
+  } {
+    const statusOf = new Map<string, PanelStatus | undefined>()
+    for (const entry of entries) statusOf.set(entry.path, panelStatus(entry.status))
+    const budget = this.deps.turnPatchBytes ?? MAX_TURN_PATCH_BYTES
+    const files: RemoteChangedFile[] = []
+    const turnRecords = new Map<string, TurnFileRecord>()
+    let added = 0
+    let deleted = 0
+    let bytes = 0
+    let incomplete = partial || capTruncated
+    for (const [display, side] of now) {
+      const absolute = posixJoin(root, display)
+      const record = records.get(absolute)
+      const had = known !== undefined && known.has(display)
+      // Not listed at the previous close AND not a session change now either: a
+      // file the session never touched (pre-existing dirt), which is not work.
+      // With a truncated previous snapshot, a newcomer is not evidence either.
+      if (!had && (record === undefined || partial)) continue
+      /*
+       * The PREVIOUS side is unknown (its bytes were binary / over a read cap).
+       * "null" here must never be read as "the file was absent": doing so turns an
+       * unchanged binary/oversized file into a whole-file CREATION (review M2).
+       * There is no evidence to compare, so the row is dropped and the view is
+       * marked incomplete — an honest gap, not a fabricated diff. The next close
+       * can attribute normally because this close records the side as readable.
+       */
+      const previous = had ? known.get(display) : undefined
+      if (had && previous !== undefined && previous.known === false) {
+        incomplete = true
+        continue
+      }
+      /*
+       * Where the "before" side comes from, in order of authority:
+       * - the previous turn close, when this path was listed then (exact);
+       * - the session baseline, for a path that became a session change in THIS
+       *   turn (the best remaining evidence, and the only side that exists);
+       * - nothing, otherwise.
+       */
+      const before = had ? (previous?.text ?? null) : (record?.before ?? null)
+      // Listed on both sides and byte-identical: the turn did not touch it.
+      if (had && before === side.text) continue
+      const binary = side.binary || record?.binary === true
+      const oversized = !binary && (side.truncated || record?.truncated === true)
+      let fileAdded = 0
+      let fileDeleted = 0
+      let hunks: TextHunk[] = []
+      let patch = ''
+      if (!binary && !oversized) {
+        const result = diffText(before ?? '', side.text ?? '')
+        fileAdded = result.added
+        fileDeleted = result.deleted
+        hunks = result.hunks
+        /*
+         * A whole-file creation has no reverse patch (its reverse is "delete the
+         * file", which the client expresses through `revert` and only the HOST
+         * may decide). Same rule as `publish`/`diff`.
+         */
+        patch = before !== null && hunks.length > 0 ? filePatch(display, hunks) : ''
+        // Memory accounting: the patch plus the hunk bodies are what the cache
+        // holds beyond the two texts (which the record needs for the staleness
+        // proof) — see MAX_TURN_PATCH_BYTES.
+        if (patch !== '') bytes += Buffer.byteLength(patch, 'utf8')
+        for (const hunk of hunks) {
+          for (const line of hunk.lines) bytes += Buffer.byteLength(line, 'utf8') + 1
+        }
+      }
+      added += fileAdded
+      deleted += fileDeleted
+      const status = statusOf.get(display)
+      const revert: 'patch' | undefined = patch === '' ? undefined : 'patch'
+      files.push({
+        path: absolute,
+        display,
+        added: fileAdded,
+        deleted: fileDeleted,
+        ...(binary ? { binary: true as const } : {}),
+        ...(oversized ? { oversized: true as const } : {}),
+        ...(status === undefined ? {} : { status }),
+        ...(revert === undefined ? {} : { revert }),
+      })
+      turnRecords.set(absolute, {
+        display,
+        path: absolute,
+        status,
+        binary,
+        oversized,
+        hunks,
+        before,
+        after: side.text,
+        filePatch: patch,
+      })
+    }
+    files.sort((left, right) => left.display.localeCompare(right.display))
+    return { turn, files, added, deleted, records: turnRecords, bytes, overflow: bytes > budget, incomplete }
+  }
+
+  /**
+   * Commit one built delta, degrading honestly when it blew the memory budget.
+   *
+   * Over budget the statistics are already computed and stay usable, but the
+   * per-file hunks and patches are dropped and this session stops computing turn
+   * views: keeping a half-filled snapshot would make the NEXT turn compare
+   * against texts that belong to an older boundary.
+   */
+  private storeTurnDelta(
+    ledger: Ledger,
+    built: {
+      turn: number
+      files: RemoteChangedFile[]
+      added: number
+      deleted: number
+      records: Map<string, TurnFileRecord>
+      bytes: number
+      overflow: boolean
+      incomplete: boolean
+    },
+    /** The turn BEFORE this one closed without ever being corrected (review S2). */
+    uncorrectedPrevious: boolean,
+  ): void {
+    const truncated = built.incomplete || uncorrectedPrevious
+    if (!built.overflow) {
+      ledger.turnDelta = {
+        turn: built.turn,
+        files: built.files,
+        added: built.added,
+        deleted: built.deleted,
+        at: Date.now(),
+        cached: true,
+        reason: undefined,
+        truncated: truncated ? true : undefined,
+        provisional: true,
+        records: built.records,
+        bytes: built.bytes,
+      }
+      return
+    }
+    const budget = this.deps.turnPatchBytes ?? MAX_TURN_PATCH_BYTES
+    const reason = `the per-turn patches and hunk text exceed the ${budget} byte memory budget`
+      + '; turn totals stay available without per-file hunks'
+    ledger.turnDelta = {
+      turn: built.turn,
+      files: built.files.map(file => {
+        const { revert: _revert, ...rest } = file
+        return rest
+      }),
+      added: built.added,
+      deleted: built.deleted,
+      at: Date.now(),
+      cached: false,
+      reason,
+      truncated: truncated ? true : undefined,
+      provisional: false,
+      records: new Map(),
+      bytes: built.bytes,
+    }
+    this.disableTurn(ledger, reason)
+  }
+
+  /** Stop computing turn views for this session, saying why (sticky). */
+  private disableTurn(ledger: Ledger, reason: string): void {
+    if (ledger.turnDisabled !== undefined) return
+    ledger.turnDisabled = reason
+    ledger.turnAfter = undefined
+    ledger.turnAfterTruncated = false
+    ledger.turnBefore = undefined
+    ledger.turnBeforeTruncated = false
+    ledger.turnProvisional = false
+    this.warn(`per-turn view disabled: ${reason}`)
   }
 
   /**
@@ -954,8 +1724,9 @@ export class SessionChanges {
       ledger.untracked = parseUntrackedZ(scan.stdout)
       await this.absorbPreExisting(ledger)
       // A completed scan is worth one more publish: it is the only source of
-      // "a file appeared" rows.
-      await this.publish(ledger)
+      // "a file appeared" rows — and of the per-turn delta that must include
+      // them (see `correctTurn`).
+      await this.publish(ledger, true)
     })()
       .catch(error => this.warn(`untracked scan failed: ${messageOf(error)}`))
       .finally(() => { ledger.untrackedJob = undefined })

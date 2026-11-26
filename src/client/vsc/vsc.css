@@ -2408,78 +2408,211 @@ body:not([data-ds-dark-theme]) .rvs-edge .rvs-change-block-del {
 .rvs-change-nav-btn:active { background: var(--rvs-active); }
 
 /**
- * 悬浮在改动行上出现的「撤销这处改动」按钮。
+ * 悬浮在改动行上出现的那枚 `⋯`（以及它展开的菜单）。
  *
- * 它**不在编辑器的 DOM 里**：`undo-affordance.ts` 把它当 `position: fixed` 的元素挂到
- * `document.body`（和「添加到对话」那个浮层同一套做法），所以这里的选择器不带
+ * 它们**不在编辑器的 DOM 里**：`undo-affordance.ts` 把它们当 `position: fixed` 的元素
+ * 挂到 `document.body`（和「添加到对话」那个浮层同一套做法），所以这里的选择器不带
  * `.rvs-edge` —— 带上了就一条都不生效。固定定位 + 高 z-index 是刻意的：宿主容器有
  * `overflow: hidden`，挂在里面会被 CodeMirror 的滚动层裁掉。
  *
- * 颜色按"危险动作"给：默认红边红字、悬停实心红。底色不透明（不用半透明的 overlay
- * token），否则后面的代码文字会透出来。
+ * 位置约束：`⋯` 的纵向中线锁在被悬停的那一行上，只做横向夹取。这样指针从行内水平
+ * 移进按钮、再从按钮移进菜单，全程不经过别的 `.cm-line`（早先把整组按钮挪到行上方，
+ * 指针必须路过上一行，一路过就整组收起，按钮永远点不到）。底色不透明（不用半透明的
+ * overlay token），否则后面的代码文字会透出来。
  */
-.rvs-undo-affordance {
+.rvs-change-actions {
   position: fixed;
   z-index: 2100;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 220px;
-  padding: 3px 9px;
-  border: 1px solid #f85149;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid #6e7681;
   border-radius: 6px;
   background-color: #1e2229;
-  color: #ffb4ae;
+  color: #c9d1d9;
   /* 按钮挂在 body 上，没有 .rvs-edge 的字体上下文：跟随宿主页面字体。 */
   font-family: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1;
   cursor: pointer;
   box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
   /* 纵向以悬停行的中线对齐（横向坐标由 JS 按行尾算好）。 */
   transform: translateY(-50%);
 }
 
-.rvs-undo-affordance:hover {
-  background-color: #f85149;
-  border-color: #f85149;
-  /* Dark ink, not white: white on #f85149 is 3.35:1. */
-  color: #1e2229;
+.rvs-change-actions:hover {
+  background-color: #30363d;
+  border-color: #8b949e;
+  color: #ffffff;
 }
 
-.rvs-undo-affordance:active {
-  transform: translateY(-50%) scale(.97);
-}
-
-.rvs-undo-affordance:focus-visible {
-  /* The pill hangs off <body>, where `--rvs-*` does not resolve, so its focus
-     ring comes from its own two-scheme pair: the pale ink of the dark pill
-     (9.4:1 on the code surface) and the deep red of the light pill (7.9:1). */
+.rvs-change-actions:focus-visible {
   outline: 2px solid #ffb4ae;
   outline-offset: 2px;
 }
 
-/* 删除锚点：这一行其实已经不在了，虚线边框把它和"真实存在的行"分开。 */
-.rvs-undo-affordance[data-kind="del"] {
-  border-style: dashed;
+/* 展开态：按钮本身给一点底色，读得出"菜单是从它出来的"。 */
+.rvs-change-actions[aria-expanded="true"] {
+  background-color: #30363d;
+  border-color: #8b949e;
+  color: #ffffff;
 }
 
-body:not([data-ds-dark-theme]) .rvs-undo-affordance {
-  border-color: #cf222e;
+body:not([data-ds-dark-theme]) .rvs-change-actions {
+  border-color: #8c959f;
   background-color: #ffffff;
-  color: #a40e26;
+  color: #24292f;
   box-shadow: 0 6px 18px rgba(31, 35, 40, .18);
 }
 
-body:not([data-ds-dark-theme]) .rvs-undo-affordance:hover {
-  background-color: #cf222e;
-  border-color: #cf222e;
-  color: #fff;
+body:not([data-ds-dark-theme]) .rvs-change-actions:hover,
+body:not([data-ds-dark-theme]) .rvs-change-actions[aria-expanded="true"] {
+  background-color: #eaeef2;
+  border-color: #6e7781;
+  color: #24292f;
 }
 
-body:not([data-ds-dark-theme]) .rvs-undo-affordance:focus-visible {
-  outline-color: #a40e26;
+body:not([data-ds-dark-theme]) .rvs-change-actions:focus-visible {
+  outline-color: #cf222e;
+}
+
+/**
+ * `⋯` 展开的菜单：撤销这处改动 +（可选）确认保留。
+ *
+ * 一行一项，文字左对齐；撤销按"危险动作"给红边红字，确认保留按"安全的记账"给绿色，
+ * 已确认态由 `aria-pressed` + `.is-on` 双重表达（不只靠颜色）。
+ */
+.rvs-change-actions-menu {
+  position: fixed;
+  z-index: 2100;
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background-color: #161b22;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  font-family: inherit;
+}
+
+.rvs-change-actions-menu[hidden] {
+  display: none;
+}
+
+/**
+ * 按钮与菜单之间的透明桥（复核 MUST）。
+ *
+ * 菜单与 `⋯` 在 JS 里是**零缝**相接的，但 `Math.round` 可能留下不足 1px 的缝，
+ * 而按钮只有 20px 高、行高约 19px —— 任何缝都会落在下一行 `.cm-line` 的箱体上，
+ * 指针从按钮移向菜单时经过它就会触发编辑器的 `mousemove`，整组浮层立刻收起，
+ * 菜单项永远点不到。这条 8px 的透明区只覆盖按钮自身所在的区域（不覆盖下一行的
+ * 可点击内容），把接缝兜住；方向由 JS 写的 `data-side` 决定。
+ */
+.rvs-change-actions-menu::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 8px;
+  top: -8px;
+}
+
+/* 菜单在按钮上方：桥向下搭，同样只盖住按钮那一侧。 */
+.rvs-change-actions-menu[data-side='above']::before {
+  top: auto;
+  bottom: -8px;
+}
+
+.rvs-change-actions-menu button {
+  display: block;
+  width: 100%;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: #c9d1d9;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.rvs-change-actions-menu button:hover,
+.rvs-change-actions-menu button:focus-visible {
+  outline: none;
+  background-color: #21262d;
+  color: #ffffff;
+}
+
+.rvs-change-actions-menu .rvs-change-actions-undo {
+  color: #ffb4ae;
+}
+
+.rvs-change-actions-menu .rvs-change-actions-undo:hover,
+.rvs-change-actions-menu .rvs-change-actions-undo:focus-visible {
+  background-color: #f85149;
+  /* Dark ink, not white: white on #f85149 is 3.35:1. */
+  color: #1e2229;
+}
+
+/* 删除锚点：这一行其实已经不在了，虚线边框把它和"真实存在的行"分开。 */
+.rvs-change-actions-menu .rvs-change-actions-undo[data-kind="del"] {
+  border-style: dashed;
+}
+
+.rvs-change-actions-menu .rvs-change-actions-confirm {
+  color: #7ee787;
+}
+
+.rvs-change-actions-menu .rvs-change-actions-confirm.is-on,
+.rvs-change-actions-menu .rvs-change-actions-confirm[aria-pressed="true"] {
+  background-color: #238636;
+  color: #ffffff;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu {
+  border-color: #d0d7de;
+  background-color: #ffffff;
+  box-shadow: 0 8px 24px rgba(31, 35, 40, .18);
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu button {
+  color: #24292f;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu button:hover,
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu button:focus-visible {
+  background-color: #f6f8fa;
+  color: #24292f;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-undo {
+  color: #a40e26;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-undo:hover,
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-undo:focus-visible {
+  background-color: #cf222e;
+  color: #ffffff;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-confirm {
+  color: #116329;
+}
+
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-confirm.is-on,
+body:not([data-ds-dark-theme]) .rvs-change-actions-menu .rvs-change-actions-confirm[aria-pressed="true"] {
+  background-color: #1a7f37;
+  color: #ffffff;
 }
 
 /**

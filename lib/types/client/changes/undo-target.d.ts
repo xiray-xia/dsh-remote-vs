@@ -36,6 +36,18 @@ export interface ChangeOrigin {
     alias: string;
     /** Ledger root the patch paths are relative to (`git apply -R` runs here). */
     root: string;
+    /**
+     * Which axis the hunks came from: the session total (default) or one turn.
+     *
+     * Load-bearing twice: the staleness judge needs the list that matches the
+     * marks (turn counts vs session counts differ by definition), and a re-read
+     * after a save/revert must fetch the SAME axis — a turn patch applied to a tab
+     * whose marks were rebuilt from the session baseline would revert the wrong
+     * amount of work.
+     */
+    scope?: 'session' | 'turn';
+    /** For `scope: 'turn'`: the turn whose delta the marks describe. */
+    turn?: number;
 }
 /** Why a revert must be refused. */
 export type UndoRefusal = 'no-origin' | 'session-mismatch' | 'binding-gone' | 'binding-changed' | 'path-outside';
