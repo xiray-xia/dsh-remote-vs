@@ -33,6 +33,7 @@ import { changeSetFromDiff, diffNoticeKey, noticeOfDiff, type DiffNotice } from 
 import { applyFailureText } from './changes/apply-failure.ts'
 import { sessionDiffOutcome } from './changes/session-diff.ts'
 import { tabsToMarkStale, turnMarksStale, type MarksTab } from './changes/staleness.ts'
+import { hunkRevertClearsTurn, markTurnReverted } from './changes/turn-reverted.ts'
 import { undoContext, type UndoContext } from './changes/undo-context.ts'
 import { changeOriginForTab, forgetChangeOrigin, rememberChangeOrigin, resolveUndoTarget } from './changes/undo-target.ts'
 import { applyStageOverrides, bucketStatus, buildTreeMarks, insertStagedEntry, optimisticStageDetail, type ChangeEntry, type StageOverride, type StatusBuckets, type TreeMarks } from './scm/status-map.ts'
@@ -3850,11 +3851,25 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
     info(t('connection.actionFailed'))
     return
   }
-  const patch = tab.changeSet?.patches?.[mark.hunk ?? -1]
+  // Snapshot the set BEFORE the write: after a successful revert the marks are
+  // re-read (`refreshChangeSet`), so "was this the file's only hunk" can only be
+  // answered from the data the user actually clicked.
+  const changeSet = tab.changeSet
+  const patches = changeSet?.patches ?? []
+  const patch = patches[mark.hunk ?? -1]
   if (patch === undefined || patch.trim() === '') {
     info(t('changes.undoMissing'))
     return
   }
+  /**
+   * Would this ONE undo leave the file with no change in this turn?
+   *
+   * Only then may the row be hidden from the turn list (see
+   * `changes/turn-reverted.ts`): a multi-hunk file that is partially reverted still
+   * has changes, and hiding it would hide them too — worse than the stale row this
+   * task is fixing.
+   */
+  const clearsTurn = hunkRevertClearsTurn(context.scope, patches.length)
   try {
     // 'revert' = 远端 `git apply -R`；上下文不匹配它就抛错，这就是冲突护栏。
     await applyHunk(context.alias, context.root, patch, 'revert')
@@ -3874,6 +3889,18 @@ export async function undoChange(tabId: string, mark: ChangeMark): Promise<void>
     const detail = error instanceof Error ? error.message.trim() : String(error).trim()
     info(applyFailureText(detail, t) ?? t('changes.undoConflict'))
     return
+  }
+  /**
+   * The remote write succeeded. Record it on the CLIENT so the frozen turn list
+   * stops showing the row (the host keeps its turn delta untouched — that snapshot
+   * is what the whole turn view is built on).
+   *
+   * Fail-closed on a missing turn: hiding is a claim about "this turn", and with no
+   * turn recorded the panel would have to guess which one to hide. Not hiding is
+   * the safe answer (the row stays, exactly as before this feature).
+   */
+  if (clearsTurn && context.turn !== undefined) {
+    markTurnReverted(context.sessionId, context.turn, tab.fullPath)
   }
   // Refresh the marks instead of dropping them, and put the caret back where the
   // revert happened.
@@ -3929,6 +3956,16 @@ export interface RevertFileTarget {
    * same argument decides WHICH host read to make.
    */
   scope?: 'session' | 'turn'
+  /**
+   * For `scope: 'turn'`: which turn the row came from.
+   *
+   * Used after a successful revert to hide that row from the turn list (the host's
+   * frozen delta keeps listing it, by design). **Fail-closed**: when it is omitted
+   * the row is NOT hidden — hiding is a claim about one specific turn, and guessing
+   * it (e.g. from "the latest turn seen") could hide a row in a turn the user never
+   * reverted. The only caller (the dock) always knows it.
+   */
+  turn?: number
 }
 
 /**
@@ -4046,6 +4083,15 @@ export async function revertFileChanges(target: RevertFileTarget): Promise<boole
    * remote file has already changed. Refreshing the tab and the list is best
    * effort — a read that fails here leaves a stale panel, not a lost revert.
    */
+  /*
+   * Turn scope: the whole file's turn change is gone, so record it for the panel
+   * to hide. The host is NOT told (its turn delta stays frozen — see
+   * `changes/turn-reverted.ts`); the session-cumulative view is untouched.
+   * Fail-closed like `undoChange`: no recorded turn ⇒ no hide, never a guess.
+   */
+  if (target.scope === 'turn' && target.turn !== undefined) {
+    markTurnReverted(target.sessionId, target.turn, target.path)
+  }
   try {
     // Re-read the tab: the write took a round trip, and it may have been closed
     // (or replaced) meanwhile.

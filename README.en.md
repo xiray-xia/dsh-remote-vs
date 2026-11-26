@@ -366,6 +366,19 @@ with zero change events).
   comparison — it never paints line numbers from a comparison that no longer describes the file. Turn mode
   has no "undo the new file (delete it)" entry (that needs git's index copy, and the turn cache keeps
   patches only); the row menu says to delete it from the session-total view or the Source Control panel.
+- **A successful revert hides the row from the turn list**: the turn view is the delta FROZEN when the
+  turn closed, and the host never rewrites it — so "reverted, but the row is still there" is finished by
+  the **client presentation layer**. After a single-change revert (that file had exactly one change this
+  turn) or the row's "Revert all changes in this file", the row is filtered out and the file count /
+  `+a −b` are recomputed from the **visible** rows; the panel says how many were hidden, and when nothing
+  is left — and the view is COMPLETE — it says "all changes from this turn have been reverted" (not
+  "this turn changed no file"). A partial view or a still-pending scan keeps the "N hidden" sentence:
+  the panel does not assert what it cannot prove.
+  Records are keyed by `(session, turn, path)` in browser storage (`rvs.changes.reverted.<session>`) and
+  survive a page reload. A PARTIAL undo of a multi-hunk file does **not** hide it (the remaining changes
+  must stay visible), a failed revert never hides anything, and a browser with storage disabled simply
+  does not remember (the list stays as before) — no remote write is ever affected, and the host's frozen
+  accounting is unchanged.
 - **Clicking a file** opens it in the remote editor with change marks: added lines get a **green line
   background**, deleted characters are drawn as an **inline struck-through chip** (a deleted character does
   not exist in the new file, so it can only be an inserted widget), and the left gutter carries a change bar.

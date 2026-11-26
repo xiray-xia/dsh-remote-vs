@@ -993,6 +993,16 @@ export interface RevertFileTarget {
      * same argument decides WHICH host read to make.
      */
     scope?: 'session' | 'turn';
+    /**
+     * For `scope: 'turn'`: which turn the row came from.
+     *
+     * Used after a successful revert to hide that row from the turn list (the host's
+     * frozen delta keeps listing it, by design). **Fail-closed**: when it is omitted
+     * the row is NOT hidden — hiding is a claim about one specific turn, and guessing
+     * it (e.g. from "the latest turn seen") could hide a row in a turn the user never
+     * reverted. The only caller (the dock) always knows it.
+     */
+    turn?: number;
 }
 /**
  * Revert one file's WHOLE session change set (the panel row's action).

@@ -54,8 +54,11 @@ import {
   serializeChangeScope,
   turnOutcomeOf,
   turnScopeAvailable,
+  turnFullyReverted,
+  visibleTurnRows,
   type ChangeScope,
 } from './turn-view.ts'
+import { loadTurnRevertedPaths } from './turn-reverted.ts'
 import {
   isReviewed,
   nextUnreviewed,
@@ -118,6 +121,9 @@ const INVISIBLE_POLL_SKIP = 10
  * reload without becoming a protocol field nobody else needs.
  */
 const REVIEW_STORAGE_PREFIX = 'rvs.changes.reviewed.'
+
+/** 空集合：非本轮模式不该每次渲染都分配一个新的 Set（`visibleTurnRows` 只读它）。 */
+const EMPTY_REVERTED_PATHS: ReadonlySet<string> = new Set()
 
 /**
  * How many polls between two follow retries (5 × 3 s = one probe every 15 s).
@@ -435,7 +441,35 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const turnView = summary?.turnView
   const turnFiles = useMemo(() => turnView?.files ?? [], [turnView])
   const turnMode = scope === 'turn' && turnScopeAvailable(turnView)
-  const files = turnMode ? turnFiles : sessionFiles
+  /**
+   * 「本轮里这个文件已被撤销」的客户端记账（见 `changes/turn-reverted.ts`）。
+   *
+   * 每次渲染**现读**（读操作，不写）：撤销发生在 store 里，store 一定会 patch 快照让
+   * 面板重渲染，所以这里不需要额外的订阅/事件，重渲染时就能看到最新记录；宿主冻结的
+   * `turnView` 本身永远不变。会话累计模式不读这个存储。
+   */
+  const revertedPaths = turnMode && turnView !== undefined && sessionId !== undefined
+    ? loadTurnRevertedPaths(sessionId, turnView.turn)
+    : EMPTY_REVERTED_PATHS
+  /**
+   * 可见行：宿主冻结的行里去掉"本轮已撤销"的那些。文件数、`+a −b`、✓ 的分母、
+   * 「下一个未审阅」都必须用这一份，否则会留下"列表只剩一行、合计还是三行"的残影。
+   */
+  const turnRows = turnMode ? visibleTurnRows(turnFiles, revertedPaths) : undefined
+  const files = turnMode ? (turnRows?.visible ?? []) : sessionFiles
+  /** 被隐藏的行数（仅本轮模式；>0 时面板给一句说明）。 */
+  const hiddenRows = turnRows?.hidden ?? 0
+  /**
+   * 「本轮改动已全部撤销」只有在视图完整时才成立：`truncated`（有行因上限/未知侧/
+   * 未校正被丢弃）或 `pending`（慢扫描还没落地）时，"可见行为 0"只证明"看到的都撤了"，
+   * 不证明"这一轮已经没有改动"——说出口会与同屏的「视图不完整 / 还在等扫描」矛盾。
+   */
+  const allReverted = turnMode && turnView !== undefined && turnFullyReverted({
+    visible: files.length,
+    hidden: hiddenRows,
+    ...(turnView.truncated === true ? { truncated: true as const } : {}),
+    ...(turnView.pending === true ? { pending: true as const } : {}),
+  })
   /**
    * 审阅标记是按"行数 + 状态"建键的，两种视图对同一文件给出的数字按定义不同。
    *
@@ -664,13 +698,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
         display: file.display,
         mode: file.revert,
         // 本轮行上的"撤销该文件的全部改动"= 撤到上一轮关闭时；补丁由 Host 从
-        // 本轮缓存里给（`turnDiff`），不是会话基线那份。
-        ...(turnMode ? { scope: 'turn' as const } : {}),
+        // 本轮缓存里给（`turnDiff`），不是会话基线那份。`turn` 让 store 在成功后把
+        // 这一行记成"本轮已撤销"，面板据此隐藏它（宿主冻结的 delta 不动）。
+        ...(turnMode
+          ? { scope: 'turn' as const, ...(turnView === undefined ? {} : { turn: turnView.turn }) }
+          : {}),
       })
     } finally {
       if (alive.current) setBusy(undefined)
     }
-  }, [bindingOf, explorer, sessionId, summary, t, turnMode])
+  }, [bindingOf, explorer, sessionId, summary, t, turnMode, turnView])
 
   const toggleReviewed = useCallback((file: RemoteChangedFile): void => {
     // 清理按两份列表的并集来（见 `reviewable`）：切作用域不该删掉另一边的 ✓。
@@ -857,8 +894,16 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   const title = turnMode && turnView !== undefined
     ? `${turnTitle(t, turnView)}${files.length > 0 ? ` · ${files.length}` : ''}`
     : files.length > 0 ? `${t('changes.title')} · ${files.length}` : t('changes.title')
-  const shownAdded = turnMode ? (turnView?.added ?? 0) : (summary?.added ?? 0)
-  const shownDeleted = turnMode ? (turnView?.deleted ?? 0) : (summary?.deleted ?? 0)
+  /**
+   * 合计按**可见行**重算：宿主那份冻结合计会把已撤销的文件也算进去（列表已经没有它，
+   * 数字却还算着，就是"残影"）。会话累计模式仍用宿主给的合计（语义不变）。
+   */
+  const shownAdded = turnMode ? (turnRows?.added ?? 0) : (summary?.added ?? 0)
+  const shownDeleted = turnMode ? (turnRows?.deleted ?? 0) : (summary?.deleted ?? 0)
+  // 本轮可见行全是二进制/超大（0/0）时不摆一对 `+0 −0`；会话累计保持原样。
+  const showTotals = turnMode
+    ? files.length > 0 && (shownAdded > 0 || shownDeleted > 0)
+    : files.length > 0
 
   return (
     <div className="rvs-changes" data-collapsed={collapsed ? '1' : '0'}>
@@ -873,7 +918,7 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
           <span className="rvs-changes-chevron" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
           <span className="rvs-changes-title">{title}</span>
         </button>
-        {files.length > 0 && (
+        {showTotals && (
           <span className="rvs-changes-totals">
             <span className="rvs-chg-add">+{shownAdded}</span>
             <span className="rvs-chg-del">−{shownDeleted}</span>
@@ -996,14 +1041,30 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
             <div className="rvs-changes-note rvs-changes-turnnote">{t('changes.turnPending')}</div>
           )}
           {/*
+            撤销成功后被隐藏的行：宿主冻结的 delta 仍然列着它（宿主语义不动），所以
+            "少了几行"必须由面板自己说清楚。只有视图**完整**且可见行为 0 时才说"全部
+            撤销"（`turnFullyReverted`）；partial/pending 下仍用带 {n} 的那句 —— 面板
+            无法证明"这一轮再没有别的改动"（SHOULD-1）。
+          */}
+          {turnMode && hiddenRows > 0 && (
+            <div className="rvs-changes-note rvs-changes-turnnote">
+              {allReverted
+                ? t('changes.turnRevertedAll')
+                : t('changes.turnRevertedHidden').replace('{n}', String(hiddenRows))}
+            </div>
+          )}
+          {/*
             A turn still waiting for its slow scan is NOT "this turn changed nothing":
             saying both would flatly contradict the "still filling in" note above
-            (review NIT-1).
+            (review NIT-1). Neither is "every row was reverted": that case has its own
+            sentence above (`turnRevertedAll`), so the generic empty copy stays away —
+            and in a partial/pending view the "all" sentence itself is withheld above.
           */}
           {files.length === 0
             && summary?.unavailable === undefined
             && summary?.pending !== true
-            && turnView?.pending !== true && (
+            && turnView?.pending !== true
+            && hiddenRows === 0 && (
             <div className="rvs-changes-note">{turnMode ? t('changes.turnEmpty') : t('changes.empty')}</div>
           )}
           {/*

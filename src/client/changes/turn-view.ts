@@ -13,7 +13,7 @@
  *    统计（`cached: false`）。每种结局都对应一句必须显示给用户的话，不能静默。
  */
 
-import type { RemoteChangesDiff, RemoteChangesTurnView } from '../../protocol.ts'
+import type { RemoteChangedFile, RemoteChangesDiff, RemoteChangesTurnView } from '../../protocol.ts'
 
 /** 面板当前按哪条轴列出改动。 */
 export type ChangeScope = 'session' | 'turn'
@@ -129,4 +129,67 @@ export interface ScopeAfterOutcome {
 export function scopeAfterOutcome(outcome: TurnOutcome, current: ChangeScope): ScopeAfterOutcome {
   if (outcome.action === 'fallback') return { scope: 'session', keepNote: true }
   return { scope: current, keepNote: false }
+}
+
+/** 本轮列表过滤后的可见部分（面板头部/审阅计数/跳转都读这一份）。 */
+export interface VisibleTurnRows {
+  /** 过滤掉"本轮已撤销"的行之后剩下的行（保持宿主给的顺序）。 */
+  visible: RemoteChangedFile[]
+  /** 被过滤掉的行数（>0 时面板必须给一句说明）。 */
+  hidden: number
+  /** 可见行的 `+` 合计（不用宿主冻结的那份，它会算进已撤销的文件）。 */
+  added: number
+  /** 可见行的 `−` 合计。 */
+  deleted: number
+}
+
+/**
+ * 把宿主冻结的本轮行过滤成"现在还能看到的"。
+ *
+ * 宿主不回头改 `turnView`（轮次关闭即冻结），所以撤销成功后那一行只有客户端能去掉；
+ * 去掉之后**所有**对外数字都必须按可见行重算：文件数、`+a −b`、✓ 的
+ * `已审阅 n/N` 分母、以及「下一个未审阅」的候选集。否则会出现"列表只剩一行、合计
+ * 还写着三行"的残影。
+ *
+ * @param files - `turnView.files`（宿主冻结的行）。
+ * @param reverted - 这一轮已撤销的路径集合（`loadTurnRevertedPaths` / 注入的假表）。
+ */
+export function visibleTurnRows(
+  files: readonly RemoteChangedFile[],
+  reverted: ReadonlySet<string>,
+): VisibleTurnRows {
+  const visible: RemoteChangedFile[] = []
+  let added = 0
+  let deleted = 0
+  for (const file of files) {
+    if (reverted.has(file.path)) continue
+    visible.push(file)
+    added += file.added
+    deleted += file.deleted
+  }
+  return { visible, hidden: files.length - visible.length, added, deleted }
+}
+
+/**
+ * 全部行都被隐藏时，能不能断言「本轮改动已全部撤销」？
+ *
+ * **不能**，除非这份本轮视图是完整的：`truncated`（文件上限 / 上一侧内容未知 /
+ * 上一轮未校正，已有行被丢弃）或 `pending`（慢扫描还没落地，列表还会变长）时，
+ * "当前可见行为 0"只说明"我看到的这些都被撤销了"，不说明"这一轮已经没有改动"——
+ * 面板无法证明的话不能说，而且那会与同屏的「扫描还没落地 / 视图不完整」直接矛盾。
+ * 这种时候仍用带 `{n}` 的那句（"已撤销 N 个，已隐藏"），只是不再断言"全部"。
+ *
+ * @param input.visible - 过滤后可见的行数。
+ * @param input.hidden - 被隐藏的行数。
+ * @param input.truncated - 宿主标了视图不完整。
+ * @param input.pending - 宿主标了这一轮还在等慢扫描。
+ */
+export function turnFullyReverted(input: {
+  visible: number
+  hidden: number
+  truncated?: true
+  pending?: true
+}): boolean {
+  if (input.hidden <= 0 || input.visible > 0) return false
+  return input.truncated !== true && input.pending !== true
 }
