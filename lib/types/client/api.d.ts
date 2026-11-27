@@ -249,7 +249,13 @@ export declare const api: {
      * is opened for review.
      */
     changes: {
-        list: (sessionId: string, force?: boolean, repoSubdir?: string) => Promise<RemoteChangesSummary | null>;
+        /**
+         * @param force - `⟳` semantics: tracked scan now AND re-arm the slow new-file
+         *   walk (expensive; a deliberate click).
+         * @param trackedOnly - "user came back to the page": tracked files now, but the
+         *   slow walk keeps its cadence/write-off (see `RemoteChangesListRequest`).
+         */
+        list: (sessionId: string, force?: boolean, repoSubdir?: string, trackedOnly?: boolean) => Promise<RemoteChangesSummary | null>;
         diff: (sessionId: string, path: string, repoSubdir?: string) => Promise<RemoteChangesDiff | null>;
         /**
          * The same comparison, but against the previous completed turn's close

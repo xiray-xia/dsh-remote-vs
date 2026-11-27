@@ -433,6 +433,22 @@ with zero change events).
   usually catch up within a second or two); **new files** created in a shell are found by a **slow scan**
   whose single-run budget is up to **3 minutes**, re-run at a self-tuning interval (at least 5 seconds,
   naturally longer on a huge checkout). `⟳` forces an immediate rescan.
+- **How fast a manual edit shows up**: with no turn event (you changed a file from a terminal or an editor)
+  the panel's self-heal rescans on a window derived from the **last `git status` cost**
+  (`clamp(scan × 4, 5s, 30s)`): a small repository (100ms class) → **5 seconds**; an AOSP-class tree
+  (1.7s measured) → **6.8 seconds**; the **30-second ceiling only applies once a scan costs ≥ 7.5s**.
+  The cost is therefore calculable: on such a tree, with the 3-second poll, roughly **one `git status`
+  every ~9 seconds** — about **3×** the old 30-second window (the price of keeping the 4× design, paid
+  for surfacing manual edits in ~7s instead of 30s).
+- **Coming back to the page** (tab shown again, or the window regaining focus) asks the host for **one
+  immediate rescan**, and it is NOT the same thing as `⟳`: only tracked files are re-scanned
+  (`trackedOnly`), the slow walk's cadence is untouched and a written-off `git ls-files --others` is NOT
+  re-armed (11s on the reference tree, minutes cold — focus can happen every few seconds). `⟳` is the one
+  that re-runs everything. Both are debounced by 5 seconds, skipped while the page is hidden, and skipped
+  when a request is already in flight (in-flight for over 60 seconds counts as a failed request, so one
+  stuck fetch cannot disable the refresh forever).
+- **Note**: `⟳` and "coming back" only SCHEDULE the rescan — the response still carries the previous
+  summary, and the fresh numbers arrive on the next poll (≤ 3 seconds), not with the refresh call itself.
 - A non-git workspace, or one holding several repositories with no repository directory set, shows the exact
   reason (`no git repository at the workspace root, and N candidates below it — set the repository directory
   in Source Control`) rather than an empty list.

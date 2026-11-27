@@ -11,6 +11,7 @@ import {
   type HelperAvailability,
   type ImportReport,
   type RemoteChangesDiff,
+  type RemoteChangesListRequest,
   type RemoteChangesSummary,
   type RemoteConnectionStatus,
   type RemoteDeployState,
@@ -642,13 +643,23 @@ export const api = {
    * is opened for review.
    */
   changes: {
-    list: (sessionId: string, force = false, repoSubdir = '') =>
-      post<{ summary: RemoteChangesSummary | null }>(REMOTE_API.changes, {
+    /**
+     * @param force - `⟳` semantics: tracked scan now AND re-arm the slow new-file
+     *   walk (expensive; a deliberate click).
+     * @param trackedOnly - "user came back to the page": tracked files now, but the
+     *   slow walk keeps its cadence/write-off (see `RemoteChangesListRequest`).
+     */
+    list: (sessionId: string, force = false, repoSubdir = '', trackedOnly = false) => {
+      const body: RemoteChangesListRequest = {
         op: 'list',
         sessionId,
         ...(force ? { force: true } : {}),
+        ...(trackedOnly ? { trackedOnly: true } : {}),
         ...(repoSubdir === '' ? {} : { repoSubdir }),
-      }).then(r => r.summary ?? null),
+      }
+      return post<{ summary: RemoteChangesSummary | null }>(REMOTE_API.changes, body)
+        .then(r => r.summary ?? null)
+    },
     diff: (sessionId: string, path: string, repoSubdir = '') =>
       post<{ diff: RemoteChangesDiff | null }>(REMOTE_API.changes, {
         op: 'diff',

@@ -275,6 +275,50 @@ const DIFF_LIMITS = { perFile: DIFF_MAX_FILE_BYTES, total: DIFF_MAX_FILE_BYTES }
  */
 const MAX_TURN_PATCH_BYTES = 4 * 1024 * 1024
 
+/**
+ * Bounds of the self-heal window (see {@link selfHealMaxAge}).
+ *
+ * The floor is a measured small repository: `git status -uno` answers in ~0.1s
+ * there, so 5s of staleness is already a large win over the old flat 30s — and
+ * the probe has been observed to take 30–60s to surface a manual edit when only
+ * the turn boundary and the 3/15/30s client polls apply.
+ *
+ * The ceiling is the OLD fixed value on purpose: it is what keeps the panel from
+ * turning into a status loop on a huge checkout (the reference monorepo answers
+ * in ~1.7s, i.e. a 6.8s window — still 4x its own cost, never lower for bigger
+ * trees).
+ */
+const SELF_HEAL_MIN_MS = 5_000
+const SELF_HEAL_MAX_MS = 30_000
+/**
+ * How many scan durations the panel may wait before re-scanning.
+ *
+ * Self-heal is a POLL backstop, not a live watch: waiting the cost of about four
+ * `git status -uno` runs keeps the added load proportional to what the probe can
+ * afford, instead of one scan per client poll.
+ */
+const SELF_HEAL_FACTOR = 4
+
+/**
+ * How stale the ledger may get before a *poll* re-scans it.
+ *
+ * Self-tuning: the host has no idea whether this session sits in a 50-file
+ * repository or a monorepo, and the same 30s window is either 300x the scan cost
+ * (small tree: the user waits half a minute to see a manual edit) or about right
+ * (AOSP: still 17x). Four times the LAST tracked scan, clamped to
+ * [{@link SELF_HEAL_MIN_MS}, {@link SELF_HEAL_MAX_MS}].
+ *
+ * An unknown / failed measurement falls back to the old ceiling, so a Host that
+ * has not scanned anything yet behaves exactly as before.
+ *
+ * @param scanMs - Duration of the last successful tracked scan, in ms.
+ */
+export function selfHealMaxAge(scanMs?: number): number {
+  if (scanMs === undefined || !Number.isFinite(scanMs) || scanMs < 0) return SELF_HEAL_MAX_MS
+  const scaled = Math.round(scanMs * SELF_HEAL_FACTOR)
+  return Math.min(SELF_HEAL_MAX_MS, Math.max(SELF_HEAL_MIN_MS, scaled))
+}
+
 /** One session's bookkeeping. */
 interface Ledger {
   sessionId: string
@@ -322,6 +366,15 @@ interface Ledger {
   untrackedAt: number
   /** How long the last completed untracked scan took, for the cadence. */
   untrackedMs: number | undefined
+  /**
+   * How long the last successful TRACKED scan took (ms).
+   *
+   * Feeds {@link selfHealMaxAge}: a repository whose `git status -uno` answers in
+   * ~100ms can be re-polled every few seconds, while a monorepo (1.7s measured)
+   * keeps a much longer self-heal window so the panel cannot turn into a status
+   * loop. Internal only — not exposed on the summary.
+   */
+  scanMs: number | undefined
   /** In-flight untracked scan, so a turn boundary cannot start a second one. */
   untrackedJob: Promise<void> | undefined
   turn: number
@@ -842,16 +895,25 @@ export class SessionChanges {
    * Self-heal a ledger whose data has gone stale.
    *
    * The panel polls `list`, and a poll is the one moment we know a human is
-   * looking at the answer. If the data is older than `maxAgeMs`, re-scan — so a
+   * looking at the answer. If the data is older than the window, re-scan — so a
    * turn boundary this Host never delivered costs a few seconds of staleness
    * instead of a manual refresh.
    *
+   * The window is ADAPTIVE ({@link selfHealMaxAge}): four times the last tracked
+   * scan, clamped to 5–30s. A small repository therefore surfaces a manual edit
+   * (one with no turn event behind it) within seconds instead of the old fixed
+   * half minute, while a monorepo keeps the old ceiling. The two `false` paths —
+   * a scan already running, and data that is still fresh — are unchanged.
+   *
+   * @param maxAgeMs - explicit window; callers that know better (and the checks)
+   *   override the adaptive default and keep the old semantics exactly.
    * @returns whether a refresh was queued.
    */
-  touch(sessionId: string, maxAgeMs = 30_000): boolean {
+  touch(sessionId: string, maxAgeMs?: number): boolean {
     const ledger = this.ledgers.get(sessionId)
     if (ledger === undefined || ledger.disposed || ledger.pending) return false
-    if (ledger.at > 0 && Date.now() - ledger.at < maxAgeMs) return false
+    const windowMs = maxAgeMs ?? selfHealMaxAge(ledger.scanMs)
+    if (ledger.at > 0 && Date.now() - ledger.at < windowMs) return false
     this.schedule(ledger)
     return true
   }
@@ -904,6 +966,10 @@ export class SessionChanges {
     ledger.untracked = undefined
     ledger.untrackedAt = 0
     ledger.untrackedMs = undefined
+    // The self-heal window describes THIS tree's scan cost; another root may be
+    // far bigger or smaller (`selfHealMaxAge` then falls back to the 30s ceiling
+    // until the first scan of the new root is measured).
+    ledger.scanMs = undefined
     ledger.untrackedGivenUp = false
     ledger.untrackedFailure = undefined
     ledger.files = []
@@ -1005,6 +1071,7 @@ export class SessionChanges {
       untracked: undefined,
       untrackedAt: 0,
       untrackedMs: undefined,
+      scanMs: undefined,
       untrackedJob: undefined,
       turn: 0,
       files: [],
@@ -1063,6 +1130,7 @@ export class SessionChanges {
    */
   private async refresh(ledger: Ledger): Promise<void> {
     if (ledger.disposed || ledger.root === '') return
+    const scanStartedAt = Date.now()
     const scanned = await this.scanTracked(ledger)
     if (ledger.disposed || scanned === undefined) return
     // The root may have moved while the scan was in flight (the user picked
@@ -1070,6 +1138,10 @@ export class SessionChanges {
     // belong to, so a mismatch means someone else owns the observation now —
     // publish nothing and let that caller's own refresh land.
     if (ledger.root !== scanned.root) return
+    // What this tree's tracked scan costs is what its self-heal window is derived
+    // from (`selfHealMaxAge`). Only successful scans are measured: a timeout or a
+    // missing repository says nothing about the cost of a real answer.
+    ledger.scanMs = Math.max(0, Date.now() - scanStartedAt)
     ledger.tracked = scanned.entries
     await this.publish(ledger)
     void this.kickUntracked(ledger)

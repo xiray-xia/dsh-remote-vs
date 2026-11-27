@@ -577,6 +577,27 @@ export interface RemoteChangesTurnView {
     pending?: true;
 }
 /**
+ * Body of `op: 'list'` on the changes route (the request half of
+ * {@link RemoteChangesSummary}).
+ *
+ * The two refresh intents are separated because they cost very different things
+ * on the remote:
+ * - {@link RemoteChangesListRequest.force} (`⟳`) — tracked scan NOW and re-arm the
+ *   slow `git ls-files --others` walk (clears its write-off). Deliberate click.
+ * - {@link RemoteChangesListRequest.trackedOnly} — "the user came back to the
+ *   page": tracked files now, but the slow walk keeps its cadence and its
+ *   written-off verdict. Focus events repeat every few seconds; re-arming an 11s
+ *   (cold: minutes) walk on each one would multiply the remote load.
+ */
+export interface RemoteChangesListRequest {
+    op: 'list';
+    sessionId: string;
+    force?: true;
+    trackedOnly?: true;
+    /** Repository directory from the Source Control panel ('' = the session root). */
+    repoSubdir?: string;
+}
+/**
  * What one session changed on its remote host since the session's baseline.
  *
  * The baseline is the content of every file git already reported as dirty when

@@ -59,6 +59,7 @@ import {
   type ChangeScope,
 } from './turn-view.ts'
 import { loadTurnRevertedPaths } from './turn-reverted.ts'
+import { loadStillInFlight, shouldForceRefresh } from './freshness.ts'
 import {
   isReviewed,
   nextUnreviewed,
@@ -85,10 +86,12 @@ const POLL_MS = 3000
  * "pending" badge), so the poll cannot simply stop: the header would then keep
  * describing an older turn. A fifth of the cadence keeps it honest without
  * paying a loopback POST (and, through the host's ledger `touch`, a tracked
- * git scan every 30 s) four times a second-old counter does not need.
+ * git scan every 5–30 s — adaptive, see `selfHealMaxAge` in the recorder) four
+ * times a second-old counter does not need.
  *
  * A HIDDEN page is different and skips the tick entirely: nothing on screen can
- * change, and `visibilitychange` catches up at once when it is shown again.
+ * change, and `visibilitychange` + `focus` force one refresh when it is shown
+ * again (see `shouldForceRefresh`).
  * Manual ⟳ (`load(true)`) and the first read are never gated.
  */
 const FOLDED_POLL_SKIP = 5
@@ -260,6 +263,22 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   /** 行元素（键同游标），供「跳到下一个未审阅」把目标滚进视野。 */
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const alive = useRef(true)
+  /**
+   * 回到页面时"强制刷新一次"的去抖时间戳（见 `shouldForceRefresh`）。
+   *
+   * 用 ref 而不是 state：它只影响下一次该不该 force，不需要触发渲染；effect 因
+   * `collapsed`/`load` 重建时也必须继续记住上一次强制刷新的时刻。
+   */
+  const lastForceAt = useRef<number | undefined>(undefined)
+  /** 在飞的 `list` 请求数：回到页面时若已有请求在跑，就不再叠一次 force。 */
+  const loadInFlight = useRef(0)
+  /**
+   * 在飞请求的起始时刻（第一个请求开始记、最后一个结束清）。
+   *
+   * 只看计数是不够的：某次 fetch 永远不 settle 会让"在飞就跳过"变成永久跳过，
+   * 回到页面再也不强制刷新。`loadStillInFlight` 用 60s 上限把它当失败处理。
+   */
+  const loadInFlightAt = useRef<number | undefined>(undefined)
   // Mirrors "the panel renders something" for the poll tick: adding that as an
   // effect dependency would rebuild the interval (and pay a re-read) every time
   // the panel appears or disappears, which is not what the cadence is about.
@@ -283,11 +302,24 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
   // unique-candidate probe); a foreign directory never is.
   const repoSubdirOf = (): string => sessionRepoSubdir(sessionId)
 
-  const load = useCallback(async (force = false): Promise<void> => {
+  /**
+   * Read the ledger once.
+   *
+   * @param force - `⟳` semantics: the host scans tracked files now AND re-arms the
+   *   slow new-file walk (expensive, but the user asked for it).
+   * @param trackedOnly - "back to the page" semantics: the host refreshes tracked
+   *   files now but leaves the slow walk alone (its cadence and write-off verdict
+   *   must not be re-armed on every window focus — see `RemoteChangesListRequest`).
+   *   NOTE: both flags only SCHEDULE the rescan; this response still carries the
+   *   previous summary, and the fresh one arrives on the next poll (≤ 3s).
+   */
+  const load = useCallback(async (force = false, trackedOnly = false): Promise<void> => {
     if (sessionId === undefined || sessionId === '') return
     const asked = sessionId
+    if (loadInFlight.current === 0) loadInFlightAt.current = Date.now()
+    loadInFlight.current += 1
     try {
-      const next = await api.changes.list(asked, force, repoSubdirOf())
+      const next = await api.changes.list(asked, force, repoSubdirOf(), trackedOnly)
       // Two guards: the panel may be gone, and the user may have switched
       // sessions while this was in flight — a late answer for the old session
       // must not be filed under the new one.
@@ -302,6 +334,9 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
     } catch (problem) {
       if (!alive.current || currentSession.current !== asked) return
       setError(problem instanceof Error ? problem.message : String(problem))
+    } finally {
+      loadInFlight.current -= 1
+      if (loadInFlight.current === 0) loadInFlightAt.current = undefined
     }
   }, [sessionId])
   const summary = data !== null && data.id === sessionId ? data.summary : null
@@ -327,15 +362,46 @@ export function ChangesDock(props: ChangesDockProps): React.ReactNode {
       if (skip > 1 && ticks % skip !== 0) return
       void load()
     }, POLL_MS)
+    /**
+     * 回到页面 / 窗口重新获得焦点：请求宿主**立即重扫一次**。
+     *
+     * 与点 `⟳` 的区别是**代价**：这里传 `trackedOnly`，宿主只重扫 tracked 文件，
+     * 不重置慢扫描的节流、也不重新武装被写掉的 `git ls-files --others`（参考树 11s、
+     * 冷树分钟级）——"回到页面"可以每几秒发生一次，点 `⟳` 是一次明确的人工动作。
+     *
+     * 三条防抖一起上：
+     * - `shouldForceRefresh` 的 5s 去抖（点回窗口/切标签会连续触发 visibility 与
+     *   focus 两个事件）；
+     * - 页面仍隐藏时不 force（隐藏期间本来就不轮询）；
+     * - 已有 `list` 请求在飞时跳过（它马上就会带回新数据，再叠一次只是浪费）；
+     *   在飞状态按 60s 上限处理（`loadStillInFlight`），一次挂住的请求不能让
+     *   force 永久失效。
+     *
+     * 注意：这次调用只是**安排**宿主重扫，返回的仍是上一次的摘要；新摘要要等下一次
+     * 轮询（≤ 3s）才回来（NIT-5 已在 README 写明）。
+     */
+    const forceRefresh = (): void => {
+      const now = Date.now()
+      if (!shouldForceRefresh({
+        now,
+        lastForceAt: lastForceAt.current,
+        visible: !document.hidden,
+        inFlight: loadStillInFlight(now, loadInFlightAt.current),
+      })) return
+      lastForceAt.current = now
+      void load(false, true)
+    }
     // Shown again, or unfolded: read at once instead of waiting for the next
     // tick (a folded panel may be up to 15 s stale by design). `collapsed` is a
     // dependency, so folding/unfolding also re-runs this effect and reloads.
-    const wake = (): void => { if (!document.hidden) void load() }
+    const wake = (): void => { if (!document.hidden) forceRefresh() }
     document.addEventListener('visibilitychange', wake)
+    window.addEventListener('focus', forceRefresh)
     return () => {
       alive.current = false
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', wake)
+      window.removeEventListener('focus', forceRefresh)
     }
   }, [load, collapsed])
 

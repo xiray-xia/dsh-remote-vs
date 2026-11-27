@@ -77,6 +77,21 @@ export interface SessionChangesDeps {
      */
     turnPatchBytes?: number;
 }
+/**
+ * How stale the ledger may get before a *poll* re-scans it.
+ *
+ * Self-tuning: the host has no idea whether this session sits in a 50-file
+ * repository or a monorepo, and the same 30s window is either 300x the scan cost
+ * (small tree: the user waits half a minute to see a manual edit) or about right
+ * (AOSP: still 17x). Four times the LAST tracked scan, clamped to
+ * [{@link SELF_HEAL_MIN_MS}, {@link SELF_HEAL_MAX_MS}].
+ *
+ * An unknown / failed measurement falls back to the old ceiling, so a Host that
+ * has not scanned anything yet behaves exactly as before.
+ *
+ * @param scanMs - Duration of the last successful tracked scan, in ms.
+ */
+export declare function selfHealMaxAge(scanMs?: number): number;
 export declare class SessionChanges {
     private readonly ledgers;
     private readonly deps;
@@ -147,10 +162,18 @@ export declare class SessionChanges {
      * Self-heal a ledger whose data has gone stale.
      *
      * The panel polls `list`, and a poll is the one moment we know a human is
-     * looking at the answer. If the data is older than `maxAgeMs`, re-scan — so a
+     * looking at the answer. If the data is older than the window, re-scan — so a
      * turn boundary this Host never delivered costs a few seconds of staleness
      * instead of a manual refresh.
      *
+     * The window is ADAPTIVE ({@link selfHealMaxAge}): four times the last tracked
+     * scan, clamped to 5–30s. A small repository therefore surfaces a manual edit
+     * (one with no turn event behind it) within seconds instead of the old fixed
+     * half minute, while a monorepo keeps the old ceiling. The two `false` paths —
+     * a scan already running, and data that is still fresh — are unchanged.
+     *
+     * @param maxAgeMs - explicit window; callers that know better (and the checks)
+     *   override the adaptive default and keep the old semantics exactly.
      * @returns whether a refresh was queued.
      */
     touch(sessionId: string, maxAgeMs?: number): boolean;

@@ -1331,11 +1331,16 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
             const cwd = liveSessionCwd(ctx, sessionId)
             if (cwd !== undefined) ledger.beginTurn({ sessionId, cwd })
           }
-          // `force` runs the slow untracked scan now instead of waiting for the
-          // cadence — which is what the panel's refresh button means. A plain
-          // poll still self-heals data that has gone stale, so a missed turn
-          // boundary costs seconds rather than a manual click.
+          // Three refresh intents, deliberately different in COST:
+          // - `force` = the panel's ⟳ button: tracked scan now AND re-arm the slow
+          //   new-file walk (clears its write-off). A human click can afford it.
+          // - `trackedOnly` = the panel's "back to the page" refresh: tracked files
+          //   now, but the slow walk keeps its cadence and its written-off verdict.
+          //   A window focus can happen every few seconds, and re-arming an 11s
+          //   (cold: minutes) walk on each one would multiply remote load.
+          // - neither = the ordinary poll, which self-heals once data is stale.
           if (body?.force === true) ledger.rescan(sessionId)
+          else if (body?.trackedOnly === true) ledger.touch(sessionId, 0)
           else ledger.touch(sessionId)
           writeJson(res, 200, { summary: ledger.summary(sessionId) })
           return
