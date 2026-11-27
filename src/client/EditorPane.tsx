@@ -91,12 +91,12 @@ function outlineAvailable(tab: EditorTab | undefined): tab is EditorTab {
 const BLAME_PREF_KEY = 'dsh-remote-vs.editor.blame'
 const EMPTY_BLAME: ReadonlyMap<number, BlameLine> = new Map()
 
-/** Inline blame is on by default, but the choice survives a reload. */
+/** Inline blame is OFF by default; the user opts in and the choice survives a reload. */
 function readBlamePreference(): boolean {
   try {
-    return localStorage.getItem(BLAME_PREF_KEY) !== '0'
+    return localStorage.getItem(BLAME_PREF_KEY) === '1'
   } catch {
-    return true
+    return false
   }
 }
 

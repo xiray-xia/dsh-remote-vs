@@ -88,7 +88,10 @@ async function fetchOfficePdf(alias: string, path: string, signal?: AbortSignal)
   const line = result.stdout.split('\n').map(item => item.trim()).find(item => item.startsWith('@@RVS_PDF '))
   if (line === undefined) {
     if (result.stdout.includes('@@RVS_NO_SOFFICE')) {
-      throw Object.assign(new Error('LibreOffice is not installed on the remote host'), { previewKind: 'unavailable' })
+      throw Object.assign(
+        new Error('LibreOffice is not installed on the remote host. Install the host kit with: npm install @deepseek-ai/libreoffice-kit@latest'),
+        { previewKind: 'unavailable' },
+      )
     }
     throw new Error(result.stderr.trim() || 'remote LibreOffice conversion failed')
   }
