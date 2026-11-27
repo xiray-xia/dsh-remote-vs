@@ -6,9 +6,8 @@
 
 SSH host management inside the DSH Host process + helper push pipeline + a **VS Code-style remote
 workbench** (explorer / search / source control / commit graph with its commit-details pane / multi-tab editor / floating editor /
-side-by-side diff / multiple terminals / port forwarding). Hosts live in DSH Settings ("Remote hosts"); with `dsh-better-sidebar` installed
-there is an extra standalone "Remote Workspace" tab, otherwise it falls back to a native right-Sidebar "Remote Workspace"
-page (same content, self-opened from the guide, per-session instances). **The sidebar's editor is the DEFAULT
+side-by-side diff / multiple terminals / port forwarding). Hosts live in DSH Settings ("Remote hosts");native right-Sidebar "Remote Workspace"
+page. **The sidebar's editor is the DEFAULT
 seat**: opening a file switches the whole column to it (one view at a time, no tree/editor split) and closing
 the last file returns to the directory. The conversation view slot is registered too, but as the OPTIONAL
 full-width seat — the editor's own expand/dock button moves the same buffer between the two. Since P2, native
@@ -40,8 +39,7 @@ dsh plugin --profile web add dsh-remote-vs
 
 **Requires DSH `0.2.2-rc.5` or newer and below `0.3.0`** (`engines.dsh` enforces the range;
 **adapted to and typechecked against `0.2.2-rc.5`**). On Host `0.2.2-rc.4` use plugin `0.23.0`; `0.2.2-rc.2` / `0.2.2-rc.3` use plugin `0.22.0`; on `0.2.2-alpha.3` / `0.2.2-rc.1` use `0.20.1`; the
-`0.2.2-alpha.2` generation needs `0.17.0` and the `0.2.1-rc.2` generation needs `0.9.3`. `--profile web` selects which profile to install into —
-this is a Web plugin, so it has to go into the profile your Web GUI runs from (`web` is
+`0.2.2-alpha.2` generation needs `0.17.0`. `--profile web` selects which profile to install, so it has to go into the profile your Web GUI runs from (`web` is
 the common name; use your own profile's name). Desktop uses the reserved `desktop`
 profile instead — see [Desktop](#desktop-dsh-desktop) below.
 
@@ -52,14 +50,6 @@ profile instead — see [Desktop](#desktop-dsh-desktop) below.
 > one ~47 MB upload on that first contact. The old helper directory is kept, so rolling back
 > is just pushing the old version again.
 
-**That one command is all it takes — no build scripts have to be approved.** The package
-has no `prepare`/`postinstall` and no package in the dependency tree carries an install
-script (`ssh2` is **bundled into the artifact**, not depended on); the repository route
-also ships the built `lib/`. The old "allow the printed build scripts in that profile's
-`pnpm-workspace.yaml` and re-run" step was pnpm 12's hard policy gate for dependencies
-with lifecycle scripts (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` / `ERR_PNPM_IGNORED_BUILDS`);
-it cannot be waived from the dependency side, only removed from the tree. Then restart
-`dsh web` and open Settings → Remote hosts to configure.
 
 ### Desktop (DSH Desktop)
 
@@ -233,7 +223,7 @@ dsh_remote_vs/
 ├── vendor/dsh-remote-helpers/ # helper seeds (shipped, seeded into cache at startup, see below)
 ├── docs/                   # local-only working docs (only docs/media/ screenshots ship)
 │   ├── MAINTENANCE.md      # local-only (.gitignore), not shipped: upgrade impact, checklist, pitfalls, release
-│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.27.0)
+│   ├── VERSION-HISTORY.md  # local-only: per-release change log (0.7.1 → 0.28.0)
 │   └── GATES.md            # local-only: local gate inventory and measured assertion counts
 ├── locale/                 # bilingual plugin metadata
 └── lib/                    # build output (**must be committed**; only .map is ignored; restart after link install)
