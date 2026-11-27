@@ -791,6 +791,16 @@ export interface RemoteForwardState {
   bytesOut: number
   /** Last connect/bind failure, human-readable. */
   lastError?: string
+  /**
+   * Which SSH connection the last successful channel used.
+   *
+   * `dedicated` = the host's own port-forward connection (the normal case);
+   * `shared` = the server refused the extra connection, so the channel rode the
+   * shared one (the forward still works, only the isolation is lost). Absent
+   * until a connection has succeeded at least once — older hosts omit it too, so
+   * a client must treat it as optional.
+   */
+  transport?: 'dedicated' | 'shared'
   startedAt: number
 }
 

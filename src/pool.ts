@@ -24,6 +24,35 @@ export { DeadlineError }
 const IDLE_MS = 30 * 60 * 1000
 
 /**
+ * How long a port forward waits for its DEDICATED connection before falling back.
+ *
+ * The dedicated connection is an optimization, so it must never become the reason
+ * a local socket waits: a server that silently DROPS the extra connection (a very
+ * common `MaxStartups` symptom) would otherwise cost the whole connect watchdog
+ * (45s) per forward channel, with the user staring at a hanging page. Three
+ * seconds is plenty for a second handshake to a host that is already reachable
+ * (the shared connection is up by definition); past that, use the shared one and
+ * let the abandoned dial finish in the background.
+ *
+ * Override with DSH_REMOTE_VS_FORWARD_BUDGET_MS (milliseconds, >= 10) so the gate
+ * does not spend three seconds per case.
+ */
+const FORWARD_DEDICATED_BUDGET_MS = (() => {
+  const raw = Number(process.env.DSH_REMOTE_VS_FORWARD_BUDGET_MS)
+  return Number.isFinite(raw) && raw >= 10 ? raw : 3_000
+})()
+
+/**
+ * How long a refused/timed-out dedicated forward connection is skipped per alias.
+ *
+ * A browser opens several forward channels per page; retrying the same refused
+ * handshake for every one of them is exactly the waiting we just removed. One
+ * minute covers the burst; `drop(alias)` (host edited/deleted) and a successful
+ * dedicated connection clear it immediately.
+ */
+const FORWARD_DEDICATED_BLOCK_MS = 60_000
+
+/**
  * Connection establishment timeout, including authentication.
  *
  * This was 15s, which is not a handshake budget so much as a CPU budget: on a
@@ -263,6 +292,29 @@ export class RemotePool {
    * that refuses extra connections still gets a working terminal.
    */
   private readonly shellConns = new Map<string, Pooled>()
+  /**
+   * Dedicated connections for `ssh -L` port forwards (one per alias).
+   *
+   * The other half of the same argument: a forwarded channel carries arbitrary
+   * TCP (a database, an SSH tunnel, a whole browser page), so it is long-lived
+   * and can move a lot of data. Multiplexed onto the shared connection it would
+   * queue ahead of exec/SFTP channels (SSH has no per-channel priority), and a
+   * remote service that stalls would hold the window `git status` needs. A
+   * terminal already gets its own connection (`shellConns`); forward traffic gets
+   * its own for exactly the same reason.
+   *
+   * Cost: one extra handshake per alias that actually receives a forwarded
+   * connection, plus one held TCP connection while any of its forward channels is
+   * open (the 30-minute idle eviction applies once the last one closes).
+   * `forwardOut` falls back to the shared connection when this one cannot be
+   * established (e.g. the server refuses extra connections), so a forward never
+   * stops working because of it — it only loses the isolation.
+   */
+  private readonly forwardConns = new Map<string, Pooled>()
+  /** Aliases whose dedicated-forward downgrade was already logged (once per alias). */
+  private readonly forwardFallbackNoted = new Set<string>()
+  /** alias -> timestamp until which the dedicated forward connection is skipped. */
+  private readonly forwardBlocked = new Map<string, number>()
   /** TOFU fingerprints observed this process (alias -> sha256). */
   private readonly hostKeys = new Map<string, string>()
   /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
@@ -284,16 +336,23 @@ export class RemotePool {
     // The host entry can change under an alias, so the capability answer goes
     // with the connection; the next exec probes again.
     this.setsidProbes.delete(alias)
-    // Both connections belong to the host: an edit/removal must end both.
+    // All three connections belong to the host: an edit/removal must end all.
     // (A transient error on ONE of them uses `evictFrom` for that map only, so
-    // a shared-connection blip does not take live terminals down with it.)
+    // a shared-connection blip does not take live terminals/forwards down with it.)
     this.evictFrom(this.conns, alias)
     this.evictFrom(this.shellConns, alias)
+    this.evictFrom(this.forwardConns, alias)
+    // Verdicts about the OLD connection do not survive the host: an edited host
+    // (now allowed, or with a new address) must be retried and may be reported.
+    this.forwardBlocked.delete(alias)
+    this.forwardFallbackNoted.delete(alias)
   }
 
   /** Close every pooled connection. */
   dispose(): void {
-    for (const alias of new Set([...this.conns.keys(), ...this.shellConns.keys()])) this.drop(alias)
+    for (const alias of new Set([...this.conns.keys(), ...this.shellConns.keys(), ...this.forwardConns.keys()])) {
+      this.drop(alias)
+    }
   }
 
   /**
@@ -328,10 +387,12 @@ export class RemotePool {
       return {
         alias,
         state: entry?.state ?? 'idle',
-        // connecting means a DIAL is in flight (the pooled entry exists before
-        // the Client does), so that is not an open connection yet.
+        // "open" = any of the three connection classes (shared / PTY / forward) is
+        // fully dialed. `connecting` means a DIAL is in flight (the pooled entry
+        // exists before the Client does), so that is not an open connection yet.
         open: (pooled !== undefined && pooled.connecting === undefined)
-          || (this.shellConns.get(alias)?.connecting === undefined && this.shellConns.has(alias)),
+          || (this.shellConns.get(alias)?.connecting === undefined && this.shellConns.has(alias))
+          || (this.forwardConns.get(alias)?.connecting === undefined && this.forwardConns.has(alias)),
         ...(entry?.okAt === undefined ? {} : { okAt: entry.okAt }),
         ...(entry?.errorAt === undefined ? {} : { errorAt: entry.errorAt }),
         ...(entry?.error === undefined ? {} : { error: entry.error }),
@@ -743,9 +804,47 @@ export class RemotePool {
    * debug their network. Real transport failures still arrive through the
    * pooled connection's own close/error events.
    */
-  async forwardOut(alias: string, dstHost: string, dstPort: number, srcPort = 0): Promise<ClientChannel> {
-    const conn = await this.acquire(alias)
-    this.hold(alias)
+  async forwardOut(
+    alias: string,
+    dstHost: string,
+    dstPort: number,
+    srcPort = 0,
+    opts: { dedicated?: boolean } = {},
+  ): Promise<{ channel: ClientChannel; dedicated: boolean }> {
+    /**
+     * Prefer the DEDICATED forward connection (see `forwardConns`). A host that
+     * refuses the extra connection still forwards: the fallback is the shared
+     * connection, i.e. exactly the old behaviour. The downgrade is logged once per
+     * alias — a browser opens several forward channels per page, and one warning
+     * per server refusal is information while one per channel is noise.
+     *
+     * Two short-circuits keep that preference from costing time:
+     * - a recent refusal/timeout parks the alias for {@link FORWARD_DEDICATED_BLOCK_MS},
+     *   so the next channel goes straight to the shared connection;
+     * - while a dedicated dial is already in flight, a second channel rides the
+     *   shared connection instead of waiting for the same handshake (it can only
+     *   be used by ONE `acquireIn` caller anyway).
+     */
+    let conn: Client
+    let dedicated = opts.dedicated !== false
+    if (dedicated && this.forwardCoolingDown(alias)) dedicated = false
+    if (dedicated && this.forwardConns.get(alias)?.connecting !== undefined) dedicated = false
+    if (dedicated) {
+      try {
+        conn = await this.acquireForward(alias)
+        this.holdIn(this.forwardConns, alias)
+        // A real dedicated connection clears the cooldown: the host accepts them.
+        this.forwardBlocked.delete(alias)
+      } catch (error) {
+        dedicated = false
+        this.blockForward(alias, error)
+        conn = await this.acquire(alias)
+        this.hold(alias)
+      }
+    } else {
+      conn = await this.acquire(alias)
+      this.hold(alias)
+    }
     /**
      * What the channel-open callback does after the deadline already answered.
      *
@@ -779,14 +878,64 @@ export class RemotePool {
         CONTROL_TIMEOUT_MS,
         `forwarding channel to ${dstHost}:${dstPort} did not open within ${CONTROL_TIMEOUT_MS / 1000}s`,
       )
-      channel.once('close', () => this.release(alias))
-      this.markOk(alias)
-      return channel
+      channel.once('close', () => {
+        if (dedicated) this.releaseIn(this.forwardConns, alias)
+        else this.release(alias)
+      })
+      // Only the SHARED path is evidence about the shared link. A dedicated
+      // channel that opened says nothing about it (and the dedicated connection's
+      // own failures never write health — see `acquireIn`'s `quiet`).
+      if (!dedicated) this.markOk(alias)
+      return { channel, dedicated }
     } catch (error) {
       settled = true
-      this.release(alias)
+      if (dedicated) this.releaseIn(this.forwardConns, alias)
+      else this.release(alias)
+      /**
+       * NO `markError` here — deliberately.
+       *
+       * ssh2 reports EVERY direct-tcpip failure as
+       * `(SSH) Channel open failure: <reason>`, and the pool's
+       * `CONNECTION_ERROR_RE` matches `channel open fail`. A closed remote port or
+       * `AllowTcpForwarding no` therefore LOOKS like a transport failure and used
+       * to paint the connection chip red (sending the user to debug a healthy
+       * network, and putting the editor into read-only). The function's contract
+       * is the opposite: a channel-open refusal is the RULE's failure
+       * (`forward.lastError`), while real transport failures surface through the
+       * pooled connection's own close/error events.
+       */
       throw error
     }
+  }
+
+  /**
+   * Is this alias's dedicated forward connection in its short cooldown?
+   *
+   * Expired entries are dropped eagerly so the map cannot grow per alias forever.
+   */
+  private forwardCoolingDown(alias: string): boolean {
+    const until = this.forwardBlocked.get(alias)
+    if (until === undefined) return false
+    if (Date.now() >= until) {
+      this.forwardBlocked.delete(alias)
+      return false
+    }
+    return true
+  }
+
+  /** Park the dedicated connection for one alias and log the downgrade, once. */
+  private blockForward(alias: string, error: unknown): void {
+    this.forwardBlocked.set(alias, Date.now() + FORWARD_DEDICATED_BLOCK_MS)
+    this.noteForwardFallback(alias, error)
+  }
+
+  /** Log one alias's forward downgrade to the shared connection, once. */
+  private noteForwardFallback(alias: string, error: unknown): void {
+    if (this.forwardFallbackNoted.has(alias)) return
+    this.forwardFallbackNoted.add(alias)
+    const detail = error instanceof Error ? error.message : String(error ?? '')
+    // eslint-disable-next-line no-console
+    console.warn(`[dsh-remote-vs] dedicated forward connection to ${alias} failed; using the shared one:`, detail)
   }
 
   /** Run one callback with a fresh SFTP session (closed afterwards). */
@@ -1379,7 +1528,39 @@ export class RemotePool {
     return this.acquireIn(this.shellConns, alias)
   }
 
-  private async acquireIn(map: Map<string, Pooled>, alias: string): Promise<Client> {
+  /**
+   * `acquire` for the dedicated port-forward connection map.
+   *
+   * `quiet`: a dedicated forward connection is an OPTIMIZATION. If the server
+   * refuses it (MaxStartups, `MaxSessions`, a per-source limit) the forward still
+   * works over the shared connection, so the shared link is healthy — painting
+   * the connection chip red here would send the user to debug a network that is
+   * fine (and `forwardOut` reports the rule's own error separately).
+   *
+   * The dial also gets its OWN short budget ({@link FORWARD_DEDICATED_BUDGET_MS}):
+   * a server that silently drops the extra connection would otherwise make every
+   * forward channel wait the full connect watchdog before falling back. The
+   * abandoned dial keeps running — if it eventually succeeds the connection is
+   * pooled and the next channel uses it; its failure is already handled inside
+   * `acquireIn`.
+   */
+  private async acquireForward(alias: string): Promise<Client> {
+    const dialing = this.acquireIn(this.forwardConns, alias, true)
+    try {
+      return await withDeadline(
+        dialing,
+        FORWARD_DEDICATED_BUDGET_MS,
+        `dedicated forward connection to ${alias} did not settle within ${FORWARD_DEDICATED_BUDGET_MS / 1000}s`,
+      )
+    } catch (error) {
+      // The race's loser must never surface as an unhandled rejection: the pool
+      // still owns it (its own success/failure updates the map).
+      void dialing.catch(() => undefined)
+      throw error
+    }
+  }
+
+  private async acquireIn(map: Map<string, Pooled>, alias: string, quiet = false): Promise<Client> {
     const pooled = map.get(alias)
     if (pooled !== undefined && pooled.connecting !== undefined) return pooled.connecting
     if (pooled !== undefined) {
@@ -1411,18 +1592,18 @@ export class RemotePool {
         }
         entry.conn = conn
         entry.connecting = undefined
-        this.markOk(alias)
+        if (!quiet) this.markOk(alias)
         conn.on('close', () => {
           // The server went away: record it for the status chip, then evict so
           // the next op redials. Our OWN drop() deleted the entry first, so a
           // normal close (idle eviction, host removal) never lands here.
           if (map.get(alias) !== entry) return
-          this.markError(alias, new Error('connection closed'))
+          if (!quiet) this.markError(alias, new Error('connection closed'))
           this.evictFrom(map, alias)
         })
         conn.on('error', (error: Error) => {
           if (map.get(alias) !== entry) return
-          this.markError(alias, error)
+          if (!quiet) this.markError(alias, error)
           this.evictFrom(map, alias)
         })
         this.releaseIn(map, alias)
@@ -1430,7 +1611,7 @@ export class RemotePool {
       },
       (error) => {
         if (map.get(alias) === entry) map.delete(alias)
-        this.markError(alias, error)
+        if (!quiet) this.markError(alias, error)
         throw error
       },
     )

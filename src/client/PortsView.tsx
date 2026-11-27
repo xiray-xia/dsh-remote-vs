@@ -631,6 +631,22 @@ export function PortsView(props: {
           </div>
           {forward.lastError !== undefined && <div className="rvs-ports-err">{forward.lastError}</div>}
           <div className="rvs-ports-actions">
+            {/*
+              Which SSH connection this rule currently rides. Absent until the
+              first connection succeeded (nothing to say yet) and absent from
+              older hosts that do not publish `transport`.
+            */}
+            {forward.transport !== undefined && forward.connections > 0 && (
+              <span
+                className="rvs-ports-transport"
+                data-transport={forward.transport}
+                title={forward.transport === 'dedicated'
+                  ? t('ports.transportDedicatedHint')
+                  : t('ports.transportSharedHint')}
+              >
+                {forward.transport === 'dedicated' ? t('ports.transportDedicated') : t('ports.transportShared')}
+              </span>
+            )}
             <span className="rvs-ports-conn">
               {t('ports.connections').replace('{count}', String(forward.connections))}
             </span>

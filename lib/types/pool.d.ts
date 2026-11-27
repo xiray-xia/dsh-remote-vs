@@ -63,6 +63,29 @@ export declare class RemotePool {
      * that refuses extra connections still gets a working terminal.
      */
     private readonly shellConns;
+    /**
+     * Dedicated connections for `ssh -L` port forwards (one per alias).
+     *
+     * The other half of the same argument: a forwarded channel carries arbitrary
+     * TCP (a database, an SSH tunnel, a whole browser page), so it is long-lived
+     * and can move a lot of data. Multiplexed onto the shared connection it would
+     * queue ahead of exec/SFTP channels (SSH has no per-channel priority), and a
+     * remote service that stalls would hold the window `git status` needs. A
+     * terminal already gets its own connection (`shellConns`); forward traffic gets
+     * its own for exactly the same reason.
+     *
+     * Cost: one extra handshake per alias that actually receives a forwarded
+     * connection, plus one held TCP connection while any of its forward channels is
+     * open (the 30-minute idle eviction applies once the last one closes).
+     * `forwardOut` falls back to the shared connection when this one cannot be
+     * established (e.g. the server refuses extra connections), so a forward never
+     * stops working because of it — it only loses the isolation.
+     */
+    private readonly forwardConns;
+    /** Aliases whose dedicated-forward downgrade was already logged (once per alias). */
+    private readonly forwardFallbackNoted;
+    /** alias -> timestamp until which the dedicated forward connection is skipped. */
+    private readonly forwardBlocked;
     /** TOFU fingerprints observed this process (alias -> sha256). */
     private readonly hostKeys;
     /** Per-alias `setsid --wait` capability, probed once (see supportsSetsid). */
@@ -164,7 +187,22 @@ export declare class RemotePool {
      * debug their network. Real transport failures still arrive through the
      * pooled connection's own close/error events.
      */
-    forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number): Promise<ClientChannel>;
+    forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number, opts?: {
+        dedicated?: boolean;
+    }): Promise<{
+        channel: ClientChannel;
+        dedicated: boolean;
+    }>;
+    /**
+     * Is this alias's dedicated forward connection in its short cooldown?
+     *
+     * Expired entries are dropped eagerly so the map cannot grow per alias forever.
+     */
+    private forwardCoolingDown;
+    /** Park the dedicated connection for one alias and log the downgrade, once. */
+    private blockForward;
+    /** Log one alias's forward downgrade to the shared connection, once. */
+    private noteForwardFallback;
     /** Run one callback with a fresh SFTP session (closed afterwards). */
     withSftp<T>(alias: string, fn: (sftp: SFTPWrapper) => Promise<T>, opts?: SftpOptions): Promise<T>;
     /**
@@ -309,6 +347,23 @@ export declare class RemotePool {
     private acquire;
     /** `acquire` for the dedicated PTY connection map. */
     private acquireShell;
+    /**
+     * `acquire` for the dedicated port-forward connection map.
+     *
+     * `quiet`: a dedicated forward connection is an OPTIMIZATION. If the server
+     * refuses it (MaxStartups, `MaxSessions`, a per-source limit) the forward still
+     * works over the shared connection, so the shared link is healthy — painting
+     * the connection chip red here would send the user to debug a network that is
+     * fine (and `forwardOut` reports the rule's own error separately).
+     *
+     * The dial also gets its OWN short budget ({@link FORWARD_DEDICATED_BUDGET_MS}):
+     * a server that silently drops the extra connection would otherwise make every
+     * forward channel wait the full connect watchdog before falling back. The
+     * abandoned dial keeps running — if it eventually succeeds the connection is
+     * pooled and the next channel uses it; its failure is already handled inside
+     * `acquireIn`.
+     */
+    private acquireForward;
     private acquireIn;
     /** Evict ONE alias from ONE map (host removal drops both maps explicitly). */
     private evictFrom;

@@ -11,7 +11,17 @@ export declare const FORWARD_MAX_CONNECTIONS = 32;
  * the manager never reaches into the pool beyond one call.
  */
 export interface ForwardPoolLike {
-    forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number): Promise<ClientChannel>;
+    /**
+     * Open one direct-tcpip channel. `opts.dedicated` asks for the host's dedicated
+     * forward connection; the answer carries which connection was actually used, so
+     * the rule can SAY "shared" after a fallback instead of pretending.
+     */
+    forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number, opts?: {
+        dedicated?: boolean;
+    }): Promise<{
+        channel: ClientChannel;
+        dedicated: boolean;
+    }>;
 }
 export interface ForwardManagerDeps {
     pool: ForwardPoolLike;

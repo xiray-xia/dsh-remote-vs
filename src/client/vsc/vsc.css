@@ -5192,6 +5192,23 @@ body[data-ds-dark-theme] .rvs-doctor {
   white-space: nowrap;
 }
 
+/*
+ * 转发通道的来源标签（独立 / 共享）。
+ * 它说的是"这条规则现在走哪条 SSH 连接"，不是健康状态，所以用次级文字加描边，
+ * 不与状态点的绿/红混在一起；10px / 14px 高，只做提示，不参与排版的伸缩。
+ */
+.rvs-ports-transport {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--rvs-border);
+  border-radius: 4px;
+  color: var(--rvs-fg3);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .rvs-ports-err {
   color: var(--rvs-danger-text);
   font-size: 11px;

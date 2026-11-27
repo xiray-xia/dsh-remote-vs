@@ -45,7 +45,18 @@ const LOOPBACK = '127.0.0.1'
  * the manager never reaches into the pool beyond one call.
  */
 export interface ForwardPoolLike {
-  forwardOut(alias: string, dstHost: string, dstPort: number, srcPort?: number): Promise<ClientChannel>
+  /**
+   * Open one direct-tcpip channel. `opts.dedicated` asks for the host's dedicated
+   * forward connection; the answer carries which connection was actually used, so
+   * the rule can SAY "shared" after a fallback instead of pretending.
+   */
+  forwardOut(
+    alias: string,
+    dstHost: string,
+    dstPort: number,
+    srcPort?: number,
+    opts?: { dedicated?: boolean },
+  ): Promise<{ channel: ClientChannel; dedicated: boolean }>
 }
 
 export interface ForwardManagerDeps {
@@ -147,6 +158,14 @@ interface Forward {
   bytesIn: number
   bytesOut: number
   lastError: string | undefined
+  /**
+   * Which SSH connection the last successful channel used.
+   *
+   * `dedicated` = the host's own forward connection (the normal case); `shared` =
+   * the server refused that extra connection and the channel rode the shared one.
+   * `undefined` until a connection has succeeded at least once (no data to show).
+   */
+  transport: 'dedicated' | 'shared' | undefined
   startedAt: number
 }
 
@@ -316,6 +335,7 @@ export class ForwardManager {
       bytesIn: 0,
       bytesOut: 0,
       lastError: undefined,
+      transport: undefined,
       startedAt: Date.now(),
     }
     server.on('connection', (socket) => { this.accept(forward, socket) })
@@ -384,7 +404,22 @@ export class ForwardManager {
   private async connect(forward: Forward, socket: Socket): Promise<void> {
     let channel: ClientChannel
     try {
-      channel = await this.deps.pool.forwardOut(forward.alias, forward.remoteHost, forward.remotePort)
+      /**
+       * Ask for the host's DEDICATED forward connection: forwarding traffic is
+       * long-lived and heavy, and multiplexed onto the shared connection it would
+       * queue ahead of exec/SFTP channels. The pool falls back on its own when the
+       * server refuses the extra connection, and tells us which one was used so
+       * the row can say so.
+       */
+      const opened = await this.deps.pool.forwardOut(
+        forward.alias,
+        forward.remoteHost,
+        forward.remotePort,
+        0,
+        { dedicated: true },
+      )
+      channel = opened.channel
+      forward.transport = opened.dedicated ? 'dedicated' : 'shared'
     } catch (error) {
       forward.lastError = messageOf(error)
       this.log('warn', `forward ${forward.id} -> ${forward.remoteHost}:${forward.remotePort} failed: ${forward.lastError}`)
@@ -469,6 +504,7 @@ export class ForwardManager {
       bytesIn: forward.bytesIn,
       bytesOut: forward.bytesOut,
       ...(forward.lastError === undefined ? {} : { lastError: forward.lastError }),
+      ...(forward.transport === undefined ? {} : { transport: forward.transport }),
       startedAt: forward.startedAt,
     }
   }
