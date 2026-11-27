@@ -117,6 +117,22 @@ export declare class RemotePool {
      * indicator's poll never creates a connection as a side effect.
      */
     status(): RemoteConnectionStatus[];
+    /**
+     * The egress of the alias' LIVE connection, whichever class owns it.
+     *
+     * All three classes open through the same resolved route, so the first one
+     * that is up answers for the alias; the shared connection is preferred because
+     * it is the one exec/browse (the surface the chip describes) rides.
+     */
+    private liveEgress;
+    /**
+     * The route the stored configuration resolves to, for an alias with NO live
+     * connection. Pure observation, and absorbed: a dangling jump chain or a
+     * half-configured proxy makes `resolveProxy` throw, and a status poll must
+     * answer "the stored route is broken, here is why" instead of failing — the
+     * chip still has to render, and a 500 would hide the reason it exists to show.
+     */
+    private configuredEgress;
     /** Record a successful dial or transport-level operation. */
     private markOk;
     /** Record a connection-level failure the status chip should show. */
@@ -392,6 +408,12 @@ export declare class RemotePool {
      * Every failure is a DIAL failure, so it keeps the existing `markError`
      * semantics; only the message is layered, so the user can tell which hop broke:
      * `proxy auth failed: …`, `proxy refused: …`, `jump host "x" failed: …`.
+     *
+     * `report` receives the route this dial ACTUALLY settled on, once and only on
+     * success — a caller that asked "did this go through the jump host?" must not
+     * be answered from a configuration that may have changed since. It is a
+     * callback rather than a wider return type so the seam keeps returning the
+     * `Client` the existing callers (and gates) hand around.
      */
     private dial;
 }

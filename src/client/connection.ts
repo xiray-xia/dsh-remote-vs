@@ -14,7 +14,7 @@
  *    idle minutes, and the next operation dials again.
  */
 import { useSyncExternalStore } from 'react'
-import type { RemoteConnectionStatus } from '../protocol.ts'
+import type { EgressInfo, RemoteConnectionStatus } from '../protocol.ts'
 
 export type ConnectionState = 'ok' | 'error' | 'idle'
 
@@ -59,6 +59,51 @@ export function connectionLabelKey(state: ConnectionState): string {
   return 'connection.idle'
 }
 
+/**
+ * One route, as the localized sentence fragment the chip prints.
+ *
+ * Pure and exported so the jsdom gate can pin the copy without a browser and the
+ * three route kinds cannot drift into three different wordings. The Host sends
+ * the hop (`host:port` / the jump alias), never a sentence: the wording is UI
+ * copy and has to exist in both languages.
+ */
+export function describeEgress(egress: EgressInfo, t: (key: string) => string): string {
+  if (egress.kind === 'jump') return t('connection.egressJump').replace('{jump}', egress.viaAlias ?? egress.detail)
+  if (egress.kind === 'proxy') {
+    const template = egress.proxyKind === 'socks5' ? t('connection.egressSocks5') : t('connection.egressHttp')
+    return template.replace('{proxy}', egress.detail)
+  }
+  return t('connection.egressDirect').replace('{target}', egress.detail)
+}
+
+/**
+ * The tooltip line that answers "did this really go through the jump host?".
+ *
+ * The ACTUAL egress of the live connection wins. With nothing dialed the
+ * CONFIGURED route is shown and LABELLED as such, so a configuration can never
+ * be read as evidence about a connection — that distinction is the whole point
+ * (a host edited to use a jump host keeps serving on its old direct link until
+ * the old connection is dropped). A configured route that cannot be used says
+ * why instead of reading healthy.
+ */
+export function egressTitleLine(
+  connection: Pick<ConnectionView, 'egress' | 'configured'>,
+  t: (key: string) => string,
+): string | undefined {
+  if (connection.egress !== undefined) {
+    return t('connection.egress').replace('{egress}', describeEgress(connection.egress, t))
+  }
+  const configured = connection.configured
+  if (configured === undefined) return undefined
+  const line = t('connection.egressConfigured').replace('{egress}', describeEgress(configured, t))
+  return configured.problem === undefined
+    ? line
+    : // No separator space here: the two copies carry their own (zh uses a
+      // full-width bracket, en a leading space), so the punctuation stays right
+      // in both languages.
+      `${line}${t('connection.egressProblem').replace('{problem}', configured.problem)}`
+}
+
 /** What the UI renders for one alias. */
 export interface ConnectionView {
   alias: string
@@ -71,6 +116,13 @@ export interface ConnectionView {
   okAt?: number
   /** A pooled SSH connection is open right now (diagnostic detail only). */
   open: boolean
+  /**
+   * The route the LIVE connection was opened through. Evidence, not intention:
+   * it is what the Host's pool reports for the connection it is holding.
+   */
+  egress?: EgressInfo
+  /** The route the stored configuration resolves to (no live connection). */
+  configured?: EgressInfo
   /**
    * Client time of the last locally noted failure. A poll that still reports
    * the older success must not clear an error the page just saw.
@@ -125,10 +177,26 @@ function refreshSnapshot(): void {
     || (next !== undefined && snapshot !== undefined
       && next.alias === snapshot.alias && next.state === snapshot.state
       && next.error === snapshot.error && next.errorAt === snapshot.errorAt
-      && next.okAt === snapshot.okAt && next.open === snapshot.open && next.notedAt === snapshot.notedAt)
+      && next.okAt === snapshot.okAt && next.open === snapshot.open && next.notedAt === snapshot.notedAt
+      && sameEgress(next.egress, snapshot.egress) && sameEgress(next.configured, snapshot.configured))
   if (same) return
   snapshot = next
   notify()
+}
+
+/**
+ * Field-wise equality for one reported route.
+ *
+ * The Host re-sends the object on every poll and this module rebuilds the view,
+ * so identity says nothing: a fresh-but-equal egress must not wake subscribers
+ * (that would repaint the whole surface every 5 s), while a real change — the
+ * route the connection took — must.
+ */
+function sameEgress(a: EgressInfo | undefined, b: EgressInfo | undefined): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
+  return a.kind === b.kind && a.detail === b.detail && a.viaAlias === b.viaAlias
+    && a.source === b.source && a.proxyKind === b.proxyKind && a.problem === b.problem
 }
 
 /** Point the view at the workspace the user is looking at. */
@@ -166,6 +234,8 @@ export function applyConnectionStatuses(list: readonly RemoteConnectionStatus[])
       ...(item.errorAt === undefined ? {} : { errorAt: item.errorAt }),
       ...(item.okAt === undefined ? {} : { okAt: item.okAt }),
       open: item.open,
+      ...(item.egress === undefined ? {} : { egress: item.egress }),
+      ...(item.configured === undefined ? {} : { configured: item.configured }),
     })
   }
   refreshSnapshot()
@@ -186,6 +256,10 @@ export function noteConnectionFailure(alias: string, error: unknown): void {
     errorAt: Date.now(),
     ...(prev?.okAt === undefined ? {} : { okAt: prev.okAt }),
     open: prev?.open ?? false,
+    // The route the DEAD connection used is not carried over (it is evidence
+    // about a link that just failed); the configured route still describes what
+    // the next attempt will take, so it stays until the Host answers.
+    ...(prev?.configured === undefined ? {} : { configured: prev.configured }),
     notedAt: Date.now(),
   })
   refreshSnapshot()

@@ -587,13 +587,24 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
           return
         }
         try {
+          const entry = store.update(alias, body as Partial<HostPayload>)
+          // Drop AFTER the update lands, never before. The other order leaves a
+          // window where a concurrent dial (the status poll, a background op)
+          // opens a connection with the OLD egress — the jump route it was
+          // configured for a moment ago — and `forget` has already run past it,
+          // so nothing ever closes it: the old route keeps serving until idle
+          // eviction. Observed in the field as a direct TCP to the target while
+          // the host was configured to reach it through a jump host. Dropping
+          // last means the new configuration is in force before anything is
+          // torn down, and the dials that raced this request go with the rest.
           pool.forget(alias)
           monitor.forget(alias)
           forgetProcesses(alias)
           void worlds.dropHost(alias).catch(() => undefined)
-          const entry = store.update(alias, body as Partial<HostPayload>)
           writeJson(res, 200, { host: store.summarize(entry) })
         } catch (error) {
+          // The update itself was refused (400/404), so the stored host did NOT
+          // change: its connections still match the configuration and must stay.
           const status = (error instanceof Error ? error.message : '').startsWith('unknown host alias') ? 404 : 400
           writeJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }

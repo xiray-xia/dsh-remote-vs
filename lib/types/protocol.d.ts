@@ -243,6 +243,36 @@ export interface RemoteTimeouts {
     readMs: number;
 }
 /**
+ * Where one SSH connection ACTUALLY left this machine.
+ *
+ * The user's question ("did this really go through the jump host?") cannot be
+ * answered by the stored configuration: a host can be configured for a jump host
+ * while a connection established BEFORE that edit is still serving. So the pool
+ * reports the route of the connection it is holding, and the browser shows it on
+ * the connection chip.
+ *
+ * `detail` is the hop itself (the target `host:port`, the proxy `host:port`, or
+ * the jump host alias) and NOT a formatted sentence: the wording is UI copy and
+ * therefore belongs to the localized client.
+ */
+export interface EgressInfo {
+    kind: 'direct' | 'proxy' | 'jump';
+    /** The hop: the target endpoint, the proxy endpoint, or the jump host alias. */
+    detail: string;
+    /** Jump route only: the alias of the host whose connection carries the tunnel. */
+    viaAlias?: string;
+    /** Proxy route only: whether this host or the profile default chose the proxy. */
+    source?: 'host' | 'default';
+    /** Proxy route only: the protocol, so the UI can name it (HTTP / SOCKS5). */
+    proxyKind?: 'http' | 'socks5';
+    /**
+     * Set only on a CONFIGURED route whose resolution failed (a jump host that is
+     * gone, a self-jump, a half-configured proxy): the reason, so the chip can say
+     * why the route cannot work instead of silently reading as healthy.
+     */
+    problem?: string;
+}
+/**
  * Connection health for one host alias, as the Host's pool sees it.
  *
  * The browser never talks SSH itself, so it cannot know whether the link is up;
@@ -262,6 +292,18 @@ export interface RemoteConnectionStatus {
     errorAt?: number;
     /** Human-readable failure the client can show in the status chip. */
     error?: string;
+    /**
+     * The route the connection this pool HOLDS was actually opened through.
+     * Present only while such a connection exists: it is evidence about a live
+     * link, not about the current configuration.
+     */
+    egress?: EgressInfo;
+    /**
+     * The route the stored configuration resolves to, for an alias with no live
+     * connection (what the NEXT connection would use, and the honest answer while
+     * nothing is dialed). Carries `problem` when the configuration is unusable.
+     */
+    configured?: EgressInfo;
 }
 /** Remote OS probe outcome. */
 export interface RemoteProbe {

@@ -19,6 +19,7 @@ import {
   AUTO_RETRY_MS,
   connectionLabelKey,
   consumeAutoRetry,
+  egressTitleLine,
   markConnectionProbeOk,
   useConnectionStatus,
   type ConnectionView,
@@ -26,9 +27,18 @@ import {
 import { useExplorer } from './store.tsx'
 import { MiniSpinner } from './vsc/kit.tsx'
 
-/** Tooltip: alias, state, the last failure (with its time) or the last success. */
-function titleOf(connection: ConnectionView, t: (key: string) => string): string {
+/**
+ * Tooltip: alias, state, where the connection ACTUALLY goes (or would go), and
+ * the last failure (with its time) or last success.
+ *
+ * The egress line is the answer to "is this really going through the jump host?",
+ * which the settings panel cannot answer: it shows the SAVED decision, while a
+ * connection established before an edit keeps running on the old route until it
+ * is dropped.
+ */
+function titleOf(connection: ConnectionView, t: (key: string) => string, egress: string | undefined): string {
   const parts = [`${connection.alias} · ${t(connectionLabelKey(connection.state))}`]
+  if (egress !== undefined) parts.push(egress)
   if (connection.state === 'error') {
     if (connection.errorAt !== undefined) {
       parts.push(`${t('connection.errorAt')} ${new Date(connection.errorAt).toLocaleTimeString()}`)
@@ -107,11 +117,15 @@ export function ConnectionStatusChip(props: { compact?: boolean }): ReactNode {
   if (alias === '' || connection === undefined) return null
   const label = retrying ? t('connection.retrying') : t(connectionLabelKey(connection.state))
   const className = `rvs-conn rvs-conn-${connection.state}${props.compact === true ? ' compact' : ''}${errored ? ' clickable' : ''}`
-  const title = titleOf(connection, t)
+  const egress = egressTitleLine(connection, t)
+  const title = titleOf(connection, t, egress)
+  // The tooltip is mouse-only, so the same line goes into the accessible name:
+  // a screen-reader user asks the same question the mouse user does.
+  const ariaLabel = egress === undefined ? label : `${label} · ${egress}`
   if (!errored) {
     // A healthy/idle read-out must not be a button whose click does nothing.
     return (
-      <span className={className} title={title} role="status" aria-label={label}>
+      <span className={className} title={title} role="status" aria-label={ariaLabel}>
         <span className="rvs-conn-dot" aria-hidden="true" />
         {props.compact !== true && <span className="rvs-conn-label">{label}</span>}
       </span>
@@ -121,7 +135,7 @@ export function ConnectionStatusChip(props: { compact?: boolean }): ReactNode {
   // dial can take the whole ready-timeout, and hiding the manual affordance for
   // its duration is exactly when the user reaches for it.
   return (
-    <button type="button" className={className} title={title} aria-label={label} aria-busy={retrying} onClick={() => { void attempt() }}>
+    <button type="button" className={className} title={title} aria-label={ariaLabel} aria-busy={retrying} onClick={() => { void attempt() }}>
       <span className="rvs-conn-dot" aria-hidden="true" />
       {retrying && <MiniSpinner />}
       {props.compact !== true && <span className="rvs-conn-label">{label}</span>}

@@ -117,8 +117,15 @@ export async function bootstrap(pool: RemotePool, store: RemoteStore, alias: str
   if (!result.success) {
     throw new Error(`key install failed [exit code: ${result.exitCode}]: ${result.stderr || result.stdout || result.error || 'unknown'}`)
   }
+  // Order matters and matches the host PATCH route: flip the entry FIRST, then
+  // drop the connection, so a dial racing this request cannot slip in a
+  // password-auth connection that nobody tears down afterwards.
   store.update(alias, { auth: { kind: 'key', keyPath: privatePath } })
-  pool.drop(alias)
+  // `forget`, not `drop`: the old auth attempt's verdict ("password rejected",
+  // "key not installed yet") describes a credential this entry no longer uses,
+  // so it must not survive to colour the chip. The `test()` below records the
+  // new verdict against the key.
+  pool.forget(alias)
   // Verify the new key actually works before declaring victory.
   const check = await pool.test(alias)
   if (!check.ok) {

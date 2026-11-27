@@ -11,10 +11,10 @@ import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import type { Duplex } from 'node:stream'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
-import type { RemoteStore } from './store.ts'
+import type { RemoteStore, ResolvedProxy } from './store.ts'
 import { openProxySocket, ProxyError, type ProxyConfig, type ProxyFailure } from './proxy.ts'
 import { DeadlineError } from './timeouts.ts'
-import type { RemoteConnectionStatus, RemoteExecResult, RemoteHostEntry } from './protocol.ts'
+import type { EgressInfo, RemoteConnectionStatus, RemoteExecResult, RemoteHostEntry } from './protocol.ts'
 
 /**
  * The budget-out type lives in `timeouts.ts` (both halves need it); re-exported
@@ -169,6 +169,12 @@ interface Pooled {
   connecting: Promise<Client> | undefined
   /** Live users (channels/sessions); idle eviction only fires at zero. */
   held: number
+  /**
+   * The route THIS connection was opened through (set on a successful dial,
+   * cleared with the entry). It answers "is this really going through the jump
+   * host?" with evidence from the live link instead of the stored config.
+   */
+  egress?: EgressInfo
 }
 
 /**
@@ -378,14 +384,24 @@ export class RemotePool {
    */
   status(): RemoteConnectionStatus[] {
     const aliases = new Set<string>([...this.conns.keys(), ...this.health.keys()])
+    /** The host rows, read ONCE for the whole answer (see `configuredEgress`). */
+    const hosts = new Map<string, RemoteHostEntry>()
     try {
-      for (const host of this.store.list()) aliases.add(host.alias)
+      for (const host of this.store.list()) {
+        aliases.add(host.alias)
+        hosts.set(host.alias, host)
+      }
     } catch {
       // Unreadable store: answer what the pool knows rather than failing the route.
     }
     return [...aliases].sort().map((alias) => {
       const entry = this.health.get(alias)
       const pooled = this.conns.get(alias)
+      // The route the HELD connection came through, else the one the stored
+      // configuration would take next — never both, so a live answer cannot be
+      // passed off as a configuration statement (or the other way round).
+      const egress = this.liveEgress(alias)
+      const configured = egress === undefined ? this.configuredEgress(alias, hosts.get(alias)) : undefined
       return {
         alias,
         state: entry?.state ?? 'idle',
@@ -398,8 +414,42 @@ export class RemotePool {
         ...(entry?.okAt === undefined ? {} : { okAt: entry.okAt }),
         ...(entry?.errorAt === undefined ? {} : { errorAt: entry.errorAt }),
         ...(entry?.error === undefined ? {} : { error: entry.error }),
+        ...(egress === undefined ? {} : { egress }),
+        ...(configured === undefined ? {} : { configured }),
       }
     })
+  }
+
+  /**
+   * The egress of the alias' LIVE connection, whichever class owns it.
+   *
+   * All three classes open through the same resolved route, so the first one
+   * that is up answers for the alias; the shared connection is preferred because
+   * it is the one exec/browse (the surface the chip describes) rides.
+   */
+  private liveEgress(alias: string): EgressInfo | undefined {
+    for (const map of [this.conns, this.forwardConns, this.shellConns]) {
+      const pooled = map.get(alias)
+      if (pooled === undefined || pooled.connecting !== undefined) continue
+      if (pooled.egress !== undefined) return pooled.egress
+    }
+    return undefined
+  }
+
+  /**
+   * The route the stored configuration resolves to, for an alias with NO live
+   * connection. Pure observation, and absorbed: a dangling jump chain or a
+   * half-configured proxy makes `resolveProxy` throw, and a status poll must
+   * answer "the stored route is broken, here is why" instead of failing — the
+   * chip still has to render, and a 500 would hide the reason it exists to show.
+   */
+  private configuredEgress(alias: string, host: RemoteHostEntry | undefined): EgressInfo | undefined {
+    if (host === undefined) return undefined
+    try {
+      return egressOf(this.store.resolveProxy(alias), host)
+    } catch (error) {
+      return { ...storedEgress(host), problem: messageOf(error) }
+    }
   }
 
   /** Record a successful dial or transport-level operation. */
@@ -1582,7 +1632,11 @@ export class RemotePool {
      * so no idle timer arms, and `dispose()` only walks the map. Without the
      * failure check, a failed OLD dial deletes the NEW entry by alias.
      */
-    entry.connecting = this.dial(alias).then(
+    entry.connecting = this.dial(alias, (egress) => {
+      // The entry object is the ownership token (see just above): a dial that
+      // lost the alias must not paint its route on whatever entry now holds it.
+      if (map.get(alias) === entry) entry.egress = egress
+    }).then(
       (conn) => {
         if (map.get(alias) !== entry) {
           try {
@@ -1626,6 +1680,9 @@ export class RemotePool {
     if (pooled === undefined) return
     map.delete(alias)
     if (pooled.timer !== undefined) clearTimeout(pooled.timer)
+    // The route belongs to the connection that just ended: leaving it behind
+    // would let a closed link keep claiming the egress it once used.
+    pooled.egress = undefined
     try {
       pooled.conn.end()
     } catch {
@@ -1661,14 +1718,21 @@ export class RemotePool {
    * Every failure is a DIAL failure, so it keeps the existing `markError`
    * semantics; only the message is layered, so the user can tell which hop broke:
    * `proxy auth failed: …`, `proxy refused: …`, `jump host "x" failed: …`.
+   *
+   * `report` receives the route this dial ACTUALLY settled on, once and only on
+   * success — a caller that asked "did this go through the jump host?" must not
+   * be answered from a configuration that may have changed since. It is a
+   * callback rather than a wider return type so the seam keeps returning the
+   * `Client` the existing callers (and gates) hand around.
    */
-  private async dial(alias: string): Promise<Client> {
+  private async dial(alias: string, report?: (egress: EgressInfo) => void): Promise<Client> {
     const host: RemoteHostEntry = this.store.require(alias)
     /** The socket ssh2 will ride, when a proxy/jump built one. */
     let sock: Duplex | undefined
     /** Runs once: tears the tunnel down (close the channel, release the jump). */
     let releaseTunnel: (() => void) | undefined
     const route = this.store.resolveProxy(alias)
+    const egress = egressOf(route, host)
     if (route.kind === 'proxy') {
       try {
         sock = await openProxySocket(route.proxy, host.host, host.port)
@@ -1736,6 +1800,7 @@ export class RemotePool {
         if (settled) return
         settled = true
         if (guard !== undefined) clearTimeout(guard)
+        report?.(egress)
         resolve(conn)
       })
       conn.on('error', (error: Error) => fail(error))
@@ -1824,6 +1889,45 @@ export class RemotePool {
       }
     })
   }
+}
+
+/**
+ * The route one resolved proxy decision describes, in the shape the chip prints.
+ *
+ * `detail` is the HOP, never a sentence: the target `host:port` for a direct
+ * connection, the proxy `host:port` for a tunnel, the jump host's alias for a
+ * chain. The wording belongs to the localized client — a second English sentence
+ * baked in here would leak into the Chinese tooltip.
+ */
+function egressOf(route: ResolvedProxy, host: RemoteHostEntry): EgressInfo {
+  if (route.kind === 'proxy') {
+    return {
+      kind: 'proxy',
+      detail: `${route.proxy.host}:${route.proxy.port}`,
+      source: route.source,
+      proxyKind: route.proxy.kind,
+    }
+  }
+  if (route.kind === 'jump') return { kind: 'jump', detail: route.viaAlias, viaAlias: route.viaAlias }
+  return { kind: 'direct', detail: `${host.host}:${host.port}` }
+}
+
+/**
+ * Best-effort route from the STORED fields, for the one case `resolveProxy`
+ * refuses to answer (a dangling jump chain, a self-jump, a proxy setting that
+ * does not validate). The caller adds `problem` with the reason; the shape here
+ * only says WHICH kind of route is broken, so the chip can name it.
+ */
+function storedEgress(host: RemoteHostEntry): EgressInfo {
+  const jump = host.proxy?.jump?.viaAlias
+  if (host.proxy?.mode === 'jump') {
+    return { kind: 'jump', detail: jump ?? '', ...(jump === undefined ? {} : { viaAlias: jump }) }
+  }
+  const proxy = host.proxy?.proxy
+  if (proxy !== undefined) {
+    return { kind: 'proxy', detail: `${proxy.host}:${proxy.port}`, proxyKind: proxy.kind }
+  }
+  return { kind: 'direct', detail: `${host.host}:${host.port}` }
 }
 
 /** Message of an unknown thrown value, without assuming it is an `Error`. */

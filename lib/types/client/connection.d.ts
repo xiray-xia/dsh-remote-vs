@@ -1,4 +1,4 @@
-import type { RemoteConnectionStatus } from '../protocol.ts';
+import type { EgressInfo, RemoteConnectionStatus } from '../protocol.ts';
 export type ConnectionState = 'ok' | 'error' | 'idle';
 /** Automatic-retry cadence for an errored link (one dial per tick). */
 export declare const AUTO_RETRY_MS = 30000;
@@ -29,6 +29,26 @@ export declare function consumeAutoRetry(state: ConnectionState, attempts: numbe
  * broken link.
  */
 export declare function connectionLabelKey(state: ConnectionState): string;
+/**
+ * One route, as the localized sentence fragment the chip prints.
+ *
+ * Pure and exported so the jsdom gate can pin the copy without a browser and the
+ * three route kinds cannot drift into three different wordings. The Host sends
+ * the hop (`host:port` / the jump alias), never a sentence: the wording is UI
+ * copy and has to exist in both languages.
+ */
+export declare function describeEgress(egress: EgressInfo, t: (key: string) => string): string;
+/**
+ * The tooltip line that answers "did this really go through the jump host?".
+ *
+ * The ACTUAL egress of the live connection wins. With nothing dialed the
+ * CONFIGURED route is shown and LABELLED as such, so a configuration can never
+ * be read as evidence about a connection — that distinction is the whole point
+ * (a host edited to use a jump host keeps serving on its old direct link until
+ * the old connection is dropped). A configured route that cannot be used says
+ * why instead of reading healthy.
+ */
+export declare function egressTitleLine(connection: Pick<ConnectionView, 'egress' | 'configured'>, t: (key: string) => string): string | undefined;
 /** What the UI renders for one alias. */
 export interface ConnectionView {
     alias: string;
@@ -41,6 +61,13 @@ export interface ConnectionView {
     okAt?: number;
     /** A pooled SSH connection is open right now (diagnostic detail only). */
     open: boolean;
+    /**
+     * The route the LIVE connection was opened through. Evidence, not intention:
+     * it is what the Host's pool reports for the connection it is holding.
+     */
+    egress?: EgressInfo;
+    /** The route the stored configuration resolves to (no live connection). */
+    configured?: EgressInfo;
     /**
      * Client time of the last locally noted failure. A poll that still reports
      * the older success must not clear an error the page just saw.
