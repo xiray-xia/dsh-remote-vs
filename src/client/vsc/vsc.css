@@ -6657,3 +6657,91 @@ body:not([data-ds-dark-theme]) .rvs-qo-mask {
 .rvs-qo-note.warn {
   color: var(--rvs-git-m);
 }
+
+/* ------------------------------------------------------- egress (proxy/jump) */
+/**
+ * Host egress chrome: the read-only route chip and the collapsible section
+ * header of the host form / Settings → Remote hosts ("网络出口").
+ *
+ * Deliberately NOT scoped under `.rvs-root`, unlike the rest of this sheet: the
+ * SAME chip renders inside the DSH Settings dialog, which mounts outside the
+ * plugin's own root and therefore never inherits `--rvs-*`. The neutral
+ * translucent border + inherited text colour read correctly in both schemes,
+ * and the error state keys off the shell's global dark marker instead of the
+ * scoped token (a bare `--rvs-danger-text` would be undefined there and fall
+ * back to the light red on a dark plate).
+ */
+.rvs-proxy-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  max-width: 46ch;
+  overflow: hidden;
+  padding: 0 6px;
+  border: 1px solid var(--rvs-border2, rgba(127, 127, 127, .38));
+  border-radius: 999px;
+  color: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: .82;
+}
+
+.rvs-proxy-chip.is-error {
+  border-color: currentColor;
+  color: #a52a2a;
+  opacity: 1;
+}
+
+body[data-ds-dark-theme] .rvs-proxy-chip.is-error {
+  color: #ff8b8b;
+}
+
+/* A real <button> (Enter/Space for free); the caret carries the open state. */
+.rvs-proxy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rvs-proxy-toggle:hover {
+  background: var(--rvs-hover, rgba(127, 127, 127, .14));
+}
+
+.rvs-proxy-toggle:focus-visible {
+  border-color: var(--rvs-border2, rgba(127, 127, 127, .38));
+  outline: 2px solid var(--rvs-brand, #4d6bfe);
+  outline-offset: 1px;
+}
+
+.rvs-proxy-caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  line-height: 12px;
+  color: var(--rvs-fg3, inherit);
+  transition: transform .12s ease;
+}
+
+.rvs-proxy-toggle[aria-expanded="true"] .rvs-proxy-caret {
+  transform: rotate(90deg);
+}
+
+/* The fields sit under the label, indented to the caret's column. */
+.rvs-proxy-panel {
+  padding-left: 18px;
+}
+
+.rvs-proxy-panel[hidden] {
+  display: none;
+}

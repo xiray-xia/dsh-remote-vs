@@ -12,24 +12,36 @@
  * the two surfaces list the same hosts/bindings, and a workspace created here
  * used to stay invisible in the Remote tab until the whole page reloaded.
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react'
 import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   REMOTE_VIEW_SETTINGS_DEFAULTS,
   REMOTE_VIEW_WIDTH_MAX,
   REMOTE_VIEW_WIDTH_MIN,
   type RemoteHostSummary,
+  type RemoteProxySettingsPatch,
+  type RemoteProxySettingsView,
   type RemoteRoutingStatus,
   type RemoteViewSettings,
   type RemoteWorkspaceBinding,
 } from '../protocol.ts'
 import { RemoteApiError, api } from './api.ts'
-import { HostsView } from './HostsView.tsx'
+import {
+  HostsView,
+  ProxyFields,
+  ProxySectionHeader,
+  defaultProxyStateOf,
+  proxyFormProblem,
+  proxySummary,
+  proxyTargetOf,
+  type ProxyChipModel,
+  type ProxyFormState,
+} from './HostsView.tsx'
 import { refreshAll as refreshSidebarStore } from './store.tsx'
 import { loadViewSettings, saveViewSettings } from './view-settings.ts'
 import { WorkspacesView } from './WorkspacesView.tsx'
 import { detectLang, makeT } from './i18n.ts'
-import { Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
+import { Btn, Notice, Row, hairline, optionStyle, selectStyle } from './ui.tsx'
 
 export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNode {
   const [t] = useState(() => makeT(detectLang()))
@@ -44,17 +56,33 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
   /** The width slider's live value while dragging; persisted on release. */
   const [ratio, setRatio] = useState(REMOTE_VIEW_SETTINGS_DEFAULTS.remoteWorkspaceWidthRatio)
   const [viewSaving, setViewSaving] = useState(false)
+  /** Profile-wide egress default (the card above the view preferences). */
+  const [proxySettings, setProxySettings] = useState<RemoteProxySettingsView | undefined>(undefined)
+  const [proxyDraft, setProxyDraft] = useState<ProxyFormState>(() => defaultProxyStateOf(undefined))
+  const [proxyOpen, setProxyOpen] = useState(false)
+  const [proxySaving, setProxySaving] = useState(false)
+  const [proxyError, setProxyError] = useState<string | undefined>(undefined)
+  const proxyPanelId = useId()
+  const proxyGroupName = useId()
 
   const refresh = useCallback(() => {
     setError(undefined)
-    Promise.all([api.getHosts(), api.getWorkspaces(), loadViewSettings()]).then(
-      ([rows, w, settings]) => {
+    // The proxy route is asked SEPARATELY and may fail on its own: an older Host
+    // answers 404 there, and that must not blank out the host list or the view
+    // preferences of an otherwise working page.
+    const loadProxy = api.getProxySettings().then(settings => settings, () => undefined)
+    Promise.all([api.getHosts(), api.getWorkspaces(), loadViewSettings(), loadProxy]).then(
+      ([rows, w, settings, proxy]) => {
         setHosts(rows)
         setMode(w.mode)
         setVersion(w.version)
         if (settings !== undefined) {
           setView(settings)
           setRatio(settings.remoteWorkspaceWidthRatio)
+        }
+        if (proxy !== undefined) {
+          setProxySettings(proxy)
+          setProxyDraft(defaultProxyStateOf(proxy))
         }
       },
       (e: unknown) => setError(e instanceof RemoteApiError ? e.message : String(e)),
@@ -113,6 +141,47 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
     saveView({ remoteWorkspaceWidthRatio: ratio })
   }
 
+  /**
+   * Persist the profile-wide egress default.
+   *
+   * Only `target` is sent while the mode is `proxy` — switching to `direct`
+   * omits it so the stored endpoint (and its password) survives a flip back, and
+   * an empty password box omits the secret rather than clearing it.
+   */
+  const saveProxyDefault = (): void => {
+    const problem = proxyFormProblem(proxyDraft)
+    if (problem !== undefined) {
+      setProxyError(problem === 'target' ? t('proxy.invalidTarget') : t('proxy.invalidJump'))
+      return
+    }
+    setProxySaving(true)
+    setProxyError(undefined)
+    const patch: RemoteProxySettingsPatch = proxyDraft.mode === 'proxy'
+      ? { defaultMode: 'proxy', target: proxyTargetOf(proxyDraft) }
+      : { defaultMode: 'direct' }
+    api.patchProxySettings(patch).then(
+      (next) => {
+        setProxySettings(next)
+        setProxyDraft(defaultProxyStateOf(next))
+      },
+      (e: unknown) => setProxyError(
+        t('proxy.saveFailed').replace('{message}', e instanceof RemoteApiError ? e.message : String(e)),
+      ),
+    ).finally(() => setProxySaving(false))
+  }
+
+  // The collapsed chip reuses the form's own sentence, so the two surfaces can
+  // never disagree about how the route is WORDED — but it reads the STORED answer,
+  // not the draft: a chip that followed unsaved radio clicks would claim a route
+  // that is not in effect (the panel is where the pending edit belongs).
+  const proxyDefaultSummary = proxySummary(t, defaultProxyStateOf(proxySettings), undefined)
+  const proxyChip: ProxyChipModel = {
+    mode: proxyDraft.mode,
+    label: proxyDefaultSummary,
+    title: t('proxy.chipTitle').replace('{summary}', proxyDefaultSummary),
+    problem: false,
+  }
+
   return (
     <div style={{ padding: '4px 2px', fontSize: 13, lineHeight: 1.5 }}>
       <div style={{ ...hairline, borderTop: 'none', borderBottom: '1px solid rgba(127,127,127,.25)', marginBottom: 10, paddingBottom: 8 }}>
@@ -138,7 +207,64 @@ export function SettingsHostsSection(_props: SettingsSectionOwnerProps): ReactNo
         <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4 }}>{t('route.hint')}</div>
       </div>
       {error !== undefined && <Notice kind="error">{error}</Notice>}
-      <HostsView t={t} hosts={hosts} onChanged={reload} />
+      <HostsView t={t} hosts={hosts} proxyDefault={proxySettings} onChanged={reload} />
+      <div style={{ ...hairline, marginTop: 12, paddingTop: 10 }}>
+        <ProxySectionHeader
+          open={proxyOpen}
+          label={t('proxy.default.title')}
+          expandLabel={t('proxy.expand')}
+          collapseLabel={t('proxy.collapse')}
+          chip={proxyChip}
+          controls={proxyPanelId}
+          onToggle={() => setProxyOpen(!proxyOpen)}
+        />
+        <div id={proxyPanelId} hidden={!proxyOpen} className="rvs-proxy-panel">
+          <Row>
+            <label style={{ marginRight: 10, opacity: proxySaving ? 0.5 : 1 }}>
+              <input
+                type="radio"
+                name={proxyGroupName}
+                checked={proxyDraft.mode === 'direct'}
+                disabled={proxySaving}
+                onChange={() => { setProxyDraft({ ...proxyDraft, mode: 'direct' }); setProxyError(undefined) }}
+              />{' '}{t('proxy.mode.direct')}
+            </label>
+            <label style={{ opacity: proxySaving ? 0.5 : 1 }}>
+              <input
+                type="radio"
+                name={proxyGroupName}
+                checked={proxyDraft.mode === 'proxy'}
+                disabled={proxySaving}
+                onChange={() => { setProxyDraft({ ...proxyDraft, mode: 'proxy' }); setProxyError(undefined) }}
+              />{' '}{t('proxy.mode.proxy')}
+            </label>
+          </Row>
+          {proxyDraft.mode === 'proxy' && (
+            <ProxyFields
+              t={t}
+              state={proxyDraft}
+              onChange={(next) => { setProxyDraft(next); setProxyError(undefined) }}
+              /**
+               * Same rule as the host form: "leave it empty to keep it" only
+               * holds while the endpoint still matches the stored one.
+               */
+              storedPassword={proxySettings?.target?.hasPassword === true
+                && proxyDraft.kind === proxySettings.target.kind
+                && proxyDraft.host.trim() === proxySettings.target.host
+                && proxyDraft.port.trim() === String(proxySettings.target.port)
+                && proxyDraft.username.trim() === (proxySettings.target.username ?? '')}
+              disabled={proxySaving}
+            />
+          )}
+          <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 8 }}>{t('proxy.default.hint')}</div>
+          <Row>
+            <Btn kind="primary" onClick={saveProxyDefault} disabled={proxySaving}>
+              {proxySaving ? t('proxy.saving') : t('proxy.save')}
+            </Btn>
+          </Row>
+          {proxyError !== undefined && <Notice kind="error">{proxyError}</Notice>}
+        </div>
+      </div>
       <div style={{ ...hairline, marginTop: 12, paddingTop: 10 }}>
         <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>{t('viewSettings.title')}</div>
         <Row>

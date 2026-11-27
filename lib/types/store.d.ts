@@ -1,4 +1,5 @@
-import type { RemoteDeployState, RemoteHostEntry, RemoteHostSummary, RemoteWorkspaceBinding } from './protocol.ts';
+import { type ProxyConfig } from './proxy.ts';
+import type { RemoteDeployState, RemoteHostEntry, RemoteHostProxySetting, RemoteProxySettingsPatch, RemoteProxySettingsView, RemoteHostSummary, RemoteWorkspaceBinding } from './protocol.ts';
 /** Payload accepted by create/update (secrets included, host-side only). */
 export interface HostPayload {
     alias: string;
@@ -11,6 +12,8 @@ export interface HostPayload {
         passphrase?: string;
         password?: string;
     };
+    /** How this host reaches the network; omitted = `inherit` (back-compat). */
+    proxy?: RemoteHostProxySetting;
     description?: string;
     tags?: string[];
 }
@@ -19,6 +22,22 @@ export interface WorkspacePayload {
     alias: string;
     remotePath: string;
 }
+/**
+ * The effective network route one dial must take (see `resolveProxy`).
+ *
+ * `source` is kept because "the profile default sent me through a proxy" and "this
+ * host says so" are different answers to the same question in `remote_hosts`.
+ */
+export type ResolvedProxy = {
+    kind: 'direct';
+} | {
+    kind: 'proxy';
+    proxy: ProxyConfig;
+    source: 'host' | 'default';
+} | {
+    kind: 'jump';
+    viaAlias: string;
+};
 export declare class RemoteStore {
     private readonly file;
     private doc;
@@ -87,8 +106,69 @@ export declare class RemoteStore {
      */
     remove(alias: string): boolean;
     private normalize;
+    /**
+     * Validate one host's stored proxy decision.
+     *
+     * The rules are the ones the two-level model needs to stay explainable:
+     * - the mode is one of the four declared values;
+     * - `proxy` needs an endpoint, `jump` needs another EXISTING alias (a host
+     *   cannot jump through itself, and a chain is impossible to resolve with one
+     *   pooled hop);
+     * - fields that the chosen mode does not use are DROPPED rather than stored, so
+     *   switching modes cannot leave a stale endpoint behind that a later reader
+     *   would take for the active one.
+     *
+     * @returns the normalized setting, or undefined for `inherit` (stored as the
+     *   field's absence, which is what older files have).
+     */
+    private validateHostProxy;
+    /**
+     * Why a host's proxy decision cannot be used, when it cannot.
+     *
+     * Reads NEVER throw for this: a host that points at a deleted jump host must
+     * still be listed (with the reason on its row) instead of making the whole host
+     * list fail. The dial path asks {@link resolveProxy}, which does fail closed.
+     */
+    private proxyProblem;
+    /** Secret-free view of one stored proxy endpoint. */
+    private targetView;
+    /** Secret-free view of one host's proxy decision (always present). */
+    private proxyView;
     /** Secret-free projection for browser/agent surfaces. */
     summarize(entry: RemoteHostEntry): RemoteHostSummary;
+    /** Secret-free view of the profile-wide proxy default (read-only). */
+    getDefaultProxy(): RemoteProxySettingsView;
+    /** View of the in-memory document (no reload: callers already reloaded). */
+    private defaultProxyView;
+    /**
+     * Patch the profile-wide proxy default.
+     *
+     * `target` semantics follow the host form: omitted keeps the stored endpoint,
+     * `null` clears it, an object replaces it — and an EMPTY PASSWORD keeps the
+     * stored one, because the browser never receives secrets back.
+     */
+    patchDefaultProxy(patch: RemoteProxySettingsPatch): RemoteProxySettingsView;
+    /**
+     * Normalize a patched endpoint, keeping the stored password on an empty one.
+     *
+     * "Empty means keep" is only sound for the SAME endpoint: the browser never
+     * receives the secret back, so every PATCH of a proxied host arrives without
+     * one — but when kind/host/port/username changed, the stored password is a
+     * credential for a DIFFERENT server, and carrying it over would send the old
+     * secret to a new address (a 407 at best, a leaked credential at worst). A
+     * changed endpoint therefore drops it and the user re-enters it.
+     */
+    private mergeProxyTarget;
+    /**
+     * Resolve one host's EFFECTIVE route, in the precedence the UI describes:
+     * the host's own decision, else the profile default, else direct.
+     *
+     * Unlike {@link summarize}, this FAILS CLOSED for an unusable jump: dialing
+     * through a deleted host (or a second jump) cannot work, and the caller must say
+     * why instead of silently connecting some other way.
+     */
+    resolveProxy(alias: string): ResolvedProxy;
+    private requireStoredProxy;
     setDeploy(alias: string, state: RemoteDeployState): void;
     listWorkspaces(): RemoteWorkspaceBinding[];
     createWorkspace(payload: WorkspacePayload): RemoteWorkspaceBinding;

@@ -31,6 +31,8 @@ export declare const REMOTE_API: {
     readonly routing: "/api/dsh-remote/routing";
     /** Client view preferences (auto-open the remote page + its width share). */
     readonly viewSettings: "/api/dsh-remote/view-settings";
+    /** Profile-wide proxy default (per-host overrides live on the host rows). */
+    readonly proxySettings: "/api/dsh-remote/proxy-settings";
     /** Current working directory of one live session (click resolution helper). */
     readonly sessionCwd: "/api/dsh-remote/session-cwd";
     /** What one live session changed on its remote host (the review panel). */
@@ -54,6 +56,70 @@ export declare const MAX_SELECTION_DOWNLOAD = 100;
 export declare function selectionDownloadName(count: number): string;
 /** Authentication flavors a host entry may carry (P0: direct only, no jump/agent). */
 export type RemoteAuthKind = 'key' | 'password';
+/**
+ * How one host reaches the network.
+ *
+ * Two levels exist on purpose: a profile-wide default (`RemoteProxySettingsView`)
+ * and a per-host override. `inherit` is the default state of every existing
+ * host, and the default default is `direct`, so an upgrade changes nothing.
+ */
+export type RemoteProxyMode = 'inherit' | 'direct' | 'proxy' | 'jump';
+/** One stored proxy endpoint (secrets included: host-side only). */
+export interface RemoteProxySetting {
+    kind: 'http' | 'socks5';
+    /** Proxy hostname or IP. */
+    host: string;
+    /** Proxy port. */
+    port: number;
+    /** Basic auth (http) / user+password (socks5). */
+    username?: string;
+    password?: string;
+}
+/** A host's proxy decision, as stored. */
+export interface RemoteHostProxySetting {
+    mode: RemoteProxyMode;
+    /** The endpoint for `mode: 'proxy'`. */
+    proxy?: RemoteProxySetting;
+    /** The jump host for `mode: 'jump'` — an alias of another stored host. */
+    jump?: {
+        viaAlias: string;
+    };
+}
+/** Secret-free proxy endpoint for the browser. */
+export interface RemoteProxyTargetView {
+    kind: 'http' | 'socks5';
+    host: string;
+    port: number;
+    username?: string;
+    /** True when a password is stored (never echoed back). */
+    hasPassword: boolean;
+}
+/** Secret-free proxy decision of one host. */
+export interface RemoteHostProxyView {
+    mode: RemoteProxyMode;
+    target?: RemoteProxyTargetView;
+    /** Alias of the jump host, for `mode: 'jump'`. */
+    jumpVia?: string;
+    /**
+     * Why this setting cannot be used, when it cannot.
+     *
+     * A jump host that names itself, a chain longer than one hop, or a jump host
+     * that is itself reached through a jump is refused at dial time; saying so in
+     * the host's own row beats a generic "connection failed".
+     */
+    problem?: string;
+}
+/** Profile-wide proxy default (the "upper" of the two levels). */
+export interface RemoteProxySettingsView {
+    defaultMode: 'direct' | 'proxy';
+    target?: RemoteProxyTargetView;
+}
+/** Patch shape for the profile-wide proxy default. */
+export interface RemoteProxySettingsPatch {
+    defaultMode?: 'direct' | 'proxy';
+    /** `null` clears the stored endpoint; omitted keeps it. */
+    target?: RemoteProxySetting | null;
+}
 /** One stored host entry (the $DSH_HOME/dsh-remote.json store shape). */
 export interface RemoteHostEntry {
     /** Stable, user-chosen identifier used by every operation. */
@@ -78,6 +144,8 @@ export interface RemoteHostEntry {
     description?: string;
     /** Free-form tags. */
     tags: string[];
+    /** How this host is reached (absent = `inherit`). */
+    proxy?: RemoteHostProxySetting;
     /** Last deploy pipeline outcome for this host. */
     deploy?: RemoteDeployState | undefined;
     createdAt: number;
@@ -96,6 +164,8 @@ export interface RemoteHostSummary {
     managedKey: boolean;
     description?: string;
     tags: string[];
+    /** Secret-free proxy decision; always present (mode `inherit` when unset). */
+    proxy: RemoteHostProxyView;
     deploy?: RemoteDeployState | undefined;
     createdAt: number;
     updatedAt: number;

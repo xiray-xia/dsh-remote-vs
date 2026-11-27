@@ -483,22 +483,37 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
     res.on('close', () => stop())
   }
 
-  /** Apply parsed import payloads; per-entry errors become skips. */
+  /**
+   * Apply parsed import payloads; per-entry errors become skips.
+   *
+   * Two rounds, jump rows LAST, because a `jump` decision names ANOTHER host and
+   * `store.create` refuses a `viaAlias` that is not stored yet. Payload order is
+   * the order of the source file, which is not a dependency order: a config that
+   * writes `Host target` (`ProxyJump bastion`) before `Host bastion` used to
+   * import the bastion and silently drop the host that needs it, reported only as
+   * `proxy.jump.viaAlias: unknown host alias bastion`. One hop is the supported
+   * shape (a jump host is never itself a jump host), so two rounds always
+   * suffice; whatever is still unknown in round two is a host this import did
+   * not create (it was skipped for its own reason, which the report already
+   * carries), and stays a skip with the store's own wording.
+   */
   const applyImport = (parsed: ParsedImport): ImportReport => {
     const imported: string[] = []
     const skipped = [...parsed.skipped]
-    for (const payload of parsed.payloads) {
+    const create = (payload: HostPayload): void => {
       if (store.get(payload.alias) !== undefined) {
         skipped.push({ alias: payload.alias, reason: 'alias already exists' })
-        continue
+        return
       }
       try {
-        store.create(payload as HostPayload)
+        store.create(payload)
         imported.push(payload.alias)
       } catch (error) {
         skipped.push({ alias: payload.alias, reason: error instanceof Error ? error.message : String(error) })
       }
     }
+    for (const payload of parsed.payloads.filter(entry => entry.proxy?.mode !== 'jump')) create(payload)
+    for (const payload of parsed.payloads.filter(entry => entry.proxy?.mode === 'jump')) create(payload)
     return { imported, skipped }
   }
 
@@ -1442,6 +1457,48 @@ export function makeRoutes(deps: RemoteRoutesDeps): {
           writeJson(res, 200, { settings: viewSettings.patch(read.body ?? {}) })
         } catch (error) {
           writeRouteError(res, error)
+        }
+      },
+    },
+    // ------------------------------------------- proxy default (profile)
+    // The profile-wide "upper" of the two proxy levels: hosts set to `inherit`
+    // (which is every pre-existing host) use this decision. `direct` is the
+    // default default, so a fresh profile dials exactly as it always did.
+    {
+      kind: 'exact',
+      path: REMOTE_API.proxySettings,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req)) {
+          writeJson(res, 403, { error: 'forbidden: loopback-only' })
+          return
+        }
+        const method = req.method ?? 'GET'
+        if (method === 'GET') {
+          try {
+            writeJson(res, 200, { settings: store.getDefaultProxy() })
+          } catch (error) {
+            // A corrupt store is a real failure the page should name: answering
+            // the defaults would hide it and the next save would overwrite it.
+            writeStoreError(res, error)
+          }
+          return
+        }
+        if (method !== 'POST' && method !== 'PATCH') {
+          writeJson(res, 405, { error: `method not allowed: ${method}` })
+          return
+        }
+        const read = await readBodyOrError<Record<string, unknown>>(req, res, { objectOnly: true })
+        if (!read.ok) return
+        try {
+          writeJson(res, 200, { settings: store.patchDefaultProxy(read.body ?? {}) })
+        } catch (error) {
+          // A rejected patch is the caller's fault (bad mode, missing target); a
+          // corrupt/unwritable store is the service's, and names its path.
+          if (isStoreError(error)) {
+            writeStoreError(res, error)
+            return
+          }
+          writeJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         }
       },
     },

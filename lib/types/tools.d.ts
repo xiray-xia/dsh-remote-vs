@@ -6,6 +6,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { RemotePool } from './pool.ts';
 import type { RemoteStore } from './store.ts';
+import type { RemoteHostProxyView } from './protocol.ts';
 /** Agent-facing host row (schema-strict projection of RemoteHostSummary). */
 export interface AgentHostRow {
     alias: string;
@@ -17,6 +18,8 @@ export interface AgentHostRow {
     managedKey: boolean;
     description?: string;
     tags: string[];
+    /** Effective network route (secret-free), as the host list reports it. */
+    proxy: RemoteHostProxyView;
     createdAt: number;
     updatedAt: number;
 }

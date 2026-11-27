@@ -6,12 +6,27 @@ import { existsSync, statSync, openSync, readFileSync, renameSync, writeSync, cl
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { aliasRoot, keysDir, storePath } from './paths.ts'
+import { normalizeProxy, type ProxyConfig } from './proxy.ts'
 import type {
   RemoteDeployState,
   RemoteHostEntry,
+  RemoteHostProxySetting,
+  RemoteHostProxyView,
+  RemoteProxyMode,
+  RemoteProxySetting,
+  RemoteProxySettingsPatch,
+  RemoteProxySettingsView,
+  RemoteProxyTargetView,
   RemoteHostSummary,
   RemoteWorkspaceBinding,
 } from './protocol.ts'
+
+/** Profile-wide proxy default as stored (absent = direct). */
+interface StoredDefaultProxy {
+  mode: 'direct' | 'proxy'
+  /** Endpoint for `mode: 'proxy'`; kept when switching back to direct. */
+  proxy?: ProxyConfig
+}
 
 /** On-disk document shape. */
 interface StoreDoc {
@@ -20,11 +35,49 @@ interface StoreDoc {
   workspaces: RemoteWorkspaceBinding[]
   /** Removed alias dirs (fail-closed tombstones; never auto-deleted). */
   tombstones: string[]
+  /**
+   * Profile-wide proxy default (the "upper" level hosts may `inherit`).
+   *
+   * Optional so every pre-existing file keeps loading; absent means direct, which
+   * is the behaviour an upgrade must not change.
+   */
+  defaultProxy?: StoredDefaultProxy
 }
 
 /** Empty document. */
 function emptyDoc(): StoreDoc {
   return { version: 1, hosts: [], workspaces: [], tombstones: [] }
+}
+
+/** The proxy modes a stored host decision may name. */
+const PROXY_MODES: readonly RemoteProxyMode[] = ['inherit', 'direct', 'proxy', 'jump']
+
+/** Narrow an untrusted value to a declared mode (garbage falls back to `inherit`). */
+function proxyModeOf(mode: unknown): RemoteProxyMode {
+  return PROXY_MODES.includes(mode as RemoteProxyMode) ? (mode as RemoteProxyMode) : 'inherit'
+}
+
+/** Message of an error without assuming it is an `Error`. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Read a stored default-proxy block, tolerating hand-edited garbage.
+ *
+ * A malformed value is DROPPED (→ direct) rather than throwing: a store file an
+ * older version or a text editor touched must still load, and "direct" is the
+ * behaviour an upgrade would have had anyway.
+ */
+function sanitizeDefaultProxy(value: unknown): StoredDefaultProxy | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as { mode?: unknown; proxy?: unknown }
+  if (raw.proxy === undefined) return { mode: raw.mode === 'proxy' ? 'proxy' : 'direct' }
+  try {
+    return { mode: raw.mode === 'proxy' ? 'proxy' : 'direct', proxy: normalizeProxy(raw.proxy) }
+  } catch {
+    return { mode: 'direct' }
+  }
 }
 
 /** Identity of the store file at one point in time; `null` = the file is absent. */
@@ -74,6 +127,8 @@ export interface HostPayload {
   port?: number
   user: string
   auth: { kind: 'key' | 'password'; keyPath?: string; passphrase?: string; password?: string }
+  /** How this host reaches the network; omitted = `inherit` (back-compat). */
+  proxy?: RemoteHostProxySetting
   description?: string
   tags?: string[]
 }
@@ -83,6 +138,17 @@ export interface WorkspacePayload {
   alias: string
   remotePath: string
 }
+
+/**
+ * The effective network route one dial must take (see `resolveProxy`).
+ *
+ * `source` is kept because "the profile default sent me through a proxy" and "this
+ * host says so" are different answers to the same question in `remote_hosts`.
+ */
+export type ResolvedProxy =
+  | { kind: 'direct' }
+  | { kind: 'proxy'; proxy: ProxyConfig; source: 'host' | 'default' }
+  | { kind: 'jump'; viaAlias: string }
 
 export class RemoteStore {
   private readonly file: string
@@ -161,6 +227,10 @@ export class RemoteStore {
       hosts: doc.hosts,
       workspaces: doc.workspaces,
       tombstones: Array.isArray(doc.tombstones) ? doc.tombstones.filter(t => typeof t === 'string') : [],
+      ...(() => {
+        const defaultProxy = sanitizeDefaultProxy((doc as { defaultProxy?: unknown }).defaultProxy)
+        return defaultProxy === undefined ? {} : { defaultProxy }
+      })(),
     }
   }
 
@@ -321,10 +391,34 @@ export class RemoteStore {
         port: patch.port ?? current.port,
         user: patch.user ?? current.user,
         auth,
+        // `undefined` keeps the stored decision; `{mode:'inherit'}` clears it
+        // (the browser cannot send `null` through this payload shape).
+        proxy: patch.proxy ?? current.proxy,
         description: patch.description ?? current.description,
         tags: patch.tags ?? current.tags,
       }
       const next = this.normalize(merged, current)
+      /*
+       * A host other hosts jump through must stay a SINGLE hop.
+       *
+       * Making it a `jump` host would turn every dependent into a two-hop chain
+       * that `resolveProxy` refuses at dial time ("itself uses a jump host"), so
+       * the change landed here and broke someone ELSE's dials later without a
+       * word. Refusing it at save time is the only place the user can still see
+       * which host is in the way. (The reverse direction — creating a host that
+       * jumps through a jump host — stays allowed on purpose: that setting is new
+       * and its own row says why it cannot work today.)
+       */
+      if (proxyModeOf(next.proxy?.mode) === 'jump' && proxyModeOf(current.proxy?.mode) !== 'jump') {
+        const dependent = this.doc.hosts.find(
+          host => host.alias !== alias
+            && proxyModeOf(host.proxy?.mode) === 'jump'
+            && host.proxy?.jump?.viaAlias === alias,
+        )
+        if (dependent !== undefined) {
+          throw new Error(`host "${dependent.alias}" jumps through this host; change it first`)
+        }
+      }
       this.doc.hosts[index] = next
       return next
     })
@@ -374,6 +468,11 @@ export class RemoteStore {
     if (payload.tags !== undefined && (!Array.isArray(payload.tags) || payload.tags.some(t => typeof t !== 'string'))) {
       throw new Error('tags must be string[] when provided')
     }
+    // `inherit` is the absence of a decision, so it is stored as absence
+    // (an older file keeps loading, and a client that ignores the field is right).
+    const proxy = payload.proxy === undefined
+      ? undefined
+      : this.validateHostProxy(payload.proxy, payload.alias, current)
     const now = Date.now()
     return {
       alias: payload.alias,
@@ -386,12 +485,120 @@ export class RemoteStore {
         ...(auth.passphrase !== undefined ? { passphrase: auth.passphrase } : {}),
         ...(auth.password !== undefined ? { password: auth.password } : {}),
       },
+      ...(proxy === undefined ? {} : { proxy }),
       ...(payload.description !== undefined ? { description: payload.description } : {}),
       tags: payload.tags ?? [],
       ...(current?.deploy !== undefined ? { deploy: current.deploy } : {}),
       createdAt: current?.createdAt ?? now,
       updatedAt: now,
     }
+  }
+
+  /**
+   * Validate one host's stored proxy decision.
+   *
+   * The rules are the ones the two-level model needs to stay explainable:
+   * - the mode is one of the four declared values;
+   * - `proxy` needs an endpoint, `jump` needs another EXISTING alias (a host
+   *   cannot jump through itself, and a chain is impossible to resolve with one
+   *   pooled hop);
+   * - fields that the chosen mode does not use are DROPPED rather than stored, so
+   *   switching modes cannot leave a stale endpoint behind that a later reader
+   *   would take for the active one.
+   *
+   * @returns the normalized setting, or undefined for `inherit` (stored as the
+   *   field's absence, which is what older files have).
+   */
+  private validateHostProxy(
+    input: RemoteHostProxySetting,
+    alias: string,
+    current: RemoteHostEntry | undefined,
+  ): RemoteHostProxySetting | undefined {
+    if (typeof input !== 'object' || input === null) throw new Error('proxy must be an object')
+    const mode = input.mode
+    if (!PROXY_MODES.includes(mode)) {
+      throw new Error('proxy.mode must be inherit, direct, proxy or jump')
+    }
+    if (mode === 'inherit') return undefined
+    if (mode === 'direct') return { mode }
+    if (mode === 'proxy') {
+      if (input.proxy === undefined) throw new Error('proxy.mode "proxy" requires a proxy endpoint')
+      /*
+       * The browser never receives the stored password back, so an untouched
+       * egress decision arrives WITHOUT one — and a PATCH that only changes the
+       * description resends that decision. Merging here (the same rule
+       * `mergeProxyTarget` applies to the profile default) is what keeps the
+       * password alive: without it, editing any field wiped it and the next dial
+       * failed with 407. An empty/omitted password keeps the stored one; the way
+       * to clear it is to leave `proxy` mode (which drops the endpoint).
+       */
+      return { mode, proxy: this.mergeProxyTarget(input.proxy, current?.proxy?.proxy) }
+    }
+    const viaAlias = input.jump?.viaAlias
+    if (typeof viaAlias !== 'string' || viaAlias === '') {
+      throw new Error('proxy.mode "jump" requires proxy.jump.viaAlias')
+    }
+    if (viaAlias === alias) throw new Error('proxy.jump.viaAlias must name another host, not this one')
+    if (!this.doc.hosts.some(host => host.alias === viaAlias)) {
+      throw new Error(`proxy.jump.viaAlias: unknown host alias ${viaAlias}`)
+    }
+    return { mode, jump: { viaAlias } }
+  }
+
+  /**
+   * Why a host's proxy decision cannot be used, when it cannot.
+   *
+   * Reads NEVER throw for this: a host that points at a deleted jump host must
+   * still be listed (with the reason on its row) instead of making the whole host
+   * list fail. The dial path asks {@link resolveProxy}, which does fail closed.
+   */
+  private proxyProblem(entry: RemoteHostEntry, mode: RemoteProxyMode): string | undefined {
+    const setting = entry.proxy
+    if (mode === 'proxy') {
+      if (setting?.proxy === undefined) return 'proxy mode is selected but no proxy endpoint is configured'
+      try {
+        normalizeProxy(setting.proxy)
+        return undefined
+      } catch (error) {
+        return messageOf(error)
+      }
+    }
+    if (mode !== 'jump') return undefined
+    const viaAlias = setting?.jump?.viaAlias
+    if (viaAlias === undefined || viaAlias === '') return 'jump mode is selected but no jump host is configured'
+    if (viaAlias === entry.alias) return 'a host cannot jump through itself'
+    const via = this.doc.hosts.find(host => host.alias === viaAlias)
+    if (via === undefined) return `jump host "${viaAlias}" is not configured`
+    if (proxyModeOf(via.proxy?.mode) === 'jump') return `jump host "${viaAlias}" itself uses a jump host (one hop only)`
+    return undefined
+  }
+
+  /** Secret-free view of one stored proxy endpoint. */
+  private targetView(setting: RemoteProxySetting | ProxyConfig): RemoteProxyTargetView {
+    return {
+      kind: setting.kind,
+      host: setting.host,
+      port: setting.port,
+      ...(setting.username === undefined || setting.username === '' ? {} : { username: setting.username }),
+      hasPassword: typeof setting.password === 'string' && setting.password !== '',
+    }
+  }
+
+  /** Secret-free view of one host's proxy decision (always present). */
+  private proxyView(entry: RemoteHostEntry): RemoteHostProxyView {
+    const mode = proxyModeOf(entry.proxy?.mode)
+    const view: RemoteHostProxyView = { mode }
+    if (entry.proxy?.proxy !== undefined) {
+      try {
+        view.target = this.targetView(normalizeProxy(entry.proxy.proxy))
+      } catch {
+        // The problem string below carries the reason.
+      }
+    }
+    if (entry.proxy?.jump?.viaAlias !== undefined) view.jumpVia = entry.proxy.jump.viaAlias
+    const problem = this.proxyProblem(entry, mode)
+    if (problem !== undefined) view.problem = problem
+    return view
   }
 
   /** Secret-free projection for browser/agent surfaces. */
@@ -416,9 +623,137 @@ export class RemoteStore {
         && entry.auth.keyPath.startsWith(keysDir() + (process.platform === 'win32' ? '\\' : '/')),
       ...(entry.description !== undefined ? { description: entry.description } : {}),
       tags: [...entry.tags],
+      proxy: this.proxyView(entry),
       ...(entry.deploy !== undefined ? { deploy: entry.deploy } : {}),
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
+    }
+  }
+
+  // ------------------------------------------------------ proxy defaults
+
+  /** Secret-free view of the profile-wide proxy default (read-only). */
+  getDefaultProxy(): RemoteProxySettingsView {
+    this.reload()
+    return this.defaultProxyView()
+  }
+
+  /** View of the in-memory document (no reload: callers already reloaded). */
+  private defaultProxyView(): RemoteProxySettingsView {
+    const stored = this.doc.defaultProxy
+    const view: RemoteProxySettingsView = { defaultMode: stored?.mode === 'proxy' ? 'proxy' : 'direct' }
+    if (stored?.proxy !== undefined) {
+      try {
+        view.target = this.targetView(normalizeProxy(stored.proxy))
+      } catch {
+        // A malformed stored endpoint is not addressable: report direct instead of
+        // echoing a target nobody could dial (the dial path fails closed too).
+        view.defaultMode = 'direct'
+      }
+    } else if (view.defaultMode === 'proxy') {
+      // "proxy" without an endpoint is not a usable default; the upgrade-safe
+      // answer is direct until the user (or a patch) supplies one.
+      view.defaultMode = 'direct'
+    }
+    return view
+  }
+
+  /**
+   * Patch the profile-wide proxy default.
+   *
+   * `target` semantics follow the host form: omitted keeps the stored endpoint,
+   * `null` clears it, an object replaces it — and an EMPTY PASSWORD keeps the
+   * stored one, because the browser never receives secrets back.
+   */
+  patchDefaultProxy(patch: RemoteProxySettingsPatch): RemoteProxySettingsView {
+    if (typeof patch !== 'object' || patch === null) throw new Error('proxy settings patch must be an object')
+    return this.mutate(() => {
+      const current: StoredDefaultProxy = this.doc.defaultProxy ?? { mode: 'direct' }
+      let proxy = current.proxy
+      if (patch.target === null) {
+        proxy = undefined
+      } else if (patch.target !== undefined) {
+        proxy = this.mergeProxyTarget(patch.target, current.proxy)
+      }
+      const mode = patch.defaultMode ?? current.mode
+      if (mode !== 'direct' && mode !== 'proxy') throw new Error("defaultMode must be 'direct' or 'proxy'")
+      if (mode === 'proxy' && proxy === undefined) {
+        throw new Error('defaultMode "proxy" requires a proxy target')
+      }
+      this.doc.defaultProxy = { mode, ...(proxy === undefined ? {} : { proxy }) }
+      return this.defaultProxyView()
+    })
+  }
+
+  /**
+   * Normalize a patched endpoint, keeping the stored password on an empty one.
+   *
+   * "Empty means keep" is only sound for the SAME endpoint: the browser never
+   * receives the secret back, so every PATCH of a proxied host arrives without
+   * one — but when kind/host/port/username changed, the stored password is a
+   * credential for a DIFFERENT server, and carrying it over would send the old
+   * secret to a new address (a 407 at best, a leaked credential at worst). A
+   * changed endpoint therefore drops it and the user re-enters it.
+   */
+  private mergeProxyTarget(target: RemoteProxySetting, current: ProxyConfig | undefined): ProxyConfig {
+    const next = normalizeProxy(target)
+    const password = typeof target.password === 'string' ? target.password : ''
+    if (password === '') {
+      const sameEndpoint = current !== undefined
+        && current.kind === next.kind
+        && current.host === next.host
+        && current.port === next.port
+        && (current.username ?? '') === (next.username ?? '')
+      if (sameEndpoint && current.password !== undefined) next.password = current.password
+      else delete next.password
+    }
+    return next
+  }
+
+  /**
+   * Resolve one host's EFFECTIVE route, in the precedence the UI describes:
+   * the host's own decision, else the profile default, else direct.
+   *
+   * Unlike {@link summarize}, this FAILS CLOSED for an unusable jump: dialing
+   * through a deleted host (or a second jump) cannot work, and the caller must say
+   * why instead of silently connecting some other way.
+   */
+  resolveProxy(alias: string): ResolvedProxy {
+    const entry = this.require(alias)
+    const mode = proxyModeOf(entry.proxy?.mode)
+    if (mode === 'direct') return { kind: 'direct' }
+    if (mode === 'proxy') {
+      const stored = entry.proxy?.proxy
+      if (stored === undefined) {
+        throw new Error(`host ${alias}: proxy mode is selected but no proxy endpoint is configured`)
+      }
+      return { kind: 'proxy', proxy: this.requireStoredProxy(stored, alias), source: 'host' }
+    }
+    if (mode === 'jump') {
+      const viaAlias = entry.proxy?.jump?.viaAlias
+      if (viaAlias === undefined || viaAlias === '') {
+        throw new Error(`host ${alias}: jump mode is selected but no jump host is configured`)
+      }
+      if (viaAlias === alias) throw new Error(`host ${alias}: a host cannot jump through itself`)
+      const via = this.get(viaAlias)
+      if (via === undefined) throw new Error(`host ${alias}: jump host "${viaAlias}" is not configured`)
+      if (proxyModeOf(via.proxy?.mode) === 'jump') {
+        throw new Error(`host ${alias}: jump host "${viaAlias}" itself uses a jump host (one hop only)`)
+      }
+      return { kind: 'jump', viaAlias }
+    }
+    const storedDefault = this.doc.defaultProxy
+    if (storedDefault?.mode === 'proxy' && storedDefault.proxy !== undefined) {
+      return { kind: 'proxy', proxy: this.requireStoredProxy(storedDefault.proxy, alias), source: 'default' }
+    }
+    return { kind: 'direct' }
+  }
+
+  private requireStoredProxy(stored: RemoteProxySetting | ProxyConfig, alias: string): ProxyConfig {
+    try {
+      return normalizeProxy(stored)
+    } catch (error) {
+      throw new Error(`host ${alias}: invalid proxy configuration (${messageOf(error)})`)
     }
   }
 

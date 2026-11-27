@@ -114,6 +114,7 @@ extra configuration is needed.
 | Capability | Notes |
 | --- | --- |
 | Host management | CRUD + connectivity test; key / password auth; config in `$DSH_HOME/dsh-remote.json` (0600), independent from `dsh-ssh.json` |
+| Network egress | Every host picks **follow default / direct / proxy (HTTP CONNECT or SOCKS5) / jump host**. The host form's 「network egress」 block is **collapsed by default**: the collapsed row carries a read-only chip that already spells the route out (`direct` / `follow default (direct)` / `follow default (via HTTP proxy 192.0.2.10:3128)` / `via SOCKS5 proxy …` / `via jump host <alias>`), and only expanding it reveals the fields (four mode radios, type/host/port, username/password, jump-host dropdown); the toggle is a real `<button>` with `aria-expanded`, so Enter/Space work. Each host row carries the same chip (a `follow default` row resolves to the route it actually takes; with no known default it says just "follow default" instead of assuming direct); a setting that cannot work turns it **error-coloured** with the reason in `title` (jump host deleted, jump host pointing at itself, invalid endpoint). **Two levels**: Settings → Remote hosts also has a collapsible **default network egress** card (profile-wide, direct by default) — what `follow default` hosts use, overridable per host; that card's chip shows the **stored** value only, so an unsaved edit does not appear there. Proxy passwords are **never echoed**: editing an existing host shows an empty password box with "stored — leave empty to keep", and an empty box keeps the stored secret **for the same endpoint** (a changed `kind`/host/port/username drops it — re-enter it; the `password` field is not sent) |
 | Key bootstrap | One click generates a dedicated keypair on password hosts and deploys `authorized_keys`, key auth from then on |
 | Push pipeline | Remote arch/OS probe → version compare → skip-if-same / else push; the executable channel pushes a self-built helper. A failed deploy no longer retries on every remote file operation: it backs off from **5 seconds up to 5 minutes**, and the Settings "Push" button forces an immediate retry; **an automatic push (first contact or upgrade self-heal) raises a bottom-right toast on success** (`alias: pushed remote helper <version>`), while a manual push stays quiet (Settings already shows its state) |
 | Remote files | SFTP browse / read / write / create / delete / rename. Boundaries hardened: 0-byte files no longer deadlock, and every SFTP operation times out at 60s and releases its channel; **a single directory listing is capped at 20000 entries** (the first 20000 after sorting — directories first, then names — announced in the host log; the protocol carries no "truncated" field, so the UI has no marker); **a save goes through a side file and a rename** (server-side `posix-rename` when available, otherwise backup-rename-rollback), **writes through symlinks** (the link itself survives) and keeps the mode bits **on a best-effort basis**; SCM status parsing unquotes git's C-quoted paths (any name with whitespace is quoted) |
@@ -124,6 +125,34 @@ extra configuration is needed.
 | Git graph | Remote repo status + branches + SVG commit graph + commit details/contents/diff pane (exec + frontend parsing, zero Host additions) |
 | Import | One-click import from `~/.ssh/config` and from an existing `dsh-ssh.json` (read once, no coupling); `Host a b` multi-pattern entries are expanded one by one, `Include` is reported as not expanded instead of being silently dropped, and every skipped host names an actionable reason (no User / no IdentityFile / invalid port …) |
 | Environment check | An "environment check" per host: one remote command probes OS/kernel, glibc, `git`, `ripgrep`, `tar`, `setsid --wait`, `$HOME` free space, CPU/memory, the deployed helper version and sshd's `MaxSessions`, shown as a three-state table (**available / missing / unknown**). "Could not determine" is reported as **unknown**, never as "missing" (insufficient permission, unparseable output and a dropped link are all unknown); every row keeps the remote's own words, stderr is merged rather than discarded, and the whole report copies in one click |
+
+### Network egress (proxy / jump host)
+
+For hosts the machine can reach, but only through one more hop out of this network. Four points:
+
+- **Two levels**: one profile-wide **default network egress** (Settings → Remote hosts → Default network egress,
+  `direct` by default), plus a per-host `follow default / direct / proxy / jump host`. A host without the field
+  reads as `follow default`, and the default's own default is direct ⇒ **an upgrade changes nothing**;
+  `follow default` stores "no opinion", it does not copy the value of the moment.
+- **Proxy** supports `HTTP CONNECT` and `SOCKS5`, both with optional username/password (Basic /
+  SOCKS5 user-pass sub-negotiation).
+- A **jump host** rides another stored host's SSH connection (one `direct-tcpip` hop), and the jump host dials
+  through **its own** egress (direct / proxy / follow default). **Multi-hop is refused at parse time**
+  (`ProxyJump a,b` is skipped with the reason), and a host that others already jump through cannot be turned into
+  a jump host itself (that would make every dependent a two-hop chain). What the row names are the two runtime
+  problems — a **chain** (the jump host is itself a jump host) and a **dangling** one (the jump host was deleted) —
+  instead of surfacing as "connection failed" at dial time.
+- Failures stay layered: `proxy layer` (unreachable / auth required / tunnel refused / wrong protocol) and
+  `target layer` (jump host unusable, endpoint invalid) each get an actionable sentence.
+- It only affects the plugin's own SSH dials (exec / SFTP / terminal / port forwarding share the same resolution);
+  system environment variables and DSH's own `HTTP_PROXY` are untouched.
+
+Importing `~/.ssh/config` maps `ProxyJump` / `ProxyCommand` too: a single-hop `ProxyJump bastion` **whose jump
+host is imported from the same config** (being visible in that import is enough — **file order does not matter**,
+so `Host target` before `Host bastion` still imports both) becomes a jump host; `ProxyCommand nc -X connect -x
+host:port` → HTTP proxy, `nc -x host:port` → SOCKS5, `ssh -W %h:%p bastion` → jump host. Multi-hop, a third-party
+program (`corkscrew`, …) or a jump host that was not imported is **skipped with a reason**, instead of quietly
+dropping the proxy and leaving a host that can never connect.
 
 ### Agent capabilities
 
@@ -149,7 +178,8 @@ dsh_remote_vs/
 │   ├── sftp.ts             # remote file engine (SFTP windowed reads-writes/tree ops)
 │   ├── keygen.ts           # password-host key bootstrap (generate→deploy→flip)
 │   ├── deploy.ts           # push pipeline (probe/compare/ship/double-verify/manifest)
-│   ├── importers.ts        # ssh_config / dsh-ssh.json parsing importers
+│   ├── importers.ts        # ssh_config / dsh-ssh.json parsing importers (ProxyJump/ProxyCommand → egress)
+│   ├── proxy.ts            # egress tunnels (HTTP CONNECT / SOCKS5 handshake + pure ProxyJump/ProxyCommand parsing)
 │   ├── routes.ts           # /api/dsh-remote/* route table + terminal WebSocket upgrade
 │   ├── terminal.ts         # PTY session registry (reconnect-on-refresh/disconnect cleanup)
 │   ├── forward.ts          # local port-forward manager (direct-tcpip channels / one listener per rule / budgets)
@@ -216,7 +246,7 @@ dsh_remote_vs/
 │       ├── MonitorView.tsx # monitor panel (one/all hosts, curves, pause/refresh, persisted scope)
 │       ├── metrics-model.ts # monitor model (history window/sparkline geometry/capacity+rate formatting)
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
-│       ├── SettingsHosts.tsx        # settings occupants (host mgmt/binding list, self-fetching)
+│       ├── SettingsHosts.tsx        # settings occupants (host mgmt/binding list/default egress, self-fetching)
 │       ├── DirectoryFlow.tsx        # native entry occupant (local dual-mode/remote wizard)
 │       ├── RemoteDirectoryPicker.tsx# remote directory browser dialog
 │       └── i18n.ts / theme.ts / ui.tsx # bilingual dictionary/theme signal/shared styles

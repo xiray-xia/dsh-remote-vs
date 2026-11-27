@@ -9,8 +9,10 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
+import type { Duplex } from 'node:stream'
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
 import type { RemoteStore } from './store.ts'
+import { openProxySocket, ProxyError, type ProxyConfig, type ProxyFailure } from './proxy.ts'
 import { DeadlineError } from './timeouts.ts'
 import type { RemoteConnectionStatus, RemoteExecResult, RemoteHostEntry } from './protocol.ts'
 
@@ -1643,8 +1645,77 @@ export class RemotePool {
     return new Client()
   }
 
-  private dial(alias: string): Promise<Client> {
+  /**
+   * Open one SSH connection, through whatever route the store resolves.
+   *
+   * Three routes, and only the first is the pre-proxy code path:
+   * - `direct`: unchanged (`host` / `port` in the connect config);
+   * - `proxy`: the proxy module builds the tunnel and ssh2 rides the returned
+   *   socket (`sock`), so `host`/`port` are deliberately omitted (ssh2 ignores
+   *   them when `sock` is present);
+   * - `jump`: the tunnel is a `direct-tcpip` channel on the JUMP host's pooled
+   *   connection, held for as long as the client lives. Its close/error handlers
+   *   close that channel and give the hold back — a leak here would pin the jump
+   *   host's connection forever.
+   *
+   * Every failure is a DIAL failure, so it keeps the existing `markError`
+   * semantics; only the message is layered, so the user can tell which hop broke:
+   * `proxy auth failed: …`, `proxy refused: …`, `jump host "x" failed: …`.
+   */
+  private async dial(alias: string): Promise<Client> {
     const host: RemoteHostEntry = this.store.require(alias)
+    /** The socket ssh2 will ride, when a proxy/jump built one. */
+    let sock: Duplex | undefined
+    /** Runs once: tears the tunnel down (close the channel, release the jump). */
+    let releaseTunnel: (() => void) | undefined
+    const route = this.store.resolveProxy(alias)
+    if (route.kind === 'proxy') {
+      try {
+        sock = await openProxySocket(route.proxy, host.host, host.port)
+      } catch (error) {
+        throw proxyDialError(error, route.proxy)
+      }
+      releaseTunnel = () => {
+        try {
+          sock?.destroy()
+        } catch {
+          // Already gone (ssh2 closes it with the connection).
+        }
+      }
+    } else if (route.kind === 'jump') {
+      const via = route.viaAlias
+      try {
+        await this.acquire(via)
+        this.hold(via)
+      } catch (error) {
+        throw new Error(`jump host "${via}" failed: ${messageOf(error)}`)
+      }
+      let channel: ClientChannel
+      try {
+        // Reuse the SHARED jump-host connection that `acquire`+`hold` just
+        // established. `forwardOut` prefers a dedicated per-purpose connection by
+        // default, which here would dial the SAME jump host a second time for a
+        // tunnel that already holds the first one (an extra handshake per jump
+        // dial, and a second connection to a host we are already connected to).
+        channel = (await this.forwardOut(via, host.host, host.port, 0, { dedicated: false })).channel
+      } catch (error) {
+        this.release(via)
+        throw new Error(`jump host "${via}" failed: ${messageOf(error)}`)
+      }
+      let released = false
+      releaseTunnel = () => {
+        if (released) return
+        released = true
+        try {
+          channel.close()
+        } catch {
+          // Already gone.
+        }
+        this.release(via)
+      }
+      // A channel is a duplex stream: ssh2 never learns it is not a raw socket.
+      sock = channel as unknown as Duplex
+    }
     return new Promise<Client>((resolve, reject) => {
       const conn = this.makeClient()
       let settled = false
@@ -1658,6 +1729,7 @@ export class RemotePool {
         } catch {
           // Ignore.
         }
+        releaseTunnel?.()
         reject(explainAuthError(host, error))
       }
       conn.on('ready', () => {
@@ -1675,6 +1747,12 @@ export class RemotePool {
        * leave this promise pending forever while the caller held a channel slot.
        */
       conn.on('close', () => fail(new Error('connection closed during SSH handshake')))
+      // The tunnel belongs to the connection: however the client ends, the channel
+      // and the jump host's hold go with it (idempotent; `fail` may have run).
+      if (releaseTunnel !== undefined) {
+        conn.once('close', () => releaseTunnel?.())
+        conn.once('error', () => releaseTunnel?.())
+      }
       // Last resort: the library reports nothing at all (neither ready, nor
       // error, nor close). `readyTimeout` cannot cover it because ssh2 clears
       // that timer as soon as the socket closes without emitting an error.
@@ -1716,11 +1794,11 @@ export class RemotePool {
         return true
       }
       try {
+        const transport = sock === undefined ? { host: host.host, port: host.port } : { sock }
         if (host.auth.kind === 'key') {
           const keyPath = host.auth.keyPath as string
           conn.connect({
-            host: host.host,
-            port: host.port,
+            ...transport,
             username: host.user,
             privateKey: readFileSync(keyPath),
             passphrase: host.auth.passphrase,
@@ -1731,8 +1809,7 @@ export class RemotePool {
           })
         } else {
           conn.connect({
-            host: host.host,
-            port: host.port,
+            ...transport,
             username: host.user,
             password: host.auth.password,
             tryKeyboard: true,
@@ -1747,6 +1824,39 @@ export class RemotePool {
       }
     })
   }
+}
+
+/** Message of an unknown thrown value, without assuming it is an `Error`. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? '')
+}
+
+/**
+ * Fixed prefix per proxy failure reason.
+ *
+ * The dial fails either way; the prefix is what tells the user WHICH layer broke —
+ * their password, the proxy host, the tunnel policy, or the destination. The raw
+ * detail is kept after it, so nothing is lost.
+ */
+const PROXY_FAILURE_PREFIX: Record<ProxyFailure, string> = {
+  unreachable: 'proxy unreachable',
+  timeout: 'proxy timed out',
+  auth: 'proxy auth failed',
+  refused: 'proxy refused',
+  protocol: 'proxy protocol error',
+  target: 'proxy target invalid',
+}
+
+/** One proxy dial failure, with the layer in front of the original message. */
+function proxyDialError(error: unknown, proxy: ProxyConfig): Error {
+  if (error instanceof ProxyError) {
+    const prefix = PROXY_FAILURE_PREFIX[error.reason]
+    // A bad destination is not the proxy's address; naming the proxy there would
+    // send the user to the wrong field.
+    const where = error.reason === 'target' ? '' : ` ${proxy.kind} proxy ${proxy.host}:${proxy.port}`
+    return new Error(`${prefix}${where}: ${error.message}`)
+  }
+  return new Error(`proxy failed: ${proxy.kind} proxy ${proxy.host}:${proxy.port}: ${messageOf(error)}`)
 }
 
 /**

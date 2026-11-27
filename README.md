@@ -99,6 +99,7 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | 能力 | 说明 |
 | --- | --- |
 | 主机管理 | 增删改查、连接测试；证书 / 密码认证；配置存 `$DSH_HOME/dsh-remote.json`（0600），与 `dsh-ssh.json` 独立 |
+| 网络出口 | 每台主机可选 **跟随默认 / 直连 / 代理（HTTP CONNECT 或 SOCKS5）/ 跳板**。主机表单里的「网络出口」**默认收起**：收起时右侧一枚只读 chip 直接写出走向（`直连` / `跟随默认（直连）` / `跟随默认（经 HTTP 代理 192.0.2.10:3128）` / `经 SOCKS5 代理 …` / `经跳板 <alias>`），展开才出现字段（4 个模式单选、类型/主机/端口、用户名/密码、跳板下拉）；按钮带 `aria-expanded`，Enter/Space 可切换。主机列表每行也有同样一枚 chip（「跟随默认」的行同样解析出实际走向，默认未知时只写「跟随默认」而不猜直连），配置无法使用时变**错误色**并把原因放进 `title`（跳板主机已被删除、跳板指向自己、端点非法）。**两级**：设置 →「远程主机」页另有一张可折叠的「默认网络出口」卡片（profile 级，默认直连），是「跟随默认」主机走的路，单台主机可覆盖；卡片的 chip 只反映**已保存**的值，改了没保存不会提前显示。代理密码**永不回显**：编辑既有主机时密码框为空、placeholder 写"已设置，留空则不修改"，同一端点留空提交即保留（不发送 `password` 字段）；**端点（类型/主机/端口/用户名）改了就不再沿用**，需要重填 |
 | 密钥 bootstrap | 密码主机一键生成专用密钥对并下发 `authorized_keys`，之后走密钥 |
 | 推送流水线 | 远端 arch/系统探测 → 版本比对 → 一致跳过 / 否则推送；executable 通道推送自编译 helper。失败后不再每次远端文件操作都重试：按 **5 秒起步、上限 5 分钟**的退避重试，设置页「推送」按钮可强制立即重试；**首次连接或协议自愈触发的自动推送成功后，右下角弹一条提示**（`alias：已自动推送远端 helper <版本>`），手动推送不弹（设置页已有状态） |
 | 远端文件 | SFTP 浏览 / 读 / 写 / 新建 / 删除 / 改名。边界已加固：0 字节文件不再卡死，每个 SFTP 操作 60s 超时回收通道；**单个目录列表上限 20000 条**（按"目录在前、其余按名"排序后取前 20000，宿主日志说明——协议里没有"已截断"字段，界面上没有标记）；**保存走侧文件 + 重命名**（优先服务端 `posix-rename`，不支持时备份-重命名-失败回滚），**写穿符号链接**（链接本身保留）并**尽力保留权限位**；SCM 状态解析会反解 git 的 C-quote 路径（凡名字含空格都会被加引号） |
@@ -109,6 +110,29 @@ Host 转发（终端按 `__DSH_TRANSPORT__.streamBaseUrl` 解析地址），无�
 | Git 图谱 | 远端仓库状态 + 分支 + SVG 提交图 + 提交详情/内容/差异面板（exec + 前端解析，零 Host 增量）|
 | 导入 | 从 `~/.ssh/config`、从现有 `dsh-ssh.json` 一键导入（只读一次，不耦合）；`Host a b` 这类多模式条目会逐个展开，`Include` 如实报告为未展开，被跳过的主机会给出可操作原因（缺 User / 缺 IdentityFile / 端口非法等）|
 | 环境自检 | 每台主机一个「环境自检」：一条远端命令体检 OS/内核、glibc、`git`、`ripgrep`、`tar`、`setsid --wait` 能力、`$HOME` 磁盘余量、CPU/内存、已推送的 helper 版本、sshd 的 `MaxSessions`，结果一屏三态（**有 / 无 / 未知**）。"查不出"明确写成**未知**而不是"没有"（权限不足、输出不可解析、链路中断都属于未知）；每项保留远端原话，stderr 合并而不是丢弃；可一键复制整份报告 |
+
+### 网络出口（代理 / 跳板）
+
+主机本身能直连、但这份网络里还需要一层出网时用得上。四个要点：
+
+- **两级配置**：整个 profile 一个「默认网络出口」（设置 → 远程主机 → 默认网络出口，默认**直连**），每台主机
+  再选 `跟随默认 / 直连 / 代理 / 跳板`。旧主机没有这个字段，读作「跟随默认」，而默认的默认是直连 ⇒
+  **升级前后行为完全一致**；`跟随默认` 存的是"没有主张"，不是把当时的值抄一份。
+- **代理**支持 `HTTP CONNECT` 与 `SOCKS5`，两种都可带用户名/密码（Basic / SOCKS5 user-pass 子协商）。
+- **跳板**是"用另一台已保存主机的 SSH 连接转发"（`direct-tcpip` 一跳），跳板本身按**它自己的**出口拨号
+  （直连 / 代理 / 跟随默认）。**多跳在解析阶段就被拒绝**（`ProxyJump a,b` 会被跳过并给出原因），写入阶段
+  也不允许把"正被别的主机当作跳板"的主机改成跳板（否则依赖方变成两跳链）；行上标注的是两类运行期问题：
+  「链」（跳板自己又是跳板）与「悬空」（跳板主机已被删除），而不是等拨号时报一句"连接失败"。
+- 失败信息分层：`代理层`（不可达 / 需要认证 / 拒绝隧道 / 协议不符）与 `目标层`（跳板不可用、端点非法）
+  分别给出可操作的句子，不再一律"connection failed"。
+- 它只作用于插件自己的 SSH 拨号（exec / SFTP / 终端 / 端口转发都走同一套解析），不改系统环境变量，
+  也不接管 DSH 自身的 `HTTP_PROXY`。
+
+导入 `~/.ssh/config` 时 `ProxyJump` / `ProxyCommand` 会一起映射：单跳 `ProxyJump bastion` 且该跳板主机
+**也在同一份 config 里被导入**（条目可见即可，**与出现顺序无关**——`Host target` 写在 `Host bastion` 之前
+照样两台都入库）→ `跳板`；`ProxyCommand nc -X connect -x host:port` → HTTP 代理、
+`nc -x host:port` → SOCKS5、`ssh -W %h:%p bastion` → 跳板。多跳、第三方程序（`corkscrew` 等）、
+跳板主机没被导入 —— 一律**跳过并给出原因**，而不是悄悄丢掉代理、留下一条注定连不上的直连主机。
 
 ### Agent 能力
 
@@ -134,7 +158,8 @@ dsh_remote_vs/
 │   ├── sftp.ts             # 远端文件引擎（SFTP 窗口读写/目录树操作）
 │   ├── keygen.ts           # 密码机密钥 bootstrap（生成→下发→翻转）
 │   ├── deploy.ts           # 推送流水线（探测/比对/传包/双验/manifest）
-│   ├── importers.ts        # ssh_config / dsh-ssh.json 解析导入
+│   ├── importers.ts        # ssh_config / dsh-ssh.json 解析导入（ProxyJump/ProxyCommand → 出网设置）
+│   ├── proxy.ts            # 出网隧道（HTTP CONNECT / SOCKS5 握手 + ProxyJump/ProxyCommand 纯解析）
 │   ├── routes.ts           # /api/dsh-remote/* 路由表 + 终端 WebSocket 升级
 │   ├── terminal.ts         # PTY 会话注册表（刷新重连/断开清理）
 │   ├── forward.ts          # 本地端口转发管理器（direct-tcpip 通道/每规则监听器/连接预算）
@@ -201,7 +226,7 @@ dsh_remote_vs/
 │       ├── MonitorView.tsx # 监控面板（单机/全部主机、曲线、暂停/刷新、范围持久化）
 │       ├── metrics-model.ts # 监控纯模型（历史窗口/Sparkline 几何/容量与速率格式化）
 │       ├── HostsView / WorkspacesView / WorkspaceWizard / TerminalView / XTerm / PortsView / Dialog
-│       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表，自取数）
+│       ├── SettingsHosts.tsx        # 设置两节 occupant（主机管理/绑定列表/默认网络出口，自取数）
 │       ├── DirectoryFlow.tsx        # 原生入口 occupant（本地双模/远端向导）
 │       ├── RemoteDirectoryPicker.tsx# 远端目录浏览弹窗
 │       └── i18n.ts / theme.ts / ui.tsx # 双语词典/主题信号/共享样式

@@ -19,6 +19,7 @@ import {
   type RemoteFileEntry,
   type RemoteForwardRequest,
   type RemoteForwardState,
+  type RemoteHostProxySetting,
   type RemoteHostSummary,
   type RemoteListenPortsResult,
   type RemoteMetricsResult,
@@ -26,6 +27,8 @@ import {
   type RemoteProcessesResult,
   type RemotePluginMeta,
   type RemoteProbe,
+  type RemoteProxySettingsPatch,
+  type RemoteProxySettingsView,
   type RemoteRead,
   type RemoteRoutingStatus,
   type RemoteTimeouts,
@@ -402,6 +405,14 @@ export interface HostForm {
   auth: { kind: 'key' | 'password'; keyPath?: string; passphrase?: string; password?: string }
   description?: string
   tags?: string[]
+  /**
+   * How this host reaches the network (see `RemoteHostProxySetting`).
+   *
+   * Absent means "no opinion": a create then keeps the profile default, and an
+   * update keeps whatever the host already had — which is what makes the field
+   * backward compatible with a Host that never heard of it.
+   */
+  proxy?: RemoteHostProxySetting
 }
 
 export interface PushReportView {
@@ -693,6 +704,25 @@ export const api = {
   /** Flat patch: unknown keys are ignored, unusable values keep the stored one. */
   setViewSettings: (patch: Partial<RemoteViewSettings>) =>
     post<{ settings: RemoteViewSettings }>(REMOTE_API.viewSettings, patch).then((r) => r.settings),
+  // -- profile-wide egress default (per-host overrides live on the host rows)
+  /**
+   * The default egress every `mode: 'inherit'` host follows.
+   *
+   * Answers the DEFAULTS on a fresh profile (`direct`), and a Host too old to
+   * know the route answers 404 — callers treat that as "direct" and keep the
+   * per-host form working (see `proxySummary`).
+   */
+  getProxySettings: () =>
+    call<{ settings: RemoteProxySettingsView }>(REMOTE_API.proxySettings).then((r) => r.settings),
+  /**
+   * Patch the default egress.
+   *
+   * `target: null` clears the stored endpoint; omitting it keeps the stored one
+   * (so flipping to `direct` and back does not lose the address), and an empty
+   * password keeps the stored secret — the browser never sees it.
+   */
+  patchProxySettings: (patch: RemoteProxySettingsPatch) =>
+    post<{ settings: RemoteProxySettingsView }>(REMOTE_API.proxySettings, patch).then((r) => r.settings),
   // -- deploy
   deployStatus: (alias: string) =>
     call<{ deploy: RemoteDeployState; helpers: HelperAvailability[] }>(

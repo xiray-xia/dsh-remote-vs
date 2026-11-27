@@ -376,5 +376,22 @@ export declare class RemotePool {
      * overrides it.
      */
     private makeClient;
+    /**
+     * Open one SSH connection, through whatever route the store resolves.
+     *
+     * Three routes, and only the first is the pre-proxy code path:
+     * - `direct`: unchanged (`host` / `port` in the connect config);
+     * - `proxy`: the proxy module builds the tunnel and ssh2 rides the returned
+     *   socket (`sock`), so `host`/`port` are deliberately omitted (ssh2 ignores
+     *   them when `sock` is present);
+     * - `jump`: the tunnel is a `direct-tcpip` channel on the JUMP host's pooled
+     *   connection, held for as long as the client lives. Its close/error handlers
+     *   close that channel and give the hold back — a leak here would pin the jump
+     *   host's connection forever.
+     *
+     * Every failure is a DIAL failure, so it keeps the existing `markError`
+     * semantics; only the message is layered, so the user can tell which hop broke:
+     * `proxy auth failed: …`, `proxy refused: …`, `jump host "x" failed: …`.
+     */
     private dial;
 }

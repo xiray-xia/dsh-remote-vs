@@ -8,7 +8,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { RemotePool } from './pool.ts'
 import { RemoteFiles } from './sftp.ts'
 import type { RemoteStore } from './store.ts'
-import type { RemoteExecResult, RemoteHostSummary } from './protocol.ts'
+import type { RemoteExecResult, RemoteHostProxyView, RemoteHostSummary } from './protocol.ts'
 import { clampExecTimeout, MAX_TIMEOUT_MS } from './timeouts.ts'
 
 function text(value: string): ContentBlock[] {
@@ -26,6 +26,8 @@ export interface AgentHostRow {
   managedKey: boolean
   description?: string
   tags: string[]
+  /** Effective network route (secret-free), as the host list reports it. */
+  proxy: RemoteHostProxyView
   createdAt: number
   updatedAt: number
 }
@@ -41,9 +43,26 @@ function toAgentHostRow(host: RemoteHostSummary): AgentHostRow {
     managedKey: host.managedKey,
     ...(host.description !== undefined ? { description: host.description } : {}),
     tags: [...host.tags],
+    proxy: host.proxy,
     createdAt: host.createdAt,
     updatedAt: host.updatedAt,
   }
+}
+
+/**
+ * One-line description of a host's effective route, for the agent table.
+ *
+ * `problem` is part of the value (not a separate column): a host whose jump target
+ * was deleted is still listed, and the caller must see why it would fail.
+ */
+function proxyLabel(proxy: RemoteHostProxyView): string {
+  const target = proxy.target === undefined ? '' : ` ${proxy.target.host}:${proxy.target.port}`
+  const route = proxy.mode === 'proxy'
+    ? `proxy${target}`
+    : proxy.mode === 'jump'
+      ? `jump ${proxy.jumpVia ?? '?'}`
+      : proxy.mode
+  return proxy.problem === undefined ? route : `${route} (problem: ${proxy.problem})`
 }
 
 /**
@@ -63,10 +82,15 @@ function renderHosts(hosts: RemoteHostSummary[], query?: string): string {
   const rows = hosts.map(h => [
     h.alias, h.host, String(h.port), h.user, h.auth,
     h.auth === 'key' ? (h.keyReady ? 'key-ok' : 'key-missing') : 'password',
+    proxyLabel(h.proxy),
     h.tags.length > 0 ? h.tags.join(',') : '-',
     h.description ?? '',
   ].join(' | '))
-  return ['alias | host | port | user | auth | key | tags | description', '--- | --- | --- | --- | --- | --- | --- | ---', ...rows].join('\n')
+  return [
+    'alias | host | port | user | auth | key | proxy | tags | description',
+    '--- | --- | --- | --- | --- | --- | --- | --- | ---',
+    ...rows,
+  ].join('\n')
 }
 
 /**
@@ -139,6 +163,27 @@ export function remoteHostsTool(deps: RemoteToolsDeps): ReturnType<typeof define
                 managedKey: { type: 'boolean', required: true },
                 description: { type: 'string' },
                 tags: { type: 'array', items: { type: 'string' }, required: true },
+                proxy: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: true,
+                  properties: {
+                    mode: { type: 'string', enum: ['inherit', 'direct', 'proxy', 'jump'], required: true },
+                    target: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        kind: { type: 'string', enum: ['http', 'socks5'], required: true },
+                        host: { type: 'string', required: true },
+                        port: { type: 'integer', required: true },
+                        username: { type: 'string' },
+                        hasPassword: { type: 'boolean', required: true },
+                      },
+                    },
+                    jumpVia: { type: 'string' },
+                    problem: { type: 'string' },
+                  },
+                },
                 createdAt: { type: 'integer', required: true },
                 updatedAt: { type: 'integer', required: true },
               },

@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrapper over the /api/dsh-remote JSON API (full P0 surface).
  */
-import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostSummary, type RemoteListenPortsResult, type RemoteProcessKillResult, type RemoteProcessesResult, type RemotePluginMeta, type RemoteProbe, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteViewSettings, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
+import { type GitBranch, type GitCommit, type GitShow, type GitStatus, type HelperAvailability, type ImportReport, type RemoteChangesDiff, type RemoteChangesSummary, type RemoteConnectionStatus, type RemoteDeployState, type RemoteExecResult, type RemoteFileEntry, type RemoteForwardRequest, type RemoteForwardState, type RemoteHostProxySetting, type RemoteHostSummary, type RemoteListenPortsResult, type RemoteProcessKillResult, type RemoteProcessesResult, type RemotePluginMeta, type RemoteProbe, type RemoteProxySettingsPatch, type RemoteProxySettingsView, type RemoteRead, type RemoteRoutingStatus, type RemoteTimeouts, type RemoteViewSettings, type RemoteWorkspaceBinding, type RemoteWriteConflict, type RemoteWriteResult } from '../protocol.ts';
 export declare class RemoteApiError extends Error {
     readonly status: number;
     /**
@@ -134,6 +134,14 @@ export interface HostForm {
     };
     description?: string;
     tags?: string[];
+    /**
+     * How this host reaches the network (see `RemoteHostProxySetting`).
+     *
+     * Absent means "no opinion": a create then keeps the profile default, and an
+     * update keeps whatever the host already had — which is what makes the field
+     * backward compatible with a Host that never heard of it.
+     */
+    proxy?: RemoteHostProxySetting;
 }
 export interface PushReportView {
     alias: string;
@@ -272,6 +280,22 @@ export declare const api: {
     getViewSettings: () => Promise<RemoteViewSettings>;
     /** Flat patch: unknown keys are ignored, unusable values keep the stored one. */
     setViewSettings: (patch: Partial<RemoteViewSettings>) => Promise<RemoteViewSettings>;
+    /**
+     * The default egress every `mode: 'inherit'` host follows.
+     *
+     * Answers the DEFAULTS on a fresh profile (`direct`), and a Host too old to
+     * know the route answers 404 — callers treat that as "direct" and keep the
+     * per-host form working (see `proxySummary`).
+     */
+    getProxySettings: () => Promise<RemoteProxySettingsView>;
+    /**
+     * Patch the default egress.
+     *
+     * `target: null` clears the stored endpoint; omitting it keeps the stored one
+     * (so flipping to `direct` and back does not lose the address), and an empty
+     * password keeps the stored secret — the browser never sees it.
+     */
+    patchProxySettings: (patch: RemoteProxySettingsPatch) => Promise<RemoteProxySettingsView>;
     deployStatus: (alias: string) => Promise<{
         deploy: RemoteDeployState;
         helpers: HelperAvailability[];
